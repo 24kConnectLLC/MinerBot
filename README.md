@@ -5,39 +5,23 @@ Miner Bot 2.0 Slash Commands
 Streamline your Murder Miners Experience.... more coming soon!
 
 /admin announce [message] – Creates an announcement. Admin Only.
-
 /admin set_channels [armor-channel] [map-channel] [lobby-channel] [announcements-channel] – Sets Channels for Notifications. Admin.
-
 /armor list (Optional) [helmet-type] – Gets a list of all armor styles. Optionally, filter by helmet type.
-
 /armor lookup [armor-name] – Find the armor style you are looking for. Use /armor list to find all armor styles.
-
 /maps latest – Returns the 5 detailed results of the most Newst Maps on the Murder Miners Workshop.
-
 /maps lookup [map-url] – Returns a detailed result of the Murder Miners Workshop Map Link you provided.
-
 /more info – More Info and Credits about Miner Bot
-
 /more steam_id [profile-url] – Returns all Steam ID formats for the supplied steam profile.
-
 /murder-miners lobbies – Finds all Lobbies currently publically open in Murder Miners.
 
 Miner Bot 2.0 Permissions
 Permissions Miner Bot needs to function.
 
 Add a bot to a server – To Add Miner Bot to your server.
-
 Create Commands – Allows Miner Bot to Add Slash Commands in to your discord server.
-
 Manage access to its commands in a server – Lets Miner Bot to make changes to its Slash Commands.
-
 Administrator – Optional, to message your administrators on new updates, set channel alerts. Some Bot Features use this.
-
 For more information, please visit: https://murderminershub.com/discord-bot/
-
-Created by 24k Connect LLC (24kConnect)
-
-
 
 Running the MinerBot:
 
@@ -79,4 +63,7 @@ And include environment variables or .env file with the following credentials:
 "STEAMUSER_PASSWORD": "{Your Steam Password}",
 "STEAM_QRCODE_AUTH": "true",
 "STEAMUSER_REMEMBERME": "true",
+
+
+Created by 24k Connect LLC (24kConnect)
 "STEAMAPP_ID": "274900"
