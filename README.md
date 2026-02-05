@@ -37,6 +37,18 @@ For more information, please visit: https://murderminershub.com/discord-bot/
 
 Created by 24k Connect LLC (24kConnect)
 
+
+
+Running the MinerBot:
+
+You can run this in Docker or as a normal application.
+
+Try to use the Latest Version of Visual Studio such as Visual Studio 2026.
+
+Make sure to have all of the credentials listed bellow.
+
+If not already, set MinerBot 2.0 project as the Startup Project in Visual Studio.
+
 You need to create a appsettings.json file with the following code and credentials filled in:
 
 {
