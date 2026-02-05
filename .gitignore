@@ -1,0 +1,34 @@
+# Ignore appsettings.json (contains secrets)
+appsettings.json
+appsettings.Development.json
+appsettings.*.json
+
+# Build results
+bin/
+obj/
+out/
+
+# User-specific files
+*.user
+*.userosscache
+*.suo
+
+# Visual Studio
+.vs/
+*.psess
+*.vsp
+*.pidb
+
+# NuGet packages
+*.nupkg
+**/packages/*
+!**/packages/build/
+
+# Logs
+*.log
+
+# Rider / JetBrains
+.idea/
+
+# Auto-generated files
+Generated/
