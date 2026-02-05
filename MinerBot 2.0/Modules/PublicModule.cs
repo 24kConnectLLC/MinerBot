@@ -198,7 +198,7 @@ public class PublicModule : ModuleBase<SocketCommandContext>
                 },
                 new EmbedFieldBuilder {
                     Name = "__Check out my Github:__",
-                    Value = "Coming Soon!"
+                    Value = "https://github.com/24kConnectLLC/MinerBot"
                 },
                 new EmbedFieldBuilder {
                     Name = "__Visit our Website:__",
