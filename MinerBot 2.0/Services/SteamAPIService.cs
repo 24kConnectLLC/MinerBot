@@ -52,6 +52,11 @@ namespace MinerBot_2._0.Services
 
             if (shouldShowPrevUpdate)
             {
+                var eggHunt = lobbies.Where(result => result.VersionNumber == 39);                
+                var update0 = lobbies.Where(result => result.VersionNumber == 0);
+                var update19 = lobbies.Where(result => result.VersionNumber == 53);
+                var update29 = lobbies.Where(result => result.VersionNumber == 61);
+                var update35 = lobbies.Where(result => result.VersionNumber == 80);
                 var update39 = lobbies.Where(result => result.VersionNumber < 90 && result.VersionNumber >= 87);
                 var update40 = lobbies.Where(result => result.VersionNumber < 93 && result.VersionNumber >= 90);
 
@@ -63,8 +68,29 @@ namespace MinerBot_2._0.Services
                 if (update40.Count() > 0)
                     tempString += formatLobbyRows(update40, "Update 40");
 
+                // update39 branch
                 if (update39.Count() > 0)
                     tempString += formatLobbyRows(update39, "Update 39");
+
+                // classic_xboxone branch
+                if (update35.Count() > 0)
+                    tempString += formatLobbyRows(update35, "Update 35 (Xbox One Branch)");
+
+                // update29 branch, only exists for legacy speedrun.com leaderboard
+                if (update29.Count() > 0)
+                    tempString += formatLobbyRows(update29, "Update 29");
+
+                // classic_xbox360 branch
+                if (update19.Count() > 0)
+                    tempString += formatLobbyRows(update19, "Update 19 (Xbox 360 Branch)");
+
+                // anniversary_atest2 branch
+                if (update0.Count() > 0)
+                    tempString += formatLobbyRows(update0, "2012 Alpha");
+
+                // egghunt branch
+                if (eggHunt.Count() > 0)
+                    tempString += formatLobbyRows(update19, "Legacy Egg Hunt Branch");
 
                 if (!string.IsNullOrEmpty(tempString))
                     finalString = tempString;
