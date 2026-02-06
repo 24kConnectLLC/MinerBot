@@ -381,9 +381,6 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
         MurderGames,
         ZMapName0,
         ZMapName1,
-        ZMapName2,
-        ZMapName3,
-        ZMapName4,
         ZVersion,
         MapMaking,
         Official,
@@ -392,12 +389,12 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
         NetSettingsBoolsExtended,
         NumActivePlayers,
         ZClientHash,
-        MurderMelee,
-        EggHunt,
-        OneInTheChamber,
-        CapturePoint,
-        MurderMining,
-        MurderBall
+        ZMapName2,
+        ZMapName3,
+        ZMapName4,
+        ZMapName5,
+        ZMapName6,
+        ZMapName7
     }
 
     public enum NetworkSessionPropertiesGameMode
@@ -427,6 +424,18 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
 
         public static bool AllowGuests = true;
 
+        public static List<PropertyUsage> ZMapNamePropertiesList = new List<PropertyUsage>()
+        {
+            PropertyUsage.ZMapName0,
+            PropertyUsage.ZMapName1,
+            PropertyUsage.ZMapName2,
+            PropertyUsage.ZMapName3,
+            PropertyUsage.ZMapName4,
+            PropertyUsage.ZMapName5,
+            PropertyUsage.ZMapName6,
+            PropertyUsage.ZMapName7
+        };
+
         public static void SetDefaultProperties(this NetworkSessionProperties properties)
         {
             properties.SetProperty(PropertyUsage.CTF, null);
@@ -436,12 +445,6 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
             properties.SetProperty(PropertyUsage.Team, null);
             properties.SetProperty(PropertyUsage.Zombies, null);
             properties.SetProperty(PropertyUsage.Gamenight, null);
-            properties.SetProperty(PropertyUsage.MurderMelee, null);
-            properties.SetProperty(PropertyUsage.EggHunt, null);
-            properties.SetProperty(PropertyUsage.OneInTheChamber, null);
-            properties.SetProperty(PropertyUsage.CapturePoint, null);
-            properties.SetProperty(PropertyUsage.MurderMining, null);
-            properties.SetProperty(PropertyUsage.MurderBall, null);
 
             properties.SetVersion(GameVersionNumber);
         }
@@ -674,9 +677,6 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
                 indices[i] = (byte)idx;
             }
 
-            // Base property index for the name block
-            int baseIndex = (int)PropertyUsage.ZMapName0;
-
             // Pack 4 bytes into each uint (little-endian)
             for (int block = 0; block < MAP_NAME_UINT_SLOTS; block++)
             {
@@ -688,18 +688,20 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
                     ((uint)(indices[o + 2]) << 16) |
                     ((uint)(indices[o + 3]) << 24);
 
-                properties[baseIndex + block] = packed;
+                int index = (int)ZMapNamePropertiesList[block];
+
+                properties[index] = packed;
             }
         }
 
         public static string GetMapName(this NetworkSessionProperties properties)
         {
-            int baseIndex = (int)PropertyUsage.ZMapName0;
-
             // Ensure all 5 slots exist
             for (int block = 0; block < MAP_NAME_UINT_SLOTS; block++)
             {
-                if (!properties[baseIndex + block].HasValue)
+                int index = (int)ZMapNamePropertiesList[block];
+
+                if (!properties[index].HasValue)
                     return "NONAME";
             }
 
@@ -707,7 +709,9 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
 
             for (int block = 0; block < MAP_NAME_UINT_SLOTS; block++)
             {
-                uint packed = properties[baseIndex + block].Value;
+                int index = (int)ZMapNamePropertiesList[block];
+
+                uint packed = properties[index].Value;
 
                 byte b0 = (byte)(packed & 0xFF);
                 byte b1 = (byte)((packed >> 8) & 0xFF);

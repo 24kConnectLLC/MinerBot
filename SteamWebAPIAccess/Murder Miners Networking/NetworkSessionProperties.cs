@@ -9,7 +9,7 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
 {
     public class NetworkSessionProperties : IList<uint?>, ICollection<uint?>, IEnumerable<uint?>, IEnumerable
     {
-        private const int PropertyCount = 30;
+        private const int PropertyCount = 21;
         private uint?[] data = new uint?[PropertyCount];
 
         public uint? this[int index]
