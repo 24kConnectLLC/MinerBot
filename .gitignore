@@ -1,34 +1,43 @@
-# Ignore appsettings.json (contains secrets)
-appsettings.json
-appsettings.Development.json
-appsettings.*.json
+# =============================
+# .NET / C#
+# =============================
 
-# Build results
+## Build results
 bin/
 obj/
 out/
 
-# User-specific files
-*.user
-*.userosscache
-*.suo
-
-# Visual Studio
+## Visual Studio
 .vs/
-*.psess
-*.vsp
-*.pidb
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
 
-# NuGet packages
-*.nupkg
-**/packages/*
-!**/packages/build/
+## Rider / JetBrains
+.idea/
+*.sln.iml
+
+## OS files
+.DS_Store
+Thumbs.db
+
+# =============================
+# Secrets / local configuration
+# =============================
+
+# Never commit secrets
+appsettings.json
+appsettings.*.json
+!appsettings.example.json
+
+.env
+.env.*
+!/.env.example
+
+# Certificates / keys
+*.pfx
+*.snk
 
 # Logs
 *.log
-
-# Rider / JetBrains
-.idea/
-
-# Auto-generated files
-Generated/
