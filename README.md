@@ -215,17 +215,15 @@ Contributions are welcome!
 
 ## 📄 License
 
-**Recommended license (noncommercial):** **PolyForm Noncommercial 1.0.0**
+**License (noncommercial):** **PolyForm Noncommercial 1.0.0**
 
 - ✅ Allows use, modification, and distribution for **noncommercial purposes**.
 - ❌ Does **not** allow commercial use.
-
-If you want to allow commercial use later, consider offering a separate commercial license.
 
 ---
 
 ## 👤 Author / Credits
 
-Created by **24k Connect LLC (24kConnect)**
+Created by **24k Connect LLC (24kConnect)** [https://24kconnect.com]
 
 For more information: https://murderminershub.com/discord-bot/
