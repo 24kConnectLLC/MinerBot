@@ -84,15 +84,48 @@ public class InteractionHandler
 
     private async Task HandleInteractionExecute(ICommandInfo commandInfo, IInteractionContext context, IResult result)
     {
-        if (!result.IsSuccess)
-            switch (result.Error)
-            {
-                case InteractionCommandError.UnmetPrecondition:
-                    // implement
-                    break;
-                default:
-                    break;
-            }
+        if (result.IsSuccess)
+            return;
+
+        // A throw from here would fire InteractionExecuted again, so nothing may leave this handler.
+        try
+        {
+            // commandInfo is null when nothing matched the interaction.
+            Console.WriteLine($"[Interaction/Warning] {commandInfo?.Name ?? "Unknown command"} failed for {context.User}: {result.Error}: {result.ErrorReason}");
+
+            // Autocomplete can't show a message, the user just sees no suggestions.
+            if (context.Interaction is IAutocompleteInteraction)
+                return;
+
+            // Once a command has deferred, a followup is the only reply that still works.
+            // After a public defer on a slash command, Discord keeps that first followup public.
+            if (context.Interaction.HasResponded)
+                await context.Interaction.FollowupAsync(GetFailureReply(result), ephemeral: true, allowedMentions: AllowedMentions.None);
+            else
+                await context.Interaction.RespondAsync(GetFailureReply(result), ephemeral: true, allowedMentions: AllowedMentions.None);
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"[Interaction/Error] Couldn't reply to a failed interaction: {e}");
+        }
+    }
+
+    private static string GetFailureReply(IResult result)
+    {
+        switch (result.Error)
+        {
+            case InteractionCommandError.UnmetPrecondition:
+                // Written by the preconditions, and a cooldown needs to show its time.
+                return result.ErrorReason;
+            case InteractionCommandError.UnknownCommand:
+                return "That command or button isn't available any more.";
+            case InteractionCommandError.BadArgs:
+            case InteractionCommandError.ConvertFailed:
+            case InteractionCommandError.ParseFailed:
+                return "That input didn't work. Please check it and try again.";
+            default:
+                return "Something went wrong with that command. Please try again later.";
+        }
     }
 
     //private async Task HandleButtonExecute(SocketMessageComponent interaction)

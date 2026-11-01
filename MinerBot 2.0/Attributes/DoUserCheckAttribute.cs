@@ -26,7 +26,7 @@ internal class DoUserCheck : PreconditionAttribute
             return (context.User.Id == id)
                 // If the user ID
                 ? Task.FromResult(PreconditionResult.FromSuccess())
-                : Task.FromResult(PreconditionResult.FromError("User ID does not match component ID!"));
+                : Task.FromResult(PreconditionResult.FromError("Only the person who ran this command can use these buttons."));
 
         return Task.FromResult(PreconditionResult.FromError("Parse cannot be done if no userID exists."));
     }
