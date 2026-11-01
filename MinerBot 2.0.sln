@@ -9,6 +9,8 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "DataAccessLibrary", "DataAc
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "SteamWebAPIAccess", "SteamWebAPIAccess\SteamWebAPIAccess.csproj", "{6342B094-1B42-47F4-901B-A0607CD2C4A7}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SteamWebAPIAccess.Tests", "SteamWebAPIAccess.Tests\SteamWebAPIAccess.Tests.csproj", "{829A12E8-B7BD-4407-915D-7A4B6FEC776D}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -27,6 +29,10 @@ Global
 		{6342B094-1B42-47F4-901B-A0607CD2C4A7}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{6342B094-1B42-47F4-901B-A0607CD2C4A7}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{6342B094-1B42-47F4-901B-A0607CD2C4A7}.Release|Any CPU.Build.0 = Release|Any CPU
+		{829A12E8-B7BD-4407-915D-7A4B6FEC776D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{829A12E8-B7BD-4407-915D-7A4B6FEC776D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{829A12E8-B7BD-4407-915D-7A4B6FEC776D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{829A12E8-B7BD-4407-915D-7A4B6FEC776D}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
