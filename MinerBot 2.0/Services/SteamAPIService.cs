@@ -1,4 +1,5 @@
 ﻿using Discord;
+using Microsoft.Extensions.Caching.Memory;
 using MinerBot_2._0.Builders;
 using Mysqlx.Crud;
 using Steam.Models;
@@ -19,15 +20,18 @@ namespace MinerBot_2._0.Services
     public class SteamAPIService
     {
         private readonly IGetData GetData;
+        private readonly IMemoryCache _cache;
+        private static readonly TimeSpan LatestWorkshopItemsCacheTime = TimeSpan.FromSeconds(60);
         public string WorkshopItemDetailsURI { get; } = "https://steamcommunity.com/workshop/filedetails/?id=";
 
         public int ItemsPerPage = 1;
 
         public bool shouldShowPrevUpdate = true;
 
-        public SteamAPIService(IGetData data)
+        public SteamAPIService(IGetData data, IMemoryCache cache)
         {
             GetData = data;
+            _cache = cache;
         }
 
         public void Initialize()
@@ -188,7 +192,19 @@ namespace MinerBot_2._0.Services
 
         public async Task<List<PublishedFileDetailsModel>> GetLatestWorkshopItems(int totalMaps = 5)
         {
-            return await GetData.GetLatestWorkshopItems(totalMaps);
+            string key = $"LatestWorkshopItems{totalMaps}";
+
+            var items = _cache.Get<List<PublishedFileDetailsModel>>(key);
+            if (items != null)
+                return items;
+
+            items = await GetData.GetLatestWorkshopItems(totalMaps);
+
+            // GetData returns an empty list when Steam fails, so the next request should try again
+            if (items.Count > 0)
+                _cache.Set(key, items, LatestWorkshopItemsCacheTime);
+
+            return items;
         }
 
         public async Task<string> JoinLobby(ulong lobbyID)

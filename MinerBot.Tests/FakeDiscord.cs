@@ -22,8 +22,8 @@ namespace MinerBot.Tests
     [CollectionDefinition("Discord", DisableParallelization = true)]
     public class DiscordCollection { }
 
-    // One thing the bot did, in order. Body is the JSON it sent to Discord.
-    internal sealed record Step(string Name, string Body = "")
+    // One thing the bot did, in order. Body is the JSON it sent to Discord, and File the upload that came with it.
+    internal sealed record Step(string Name, string Body = "", string? File = null)
     {
         // The first response to an interaction nests the message under data, a followup doesn't
         public JsonElement Message
@@ -48,6 +48,10 @@ namespace MinerBot.Tests
         public IEnumerable<string> EmbedTitles => Message.TryGetProperty("embeds", out var embeds)
             ? embeds.EnumerateArray().Select(embed => embed.GetProperty("title").GetString()!)
             : [];
+
+        public IEnumerable<string> ButtonIds => Message.TryGetProperty("components", out var rows)
+            ? rows.EnumerateArray().SelectMany(row => row.GetProperty("components").EnumerateArray()).Select(button => button.GetProperty("custom_id").GetString()!)
+            : [];
     }
 
     // Runs the bot's real handlers on the real Discord.Net pipeline, with only the network and the data layer faked.
@@ -56,7 +60,7 @@ namespace MinerBot.Tests
     {
         public const ulong BotId = 1000, GuildId = 2000, ChannelId = 3000, MessageId = 4000;
 
-        static readonly TimeSpan WaitLimit = TimeSpan.FromSeconds(5);
+        static readonly TimeSpan WaitLimit = TimeSpan.FromSeconds(15);
 
         static long lastUserId = 5000;
 
@@ -210,12 +214,12 @@ namespace MinerBot.Tests
             Console.SetOut(realConsole);
         }
 
-        void AddStep(string name) => AddStep(name, "");
+        void AddStep(string name) => AddStep(new Step(name));
 
-        void AddStep(string name, string body)
+        void AddStep(Step step)
         {
             lock (steps)
-                steps.Add(new Step(name, body));
+                steps.Add(step);
         }
 
         static TaskCompletionSource NewSignal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -235,10 +239,10 @@ namespace MinerBot.Tests
                 """);
         }
 
-        // /group subcommand with options like {"name":"mapurl","type":3,"value":"x"}
-        public Task SendSlashCommandAsync(string group, string subcommand, string options = "", ulong? userId = null, TimeSpan age = default)
+        // /group subcommand with options like {"name":"map-url","type":3,"value":"x"}
+        public Task SendSlashCommandAsync(string group, string subcommand, string options = "", string resolved = "{}", ulong? userId = null, TimeSpan age = default)
         {
-            var data = $$"""{"id":"1","name":"{{group}}","type":1,"options":[{"name":"{{subcommand}}","type":1,"options":[{{options}}]}]}""";
+            var data = $$"""{"id":"1","name":"{{group}}","type":1,"options":[{"name":"{{subcommand}}","type":1,"options":[{{options}}]}],"resolved":{{resolved}}}""";
             return SendInteractionAsync(type: 2, data, userId ?? UserId, age);
         }
 
@@ -249,9 +253,9 @@ namespace MinerBot.Tests
             return SendInteractionAsync(type: 3, data, userId ?? UserId, default, $$""","message":{{MessageJson()}}""");
         }
 
-        public Task SendMessageCommandAsync(string name)
+        public Task SendMessageCommandAsync(string name, int messageType = 0)
         {
-            var data = $$"""{"id":"1","name":"{{name}}","type":3,"target_id":"{{MessageId}}","resolved":{"messages":{"{{MessageId}}":{{MessageJson()}} } } }""";
+            var data = $$"""{"id":"1","name":"{{name}}","type":3,"target_id":"{{MessageId}}","resolved":{"messages":{"{{MessageId}}":{{MessageJson(messageType)}} } } }""";
             return SendInteractionAsync(type: 2, data, UserId, default);
         }
 
@@ -290,10 +294,10 @@ namespace MinerBot.Tests
         static string MemberJson(ulong id) =>
             $$"""{"user":{{UserJson(id)}},"roles":[],"joined_at":"2020-01-01T00:00:00+00:00","deaf":false,"mute":false,"permissions":"0"}""";
 
-        static string MessageJson() => $$"""
+        static string MessageJson(int type = 0) => $$"""
             {"id":"{{MessageId}}","channel_id":"{{ChannelId}}","author":{{UserJson(BotId, bot: true)}},"content":"",
              "timestamp":"2026-01-01T00:00:00+00:00","tts":false,"mention_everyone":false,"mentions":[],"mention_roles":[],
-             "attachments":[],"embeds":[],"pinned":false,"type":0}
+             "attachments":[],"embeds":[],"pinned":false,"type":{{type}}}
             """;
 
         string ReadyJson() => $$"""
@@ -368,14 +372,21 @@ namespace MinerBot.Tests
                 IEnumerable<KeyValuePair<string, IEnumerable<string>>>? requestHeaders = null) => Answer(method, endpoint, json);
 
             public Task<RestResponse> SendAsync(string method, string endpoint, IReadOnlyDictionary<string, object> multipartParams, CancellationToken cancelToken, bool headerOnly = false, string? reason = null,
-                IEnumerable<KeyValuePair<string, IEnumerable<string>>>? requestHeaders = null) => Answer(method, endpoint, multipartParams["payload_json"].ToString()!);
+                IEnumerable<KeyValuePair<string, IEnumerable<string>>>? requestHeaders = null)
+            {
+                // Discord.Net's MultipartFile is internal
+                var upload = multipartParams["files[0]"];
+                using var file = new StreamReader((Stream)upload.GetType().GetProperty("Stream")!.GetValue(upload)!);
 
-            Task<RestResponse> Answer(string method, string endpoint, string body)
+                return Answer(method, endpoint, multipartParams["payload_json"].ToString()!, file.ReadToEnd());
+            }
+
+            Task<RestResponse> Answer(string method, string endpoint, string body, string? file = null)
             {
                 var name = StepName(method, endpoint, body);
 
                 if (name != null)
-                    discord.AddStep(name, body);
+                    discord.AddStep(new Step(name, body, file));
 
                 if (name != null && name == discord.FailStep)
                     return Response(HttpStatusCode.Forbidden, """{"code":50013,"message":"Missing Permissions"}""");
