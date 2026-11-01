@@ -17,18 +17,22 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
         //    Text = "Mode: " + t;
         //}
 
-        public static string GetGameModeText(ulong netSettingsBools, int maxChars = 999999, uint version = 90)
+        public static string GetGameModeText(ulong netSettingsBools, int bonusBools, int maxChars = 999999, uint version = 105)
         {
-            string t = GetGameModeText(netSettingsBools, false, version);
+            string t = GetGameModeText(netSettingsBools, bonusBools, false, version);
 
             return t.Length > maxChars ?
-                GetGameModeText(netSettingsBools, true, version) :
+                GetGameModeText(netSettingsBools, bonusBools, true, version) :
                 t;
         }
 
-        public static string GetGameModeText(ulong netSettingsBools, bool abbreviate, uint version)
+        public static string GetGameModeText(ulong netSettingsBools, int bonusBools, bool abbreviate, uint version)
         {
             bool a = abbreviate;
+
+            bool isMission = (bonusBools & (1 << 0)) != 0;
+            bool isInvasion = (bonusBools & (1 << 1)) != 0;
+            bool isBTS = (bonusBools & (1 << 2)) != 0;
 
             string t = "";
 
@@ -49,8 +53,16 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
             if (isOn(NetSettingType.boolIsFreeBuild))
                 t += a ? "" : "Free-Build ";
 
-            if (isOn(NetSettingType.boolIsSpeedRunTimer))
+            if (isMission)
+                t += "Mission ";
+            else if (isOn(NetSettingType.boolIsSpeedRunTimer))
                 t += a ? "" : "Speedrun ";
+
+            if (isInvasion)
+                t += "Invasion ";
+
+            if (isBTS)
+                t += a ? "BTS " : "Build to Survive ";
 
             if (isOn(NetSettingType.boolIsZombienaut))
                 t += "Zombienaut ";
@@ -74,7 +86,7 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
                 t += a ? "EggHunt " : "Egg Hunt ";
 
             if (isOn(NetSettingType.boolIsOneInTheChamber))
-                t += a ? "OneShot " : "One In The Chamber ";
+                t += a ? "OneShot " : "One Shot, One Murder ";
 
             if (isOn(NetSettingType.boolIsCapturePoint))
                 t += a ? "KOTH " : "King Of The Hill ";
@@ -119,26 +131,27 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
 
             bool isOn(NetSettingType nst)
             {
-                if (version < 90)
-                {
-                    string netsettingName = nst.ToString();
+                if (NetPropertiesFunctions.UsesLatestLayout(version))
+                    return GameSettings.GetBool(netSettingsBools, (int)nst - 1);
 
-                    // If there is a rename in the netsetting then we compensate over here
-                    if (nst == NetSettingType.boolIsZombienaut)
-                        netsettingName = NetSettingType1.boolIsMurdernaut.ToString();
+                if (version >= 93)
+                    return isOnInOlderBuild<NetSettingType3>(nst.ToString());
 
-                    try
-                    {
-                        bool netsetBoolVal = GameSettings.GetBool(netSettingsBools, (int)Enum.Parse<NetSettingType1>(nst.ToString()) - 1);
-                        return netsetBoolVal;
-                    }
-                    catch 
-                    {
-                        Console.WriteLine($"Could not find net setting in previous version: {nst.ToString()} .\nPlease make sure to update your netsettings in GameModesMenuEntry.cs in Minerbot or in the NetSettings.cs game code.");
-                        return false;
-                    }
-                }
-                return GameSettings.GetBool(netSettingsBools, (int)nst - 1);
+                if (version >= 90)
+                    return isOnInOlderBuild<NetSettingType2>(nst.ToString());
+
+                // If there is a rename in the netsetting then we compensate over here
+                if (nst == NetSettingType.boolIsZombienaut)
+                    return isOnInOlderBuild<NetSettingType1>(NetSettingType1.boolIsMurdernaut.ToString());
+
+                return isOnInOlderBuild<NetSettingType1>(nst.ToString());
+            }
+
+            // A netsetting that older build doesn't have yet is simply off
+            bool isOnInOlderBuild<TNetSetting>(string netsettingName) where TNetSetting : struct, Enum
+            {
+                return Enum.TryParse(netsettingName, out TNetSetting olderNst) &&
+                    GameSettings.GetBool(netSettingsBools, Convert.ToInt32(olderNst) - 1);
             }
 
             bool isMurderMatch()
@@ -157,7 +170,9 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
                     !isOn(NetSettingType.boolIsOneInTheChamber) &&
                     !isOn(NetSettingType.boolIsCapturePoint) &&
                     !isOn(NetSettingType.boolIsMurderMining) &&
-                    !isOn(NetSettingType.boolIsMurderBall);
+                    !isOn(NetSettingType.boolIsMurderBall) &&
+                    !isMission &&
+                    !isInvasion;
             }
 
             bool isFreePlay() // no game end conditions

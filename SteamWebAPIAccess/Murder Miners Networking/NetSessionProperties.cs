@@ -385,6 +385,9 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
         MapMaking,
         Official,
         Gamenight,
+        Mission,
+        Invasion,
+        BTS,
         NetSettingsBools,
         NetSettingsBoolsExtended,
         NumActivePlayers,
@@ -407,11 +410,29 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
 
     public static class NetPropertiesFunctions
     {
-        public static byte GameVersionNumber = 90;
+        public static byte GameVersionNumber = 105;
         public static byte GameVersionNumberOld = 87;
+        public const uint INVALID_GAME_VERSION = 42069;
+
+        // Published builds from before version 104 have no Mission, Invasion or BTS properties,
+        // so they keep every property after BTS 3 indices lower.
+        // Version 200 is not newer, it was a typo on an Update 41 branch that still uses the older layout.
+        public const uint LATEST_LAYOUT_VERSION = 104;
+        public const uint TYPO_GAME_VERSION = 200;
+        public const int MODE_PROPERTIES_COUNT = 3;
+
+        public static bool UsesLatestLayout(uint version)
+        {
+            return version >= LATEST_LAYOUT_VERSION && version != TYPO_GAME_VERSION;
+        }
 
         public const int MAP_NAME_LEN = 32;       // max characters
         public const int MAP_NAME_UINT_SLOTS = 8; // 5 uints = 20 bytes
+
+        // Versions before 101 pack a short upper case name into ZMapName0 and ZMapName1 only.
+        public const uint MAP_NAME_SLOTS_VERSION = 101;
+        public const int LEGACY_MAP_NAME_LEN = 12;
+        public static readonly char[] LegacyValidCharacters = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ ".ToCharArray();
 
         public static NetworkSessionProperties CreateDefaultProperties()
         {
@@ -445,6 +466,9 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
             properties.SetProperty(PropertyUsage.Team, null);
             properties.SetProperty(PropertyUsage.Zombies, null);
             properties.SetProperty(PropertyUsage.Gamenight, null);
+            properties.SetProperty(PropertyUsage.Mission, null);
+            properties.SetProperty(PropertyUsage.Invasion, null);
+            properties.SetProperty(PropertyUsage.BTS, null);
 
             properties.SetVersion(GameVersionNumber);
         }
@@ -554,13 +578,36 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
             }
             else
             {
-                return properties[(int)prop] == 1;
+                return properties[getPropertyIndex(properties, prop)] == 1;
             }
         }
 
         public static uint GetIntProperty(this NetworkSessionProperties properties, PropertyUsage prop)
         {
-            return properties[(int)prop] ?? 0;
+            return properties[getPropertyIndex(properties, prop)] ?? 0;
+        }
+
+        static int getPropertyIndex(NetworkSessionProperties properties, PropertyUsage prop)
+        {
+            if (prop > PropertyUsage.BTS && !UsesLatestLayout(properties.GetVersion()))
+                return (int)prop - MODE_PROPERTIES_COUNT;
+
+            return (int)prop;
+        }
+
+        // Game modes that have their own property instead of a bit in NetSettingsBools
+        public static int GetBonusBools(this NetworkSessionProperties properties)
+        {
+            if (!UsesLatestLayout(properties.GetVersion()))
+                return 0;
+
+            int bonusBools = 0;
+
+            bonusBools |= (properties.GetProperty(PropertyUsage.Mission) ? 1 : 0) << 0;
+            bonusBools |= (properties.GetProperty(PropertyUsage.Invasion) ? 1 : 0) << 1;
+            bonusBools |= (properties.GetProperty(PropertyUsage.BTS) ? 1 : 0) << 2;
+
+            return bonusBools;
         }
 
         static void encode(ref int encoded, int valueRange, int value)
@@ -591,7 +638,7 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
 
         public static uint GetVersion(this NetworkSessionProperties properties)
         {
-            return properties[(int)PropertyUsage.ZVersion].Value;
+            return properties[(int)PropertyUsage.ZVersion] ?? INVALID_GAME_VERSION;
         }
 
         public static NetworkSessionPropertiesGameMode GetGameMode(this NetworkSessionProperties properties)
@@ -696,10 +743,13 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
 
         public static string GetMapName(this NetworkSessionProperties properties)
         {
+            if (properties.GetVersion() < MAP_NAME_SLOTS_VERSION)
+                return getLegacyMapName(properties);
+
             // Ensure all 5 slots exist
             for (int block = 0; block < MAP_NAME_UINT_SLOTS; block++)
             {
-                int index = (int)ZMapNamePropertiesList[block];
+                int index = getPropertyIndex(properties, ZMapNamePropertiesList[block]);
 
                 if (!properties[index].HasValue)
                     return "NONAME";
@@ -709,7 +759,7 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
 
             for (int block = 0; block < MAP_NAME_UINT_SLOTS; block++)
             {
-                int index = (int)ZMapNamePropertiesList[block];
+                int index = getPropertyIndex(properties, ZMapNamePropertiesList[block]);
 
                 uint packed = properties[index].Value;
 
@@ -723,6 +773,24 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
                 sb.Append(SafeCharFromIndex(b2));
                 sb.Append(SafeCharFromIndex(b3));
             }
+
+            return sb.ToString();
+        }
+
+        static string getLegacyMapName(NetworkSessionProperties properties)
+        {
+            uint? low = properties[(int)PropertyUsage.ZMapName0];
+            uint? high = properties[(int)PropertyUsage.ZMapName1];
+
+            if (!low.HasValue || !high.HasValue)
+                return "NONAME";
+
+            ulong encoded = ((ulong)high.Value << 32) | low.Value;
+
+            var sb = new System.Text.StringBuilder(LEGACY_MAP_NAME_LEN);
+
+            for (int i = 0; i < LEGACY_MAP_NAME_LEN; i++)
+                sb.Append(LegacyValidCharacters[ArithmeticDecode(ref encoded, (ulong)LegacyValidCharacters.Length)]);
 
             return sb.ToString();
         }

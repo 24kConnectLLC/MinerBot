@@ -98,6 +98,10 @@ namespace SteamWebAPIAccess
 
                 uint versionNumber = spResult.GetVersion();
 
+                // The game treats a lobby without a version as invalid, it's not the newest build
+                if (versionNumber == NetPropertiesFunctions.INVALID_GAME_VERSION)
+                    continue;
+
                 lobbyList.Add(new LobbyInfo()
                 {
                     HostName = hostName,
@@ -109,7 +113,7 @@ namespace SteamWebAPIAccess
                     LobbyId = lobby.SteamID.ConvertToUInt64(),
                     JoinURL = $"https://murderminershub.com/join-lobby?lobbyId={lobby.SteamID.ConvertToUInt64()}&ownerId={GetSteamID3To64(uint.Parse(ownerSteamID))}", // ?redirect=steam://joinlobby/{_steamAPI.appID}/{lobby.SteamID.ConvertToUInt64()}/{GetSteamID3To64(uint.Parse(ownerSteamID))}"
                     Distance = (float)lobby.Distance,
-                    Modes = GameModesMenuEntry.GetGameModeText(props, version:versionNumber).Trim(),
+                    Modes = GameModesMenuEntry.GetGameModeText(props, spResult.GetBonusBools(), version:versionNumber).Trim(),
                     VersionNumber = versionNumber
                 });
 
