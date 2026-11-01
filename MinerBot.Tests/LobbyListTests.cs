@@ -85,7 +85,8 @@ namespace MinerBot.Tests
         [Fact]
         public async Task OneHiddenLobbyIsCalledALobby()
         {
-            for (int count = 1; ; count++)
+            // 100 lobbies never fit, so without an ending this fails instead of running forever
+            for (int count = 1; count <= 100; count++)
             {
                 steam.Lobbies = Lobbies(1, count);
 
@@ -97,6 +98,8 @@ namespace MinerBot.Tests
                 Assert.Contains("...and 1 more lobby\n", description);
                 return;
             }
+
+            Assert.Fail("No lobby was ever hidden");
         }
 
         [Fact]
