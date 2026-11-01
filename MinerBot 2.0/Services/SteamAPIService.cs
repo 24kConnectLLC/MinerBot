@@ -264,7 +264,7 @@ namespace MinerBot_2._0.Services
 
         // Need to embeds seperate into a different class. _SteamAPIService.Embeds.GetMapEmbed()
 
-        public async Task<Embed[]> GetLatestMapsEmbeds(List<Steam.Models.PublishedFileDetailsModel> latestMaps = null, int totalMaps = 0)
+        public async Task<Embed[]> GetLatestMapsEmbeds(List<Steam.Models.PublishedFileDetailsModel>? latestMaps = null, int totalMaps = 0)
         {
             if (latestMaps == null)
                 latestMaps = await GetLatestWorkshopItems(totalMaps);
@@ -275,13 +275,12 @@ namespace MinerBot_2._0.Services
             return embeds.ToArray();
         }
 
-        public async Task SendLatestMapsEmbeds(IMessageChannel channel, string text, List<Steam.Models.PublishedFileDetailsModel> latestMaps = null, int totalMaps = 0)
+        public async Task<List<(string? Text, Embed[] Embeds)>> GetLatestMapsMessages(string heading, List<Steam.Models.PublishedFileDetailsModel>? latestMaps = null, int totalMaps = 0)
         {
-            foreach (var embeds in GroupEmbedsByLength(await GetLatestMapsEmbeds(latestMaps, totalMaps)))
-            {
-                await channel.SendMessageAsync(text: text, embeds: embeds);
-                text = null; // Only the first message has the heading
-            }
+            var groups = GroupEmbedsByLength(await GetLatestMapsEmbeds(latestMaps, totalMaps));
+
+            // Only the first message has the heading
+            return groups.Select((embeds, index) => (index == 0 ? heading : null, embeds)).ToList();
         }
 
         // Discord limits the length of all the embeds of a message together, so a long list goes out as several messages

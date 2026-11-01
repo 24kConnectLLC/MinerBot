@@ -7,7 +7,7 @@ namespace MinerBot_2._0.Jobs
     // JobHandler makes a new GuildNotificationJob for every run, so what it has seen is kept here
     public class NotificationState
     {
-        // An hour of runs, and without a limit a batch that can never be sent would hold up its source for good
+        // An hour of runs, and without a limit an item that can never be sent would hold up its source for good
         public const int MaxFailedRuns = 12;
 
         public SeenItems<ArmorStyle> Armor { get; } = new("armor styles", armor => (ulong)armor.ID);
@@ -21,7 +21,7 @@ namespace MinerBot_2._0.Jobs
     {
         private readonly HashSet<ulong> seenIDs = new();
         private bool hasBaseline;
-        private int failedRuns;
+        private Dictionary<ulong, int> failedRuns = new();
 
         public int Count => seenIDs.Count;
 
@@ -37,22 +37,24 @@ namespace MinerBot_2._0.Jobs
             return items.Where(item => !seenIDs.Contains(getID(item))).DistinctBy(getID).ToList();
         }
 
-        // For after the guild loop. A batch that reached no guild isn't recorded, so the next run finds it again.
-        public void Commit(List<T>? newItems, bool delivered)
+        // For after the guild loop, with how many of the new items reached a guild. The rest aren't recorded, so the next
+        // run finds them again. Runs are counted per item, so an item that has only just appeared isn't dropped with an older one.
+        public void Commit(List<T>? newItems, int delivered)
         {
             if (newItems == null)
                 return;
 
-            if (newItems.Count > 0 && !delivered)
+            seenIDs.UnionWith(newItems.Take(delivered).Select(getID));
+
+            failedRuns = newItems.Skip(delivered).Select(getID).ToDictionary(id => id, id => failedRuns.GetValueOrDefault(id) + 1);
+
+            var droppedIDs = failedRuns.Where(item => item.Value >= NotificationState.MaxFailedRuns).Select(item => item.Key).ToList();
+
+            if (droppedIDs.Count > 0)
             {
-                if (++failedRuns < NotificationState.MaxFailedRuns)
-                    return;
-
-                Console.WriteLine($"Gave up on {newItems.Count} new {name} after {failedRuns} runs that reached no guild");
+                Console.WriteLine($"Gave up on {droppedIDs.Count} new {name} after {NotificationState.MaxFailedRuns} runs that reached no guild");
+                seenIDs.UnionWith(droppedIDs);
             }
-
-            failedRuns = 0;
-            seenIDs.UnionWith(newItems.Select(getID));
         }
     }
 }

@@ -102,6 +102,9 @@ namespace MinerBot.Tests
         // Name of the Discord request that gets refused, to test what happens when a reply can't be sent
         public string? FailStep { get; set; }
 
+        // How many requests of FailStep get through before the refusals start
+        public int FailStepAfter;
+
         public int ExecutedEvents;
 
         public string ConsoleText => console.ToString();
@@ -416,7 +419,7 @@ namespace MinerBot.Tests
                 if (name != null)
                     discord.AddStep(new Step(name, body, file));
 
-                if (name != null && name == discord.FailStep)
+                if (name != null && name == discord.FailStep && Interlocked.Decrement(ref discord.FailStepAfter) < 0)
                     return Response(HttpStatusCode.Forbidden, """{"code":50013,"message":"Missing Permissions"}""");
 
                 if (endpoint == "users/@me")

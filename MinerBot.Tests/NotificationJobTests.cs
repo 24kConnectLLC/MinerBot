@@ -456,23 +456,88 @@ namespace MinerBot.Tests
         }
 
         [Fact]
-        public async Task ADeliveredBatchResetsTheFailedRuns()
+        public async Task NewItemIsNotDroppedWithAnOlderOneThatKeepsFailing()
         {
             await using var discord = await StartWithBaselineAsync();
-            AddNewItems(discord);
+            discord.Armor.AllArmor.Add(FakeArmorData.CreateArmor(NewId));
             discord.FailStep = SendStep;
 
             for (int run = 1; run < NotificationState.MaxFailedRuns; run++)
                 await discord.RunNotificationJobAsync();
 
-            discord.FailStep = null;
+            // The older armor gets its last try on this run, and the newer one its first
+            discord.Armor.AllArmor.Add(FakeArmorData.CreateArmor(NewId + 1));
             await discord.RunNotificationJobAsync();
 
-            discord.Armor.AllArmor.Add(FakeArmorData.CreateArmor(NewId + 1));
+            Assert.Contains("Gave up on 1 new armor styles", discord.ConsoleText);
+
+            discord.FailStep = null;
+            var refused = discord.Steps.Count;
+            await discord.RunNotificationJobAsync();
+
+            var sent = Assert.Single(discord.Steps.Skip(refused), step => step.Name == SendStep).EmbedDescriptions.Single();
+            Assert.Contains("Armor 101", sent);
+            Assert.DoesNotContain("Armor 100", sent);
+        }
+
+        [Fact]
+        public async Task ItemThatLeftItsSourceStartsAgainIfItComesBack()
+        {
+            await using var discord = await StartWithBaselineAsync();
+            discord.Steam.Lobbies.Add(Lobby(NewId));
             discord.FailStep = SendStep;
+
+            for (int run = 1; run < NotificationState.MaxFailedRuns; run++)
+                await discord.RunNotificationJobAsync();
+
+            discord.Steam.Lobbies.Clear();
+            await discord.RunNotificationJobAsync();
+
+            discord.Steam.Lobbies.Add(Lobby(NewId));
             await discord.RunNotificationJobAsync();
 
             Assert.DoesNotContain("Gave up", discord.ConsoleText);
+        }
+
+        [Fact]
+        public async Task MapsOfAMessageThatFailedAreSentWithoutRepeatingTheOthers()
+        {
+            await using var discord = await StartWithBaselineAsync();
+            discord.Steam.LatestItems = Enumerable.Range(NewId, 5).Select(id => MapEmbedFlowTests.LongMap(id)).ToList();
+            discord.FailStep = SendStep;
+            discord.FailStepAfter = 1;
+
+            await discord.RunNotificationJobAsync();
+
+            var firstRun = discord.Steps.Where(step => step.Name == SendStep).ToList();
+            Assert.Equal(2, firstRun.Count);
+
+            discord.FailStep = null;
+            await discord.RunNotificationJobAsync();
+            await discord.RunNotificationJobAsync();
+
+            var delivered = firstRun.Take(1).Concat(discord.Steps.Where(step => step.Name == SendStep).Skip(2));
+
+            Assert.Equal(discord.Steam.LatestItems.Select(map => map.Title), delivered.SelectMany(step => step.EmbedTitles));
+        }
+
+        [Fact]
+        public async Task MapsOfTheGuildThatGotTheMostAreRecorded()
+        {
+            await using var discord = await StartWithBaselineAsync();
+            discord.Guilds.AllGuilds.Add(FakeGuildData.CreateGuild(FakeDiscord.ChannelId));
+            discord.Steam.LatestItems = Enumerable.Range(NewId, 5).Select(id => MapEmbedFlowTests.LongMap(id)).ToList();
+            discord.FailStep = SendStep;
+            discord.FailStepAfter = 3;
+
+            // The first guild gets both messages, and the second one only the first
+            await discord.RunNotificationJobAsync();
+
+            var firstRun = discord.Steps.Count;
+            discord.FailStep = null;
+            await discord.RunNotificationJobAsync();
+
+            Assert.DoesNotContain(discord.Steps.Skip(firstRun), step => step.Name == SendStep);
         }
 
         // Seen IDs
