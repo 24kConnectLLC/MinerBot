@@ -37,7 +37,7 @@ namespace MinerBot_2._0.Services
         public void Initialize()
         {
         }
-        public async Task<List<LobbyInfo>> GetLobbyList()
+        public async Task<LobbyListResult> GetLobbyList()
         {
             return await GetData.GetServerList();
         }
@@ -45,12 +45,16 @@ namespace MinerBot_2._0.Services
         public async Task<string> GetLobbiesDisplay(List<LobbyInfo> lobbies = null, bool hideEmpty = false)
         {
             if (lobbies == null)
-                lobbies = await GetLobbyList();
+            {
+                var lobbyList = await GetLobbyList();
+
+                if (!lobbyList.Available)
+                    return "Steam can't be reached right now, so the lobbies can't be listed. Please try again later.";
+
+                lobbies = lobbyList.Lobbies;
+            }
 
             string finalString = "No lobbies available!\n\n[Host your own Lobby instead!](https://murderminershub.com/open-murder-miners)\n\n";
-
-            if (lobbies == null)
-                return finalString;
 
             var latestUpdate = lobbies.Where(result => result.VersionNumber >= 93);
 

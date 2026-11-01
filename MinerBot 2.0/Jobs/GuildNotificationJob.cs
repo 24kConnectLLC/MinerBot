@@ -173,13 +173,13 @@ namespace MinerBot_2._0.Jobs
         {
             var lobbyList = await _SteamAPIService.GetLobbyList();
 
-            if (lobbyList == null || lobbyList.Count == 0)
+            if (!lobbyList.Available || lobbyList.Lobbies.Count == 0)
                 return null;
 
             var newIDList = lobbyIDList;
             var newLobbyList = new List<LobbyInfo>();
 
-            foreach (var lobby in lobbyList)
+            foreach (var lobby in lobbyList.Lobbies)
             {
                 if (!lobbyIDList.Contains(lobby.LobbyId) && IsInValidVersion(lobby.VersionNumber))
                 {

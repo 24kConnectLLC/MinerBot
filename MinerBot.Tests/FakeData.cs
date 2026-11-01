@@ -26,6 +26,7 @@ namespace MinerBot.Tests
             ProfileUrl = "https://steamcommunity.com/profiles/1"
         };
         public List<LobbyInfo> Lobbies { get; set; } = new();
+        public bool LobbiesAvailable { get; set; } = true;
         public Exception? Failure { get; set; }
         public ulong? RequestedId { get; private set; }
 
@@ -52,7 +53,7 @@ namespace MinerBot.Tests
             return Call(PlayerSummary);
         }
 
-        public Task<List<LobbyInfo>> GetServerList() => Call(Lobbies);
+        public Task<LobbyListResult> GetServerList() => Call(new LobbyListResult { Available = LobbiesAvailable, Lobbies = Lobbies });
 
         Task<T> Call<T>(T value, [CallerMemberName] string name = "")
         {

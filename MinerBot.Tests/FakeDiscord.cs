@@ -49,6 +49,10 @@ namespace MinerBot.Tests
             ? embeds.EnumerateArray().Select(embed => embed.GetProperty("title").GetString()!)
             : [];
 
+        public IEnumerable<string> EmbedDescriptions => Message.TryGetProperty("embeds", out var embeds)
+            ? embeds.EnumerateArray().Select(embed => embed.GetProperty("description").GetString()!)
+            : [];
+
         public IEnumerable<string> ButtonIds => Message.TryGetProperty("components", out var rows)
             ? rows.EnumerateArray().SelectMany(row => row.GetProperty("components").EnumerateArray()).Select(button => button.GetProperty("custom_id").GetString()!)
             : [];

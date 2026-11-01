@@ -16,7 +16,7 @@ namespace SteamWebAPIAccess
         Task<List<PublishedFileDetailsModel>> GetLatestWorkshopItems(int numPerPage);
         Task<string> GetLobbyData(ulong lobbyID);
         Task<PlayerSummaryModel> GetPlayerSummaries(ulong steamid);
-        Task<List<LobbyInfo>> GetServerList();
+        Task<LobbyListResult> GetServerList();
         ulong GetSteamID3To64(uint steamID3);
         ulong getSteamIDTo64(uint steamID);
         Task<List<SteamMatchmaking.Lobby.Member>> GetUsersInLobby(ulong lobbyID);
