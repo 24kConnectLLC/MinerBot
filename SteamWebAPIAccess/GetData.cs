@@ -21,7 +21,6 @@ namespace SteamWebAPIAccess
     public class GetData : IGetData
     {
         private readonly ISteamAPIAccess _steamAPI;
-        public NetworkSessionProperties SessionProperties;
         public SteamWebInterfaceFactory webInterfaceFactory;
         public SteamWebAPI2.Interfaces.SteamUser steamUser;
         public SteamWebAPI2.Interfaces.SteamRemoteStorage steamRemoteStorage;
@@ -31,7 +30,6 @@ namespace SteamWebAPIAccess
         public GetData(ISteamAPIAccess steamAPI)
         {
             _steamAPI = steamAPI;
-            SessionProperties = NetworkSessionProperties.CreateReadOnly();
         }
 
         public void Initilization()
@@ -75,6 +73,8 @@ namespace SteamWebAPIAccess
 
             var callback = await _steamAPI.steamMatchmaking.GetLobbyList(_steamAPI.appID);
 
+            int skippedLobbies = 0;
+
             foreach (var lobby in callback.Lobbies)
             {
                 if (lobby.Metadata.Count == 0 || lobby.Metadata == null)
@@ -83,13 +83,20 @@ namespace SteamWebAPIAccess
                 lobby.Metadata.TryGetValue("host_steam_id", out string ownerSteamID);
                 lobby.Metadata.TryGetValue("host_gamertag", out string ownerUsername);
 
+                // Lobby metadata comes from the host, so one bad lobby must not stop the rest of the list
+                if (!uint.TryParse(ownerSteamID, out uint ownerAccountID))
+                {
+                    skippedLobbies++;
+                    continue;
+                }
+
                 var spResult = ReadLobbyMetadata(lobby.Metadata).Result;
 
                 ulong props = NetPropertiesFunctions.GetBoolsFromUints(
                 spResult.GetIntProperty(PropertyUsage.NetSettingsBools),
                 spResult.GetIntProperty(PropertyUsage.NetSettingsBoolsExtended));
 
-                string hostName = ownerUsername;
+                string hostName = CleanHostName(ownerUsername);
 
                 if (spResult.GetIntProperty(PropertyUsage.Gamenight) > 0)
                     hostName = "Gamenight";
@@ -100,18 +107,21 @@ namespace SteamWebAPIAccess
 
                 // The game treats a lobby without a version as invalid, it's not the newest build
                 if (versionNumber == NetPropertiesFunctions.INVALID_GAME_VERSION)
+                {
+                    skippedLobbies++;
                     continue;
+                }
 
                 lobbyList.Add(new LobbyInfo()
                 {
                     HostName = hostName,
-                    OwnerID = GetSteamID3To64(uint.Parse(ownerSteamID)),
-                    MapName = spResult.GetMapName().Trim(),
+                    OwnerID = GetSteamID3To64(ownerAccountID),
+                    MapName = CleanMapName(spResult.GetMapName()),
                     CurrentPlayers = lobby.NumMembers,
                     MaxPlayers = lobby.MaxMembers,
                     LobbyType = lobby.LobbyType.ToString(),
                     LobbyId = lobby.SteamID.ConvertToUInt64(),
-                    JoinURL = $"https://murderminershub.com/join-lobby?lobbyId={lobby.SteamID.ConvertToUInt64()}&ownerId={GetSteamID3To64(uint.Parse(ownerSteamID))}", // ?redirect=steam://joinlobby/{_steamAPI.appID}/{lobby.SteamID.ConvertToUInt64()}/{GetSteamID3To64(uint.Parse(ownerSteamID))}"
+                    JoinURL = $"https://murderminershub.com/join-lobby?lobbyId={lobby.SteamID.ConvertToUInt64()}&ownerId={GetSteamID3To64(ownerAccountID)}", // ?redirect=steam://joinlobby/{_steamAPI.appID}/{lobby.SteamID.ConvertToUInt64()}/{GetSteamID3To64(uint.Parse(ownerSteamID))}"
                     Distance = (float)lobby.Distance,
                     Modes = GameModesMenuEntry.GetGameModeText(props, spResult.GetBonusBools(), version:versionNumber).Trim(),
                     VersionNumber = versionNumber
@@ -143,7 +153,29 @@ namespace SteamWebAPIAccess
 
             _lobbies = callback.Lobbies;
 
+            if (skippedLobbies > 0)
+                Console.WriteLine($"Skipped {skippedLobbies} lobbies with unreadable metadata");
+
             return lobbyList;
+        }
+
+        // The game only writes the Steam persona name here, which stops at 32 characters
+        const int MAX_HOST_NAME_LENGTH = 32;
+
+        internal static string CleanHostName(string? hostName)
+        {
+            if (hostName == null)
+                return "";
+
+            hostName = string.Join(' ', hostName.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+            return hostName.Length > MAX_HOST_NAME_LENGTH ? hostName.Substring(0, MAX_HOST_NAME_LENGTH) : hostName;
+        }
+
+        // Map names are shown inside inline code, and a backtick is the only character of the game's table that ends it
+        internal static string CleanMapName(string mapName)
+        {
+            return mapName.Trim().Replace('`', '\'');
         }
 
         // availableSession.SessionProperties.GetIntProperty(PropertyUsage.Gamenight/NetSsettingsBools)
@@ -322,9 +354,10 @@ namespace SteamWebAPIAccess
         public async Task<NetworkSessionProperties> ReadLobbyMetadata(IReadOnlyDictionary<string, string> keyPairs)
         {
             // We do this to clear previous data and make it read only.
-            SessionProperties = NetworkSessionProperties.CreateReadOnly();
+            // A new object per lobby also keeps concurrent lobby list requests apart.
+            NetworkSessionProperties sessionProperties = NetworkSessionProperties.CreateReadOnly();
 
-            SessionProperties.ReadProperties(keyPairs);
+            sessionProperties.ReadProperties(keyPairs);
 
             // Update 40 example. Update 39 has Version 87.
             //Value: 0
@@ -346,7 +379,7 @@ namespace SteamWebAPIAccess
 
             //NetPropertiesFunctions.GetIntProperty(SessionProperties, PropertyUsage.Team);
 
-            return SessionProperties;
+            return sessionProperties;
         }
 
         public async Task<PlayerSummaryModel> GetPlayerSummaries(ulong steamid)

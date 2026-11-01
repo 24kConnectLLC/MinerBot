@@ -90,7 +90,7 @@ namespace MinerBot_2._0.Services
 
                 // egghunt branch
                 if (eggHunt.Count() > 0)
-                    tempString += formatLobbyRows(update19, "Legacy Egg Hunt Branch");
+                    tempString += formatLobbyRows(eggHunt, "Legacy Egg Hunt Branch");
 
                 if (!string.IsNullOrEmpty(tempString))
                     finalString = tempString;
@@ -126,8 +126,8 @@ namespace MinerBot_2._0.Services
                 {
                     bool fullLobby = lobby.CurrentPlayers == lobby.MaxPlayers; // \u200b // _ _
                     string hostName = String.IsNullOrWhiteSpace(UIUtils.cleanTextForEmbed(lobby.HostName)) ? "Host Unknown" : UIUtils.cleanTextForEmbed(lobby.HostName);
-                    string mapName = String.IsNullOrWhiteSpace(UIUtils.cleanTextForEmbed(lobby.MapName)) ? "Map Unknown" : UIUtils.cleanTextForEmbed(lobby.MapName);
-                    string lobbyModes = String.IsNullOrWhiteSpace(UIUtils.cleanTextForEmbed(lobby.Modes)) ? "Modes Unknown" : UIUtils.cleanTextForEmbed(lobby.Modes);
+                    string mapName = String.IsNullOrWhiteSpace(lobby.MapName) ? "Map Unknown" : lobby.MapName; // Already cleaned in GetData, and cleanTextForEmbed would strip its punctuation
+                    string lobbyModes = String.IsNullOrWhiteSpace(lobby.Modes) ? "Modes Unknown" : lobby.Modes; // Written by the bot, not the host
                     tempString += $"- **Host:** `{hostName}` \u200b **Map:** `{mapName}`\n" + 
                                     $" \u200b **Mode:** `{lobbyModes}` \u200b **Players:** `{lobby.CurrentPlayers}/{lobby.MaxPlayers}` \u200b {(fullLobby ? "" : $"[Join]({lobby.JoinURL})")}" + "\n\n";
                 }
