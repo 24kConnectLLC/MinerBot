@@ -56,6 +56,10 @@ namespace MinerBot_2._0.Services
 
             string finalString = "No lobbies available!\n\n[Host your own Lobby instead!](https://murderminershub.com/open-murder-miners)\n\n";
 
+            // All the rows share one embed description, so the version groups share one budget
+            int charactersLeft = EmbedBuilder.MaxDescriptionLength - MoreLobbiesText(lobbies.Count).Length;
+            int hiddenLobbies = 0;
+
             var latestUpdate = lobbies.Where(result => result.VersionNumber >= 93);
 
             if (shouldShowPrevUpdate)
@@ -114,13 +118,15 @@ namespace MinerBot_2._0.Services
                 }
             }
 
+            if (hiddenLobbies > 0)
+                finalString += MoreLobbiesText(hiddenLobbies);
+
             return finalString;
 
             string formatLobbyRows(IEnumerable<LobbyInfo> lobbyList, string version)
             {
-                string tempString = "";
-
-                tempString += $"__{version}:__\n\n";
+                string heading = $"__{version}:__\n\n";
+                string tempString = heading;
 
                 if (lobbyList.Count() == 0)
                 {
@@ -136,12 +142,32 @@ namespace MinerBot_2._0.Services
                     string hostName = String.IsNullOrWhiteSpace(UIUtils.cleanTextForEmbed(lobby.HostName)) ? "Host Unknown" : UIUtils.cleanTextForEmbed(lobby.HostName);
                     string mapName = String.IsNullOrWhiteSpace(lobby.MapName) ? "Map Unknown" : lobby.MapName; // Already cleaned in GetData, and cleanTextForEmbed would strip its punctuation
                     string lobbyModes = String.IsNullOrWhiteSpace(lobby.Modes) ? "Modes Unknown" : lobby.Modes; // Written by the bot, not the host
-                    tempString += $"- **Host:** `{hostName}` \u200b **Map:** `{mapName}`\n" + 
+                    string row = $"- **Host:** `{hostName}` \u200b **Map:** `{mapName}`\n" + 
                                     $" \u200b **Mode:** `{lobbyModes}` \u200b **Players:** `{lobby.CurrentPlayers}/{lobby.MaxPlayers}` \u200b {(fullLobby ? "" : $"[Join]({lobby.JoinURL})")}" + "\n\n";
+
+                    // Once a row doesn't fit the rest stay out too, so the list keeps its order
+                    if (hiddenLobbies > 0 || tempString.Length + row.Length > charactersLeft)
+                    {
+                        hiddenLobbies++;
+                        continue;
+                    }
+
+                    tempString += row;
                 }
+
+                if (tempString == heading)
+                    return "";
+
+                charactersLeft -= tempString.Length;
 
                 return tempString;
             }
+        }
+
+        // The website has no lobby list, so this opens the game, which shows all of them
+        private static string MoreLobbiesText(int hiddenLobbies)
+        {
+            return $"...and {hiddenLobbies} more {(hiddenLobbies == 1 ? "lobby" : "lobbies")}\n\n[See them all in Murder Miners](https://murderminershub.com/open-murder-miners)";
         }
 
         public async Task<string> CreateLobby()

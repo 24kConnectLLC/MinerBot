@@ -96,6 +96,19 @@ namespace MinerBot.Tests
             Assert.DoesNotContain("Host 1", announced);
         }
 
+        [Fact]
+        public async Task LobbiesThatPassTheEmbedLimitAreStillAnnounced()
+        {
+            await using var discord = await StartWithBaselineAsync();
+            discord.Steam.Lobbies = Enumerable.Range(1, 100).Select(id => LobbyListLimitTests.Lobby(id)).ToList();
+
+            await discord.RunNotificationJobAsync();
+            await discord.RunNotificationJobAsync();
+
+            var announced = Assert.Single(discord.Steps, step => step.Name == SendStep);
+            Assert.Contains("more lobbies", announced.EmbedDescriptions.Single());
+        }
+
         // Baselines
 
         [Fact]
