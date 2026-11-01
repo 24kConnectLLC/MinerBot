@@ -13,6 +13,7 @@ using Discord.WebSocket;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using MinerBot_2._0.Handlers;
+using MinerBot_2._0.Jobs;
 using MinerBot_2._0.Services;
 using SteamWebAPIAccess;
 
@@ -62,7 +63,7 @@ namespace MinerBot.Tests
     // Tests send the gateway JSON that Discord would send, then read what the bot did in response.
     internal sealed class FakeDiscord : IAsyncDisposable
     {
-        public const ulong BotId = 1000, GuildId = 2000, ChannelId = 3000, MessageId = 4000;
+        public const ulong BotId = 1000, GuildId = 2000, ChannelId = 3000, DeletedChannelId = 3001, MessageId = 4000;
 
         static readonly TimeSpan WaitLimit = TimeSpan.FromSeconds(15);
 
@@ -76,6 +77,7 @@ namespace MinerBot.Tests
         readonly List<Step> steps = new();
         readonly TextWriter realConsole = Console.Out;
         readonly ConsoleCapture console = new();
+        readonly FakeClock cacheClock = new();
         TaskCompletionSource executed = NewSignal();
         int gatewaySequence;
 
@@ -86,6 +88,7 @@ namespace MinerBot.Tests
         public FakeGetData Steam { get; }
         public FakeArmorData Armor { get; }
         public FakeGuildData Guilds { get; }
+        public NotificationState Notifications => services.GetRequiredService<NotificationState>();
 
         // Name of the Discord request that gets refused, to test what happens when a reply can't be sent
         public string? FailStep { get; set; }
@@ -148,11 +151,13 @@ namespace MinerBot.Tests
                 .AddSingleton<ArmorService>()
                 .AddSingleton<SteamAPIService>()
                 .AddSingleton<DiscordService>()
+                .AddSingleton<NotificationState>()
                 .AddSingleton<IGetData>(Steam)
                 .AddSingleton<IArmorData>(Armor)
                 .AddSingleton<IGuildData>(Guilds)
                 .AddSingleton<IConfiguration>(new ConfigurationBuilder().Build())
-                .AddMemoryCache()
+                .AddLogging()
+                .AddMemoryCache(options => options.Clock = cacheClock)
                 .BuildServiceProvider();
         }
 
@@ -290,6 +295,16 @@ namespace MinerBot.Tests
             await WaitAsync(executed.Task);
         }
 
+        // One run the way JobHandler does it, with a new job object, 5 minutes after the last run
+        public async Task RunNotificationJobAsync()
+        {
+            cacheClock.UtcNow += TimeSpan.FromMinutes(5);
+
+            await ActivatorUtilities.CreateInstance<GuildNotificationJob>(services).NotifyAllGuilds();
+        }
+
+        public Task LeaveGuildAsync() => gateway.DeliverAsync("GUILD_DELETE", $$"""{"id":"{{GuildId}}"}""");
+
         // Gateway JSON
 
         static string UserJson(ulong id, bool bot = false) =>
@@ -397,6 +412,9 @@ namespace MinerBot.Tests
 
                 if (endpoint == "users/@me")
                     return Response(HttpStatusCode.OK, UserJson(BotId, bot: true));
+
+                if (endpoint == $"channels/{DeletedChannelId}")
+                    return Response(HttpStatusCode.NotFound, """{"code":10003,"message":"Unknown Channel"}""");
 
                 if (endpoint.Contains("/commands") || endpoint.EndsWith("/pins"))
                     return Response(HttpStatusCode.OK, "[]");
