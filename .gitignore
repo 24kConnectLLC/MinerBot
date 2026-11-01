@@ -35,9 +35,17 @@ appsettings.*.json
 .env.*
 !/.env.example
 
+# Steam login token, and local launch and publish settings
+/MinerBot 2.0/data/
+SteamToken.txt
+**/Properties/launchSettings.json
+**/Properties/PublishProfiles/
+
 # Certificates / keys
 *.pfx
 *.snk
+*.pem
+*.key
 
 # Logs
 *.log
