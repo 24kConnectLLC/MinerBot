@@ -45,6 +45,17 @@ namespace SteamWebAPIAccess
 
         public void AuthenticateClient()
         {
+            CreateClient();
+
+            isRunning = true;
+
+            // Initiate the Connection
+            steamClient.Connect();
+        }
+
+        // Separate from connecting, so tests can run the sign-in callbacks offline
+        internal void CreateClient()
+        {
             // Create our SteamClient Instance
             steamClient = new SteamClient();
 
@@ -63,11 +74,6 @@ namespace SteamWebAPIAccess
 
             manager.Subscribe<SteamUser.LoggedOnCallback>(OnLoggedOn);
             manager.Subscribe<SteamUser.LoggedOffCallback>(OnLoggedOff);
-
-            isRunning = true;
-
-            // Initiate the Connection
-            steamClient.Connect();
 
             async void OnLoggedOff(SteamUser.LoggedOffCallback callback)
             {
@@ -136,131 +142,141 @@ namespace SteamWebAPIAccess
 
             async void OnConnected(SteamClient.ConnectedCallback callback)
             {
-                if (connectAsAnon)
+                // This handler is async void, so an exception that leaves it would end the whole process
+                try
                 {
-                    Console.WriteLine($"Connected to Steam! Logging in as anon");
-                    steamUser.LogOnAnonymous();
-                    return;
-                }
-
-                Console.WriteLine($"Connected to Steam! Logging in {_username}");
-
-                if (shouldReadAuthFile)
-                    await SignInWithTokenFile();
-
-                if (shouldReconnect && _RefreshToken != null)
-                {
-                    // This is when the application has already authenticated and lost connection.             
-
-                    //var newTokens = await steamClient.Authentication.GenerateAccessTokenForAppAsync(_steamID, _RefreshToken, allowRenewal: true);
-
-                    //if (!string.IsNullOrEmpty(newTokens.AccessToken))
-                    //{
-                    //    _accessToken = newTokens.AccessToken;
-                    //}
-
-                    //if (!string.IsNullOrEmpty(newTokens.RefreshToken))
-                    //{
-                    //    _RefreshToken = newTokens.RefreshToken;
-                    //}
-
-                    //UpdateTokenFile();
-
-                    steamUser.LogOn(new SteamUser.LogOnDetails
+                    if (connectAsAnon)
                     {
-                        Username = _username,
-                        AccessToken = _RefreshToken,
-                        ShouldRememberPassword = shouldRememberPassword
-                    });
-                    return;
-                }
-
-                if (!needsToCreateRefreshToken)
-                    return;
-
-                if (isQRAuthenticator)
-                {
-                    // Start an authentication session by requesting a link
-                    var authSession = await steamClient.Authentication.BeginAuthSessionViaQRAsync(new AuthSessionDetails()
-                    { IsPersistentSession = shouldRememberPassword });
-
-                    // Steam will periodically refresh the challenge url, this callback allows you to draw a new QR Code
-                    authSession.ChallengeURLChanged = () =>
-                    {
-                        Console.WriteLine();
-                        Console.WriteLine("Steam has refreshed the challenge URL");
-
-                        DrawQRCode(authSession);
-                    };
-
-                    // Draw current QR code right away
-                    DrawQRCode(authSession);
-
-                    // Start polling Steam for authentication response
-                    // This response is later used to logon to Steam after connecting
-                    var pollResponse = await authSession.PollingWaitForResultAsync();
-
-                    Console.WriteLine($"Logging in as '{pollResponse.AccountName}'...");
-
-                    // Logon to Steam with the access token we have recieved
-                    steamUser.LogOn(new SteamUser.LogOnDetails
-                    {
-                        Username = pollResponse.AccountName,
-                        AccessToken = pollResponse.RefreshToken,
-                        ShouldRememberPassword = shouldRememberPassword,
-                    });
-
-                    _username = pollResponse.AccountName;
-                    _accessToken = pollResponse.AccessToken;
-                    _RefreshToken = pollResponse.RefreshToken;
-
-                    UpdateTokenFile();
-
-                    // This is not required, but it is possible to parse the JWT access token to see the scope and expiration date.
-                    ParseJsonWebToken(pollResponse.AccessToken, nameof(pollResponse.AccessToken));
-                    ParseJsonWebToken(pollResponse.RefreshToken, nameof(pollResponse.RefreshToken));
-                }
-                else
-                {
-                    // Begin authenticating via credentials
-                    var authSession = await steamClient.Authentication.BeginAuthSessionViaCredentialsAsync(new AuthSessionDetails
-                    {
-                        Username = _username,
-                        Password = _password,
-                        IsPersistentSession = shouldRememberPassword,
-                        GuardData = previouslyStoredGuardData,
-                        /// <see cref="UserConsoleAuthenticator"/> is the default authenticator implementation provided by SteamKit
-                        /// for ease of use which blocks the thread and asks for user input to enter the code.
-                        /// However, if you require special handling (e.g. you have the TOTP secret and can generate codes on the fly),
-                        /// you can implement your own <see cref="SteamKit2.Authentication.IAuthenticator"/>
-                        Authenticator = new UserConsoleAuthenticator()
-                    });
-
-                    // Starting polling Steam for authentication response
-                    var pollResponse = await authSession.PollingWaitForResultAsync();
-
-                    if (pollResponse.NewGuardData != null || pollResponse.NewGuardData != "")
-                    {
-                        // When using certain two factor methods (such as email 2fa), gaurd data may be provided by Steam
-                        // for use in future authentication sessions to avoid triggering 2FA again (this works similarly to the old sentry file system).
-                        // Do note that this gaurd data is also a JWT token and has an expiration date.
-                        previouslyStoredGuardData = pollResponse.NewGuardData;
+                        Console.WriteLine($"Connected to Steam! Logging in as anon");
+                        steamUser.LogOnAnonymous();
+                        return;
                     }
 
-                    // Log on to Steam with the access token we have recieved
-                    // Note that we are using RefreshToken for logging on here
-                    steamUser.LogOn(new SteamUser.LogOnDetails
+                    Console.WriteLine($"Connected to Steam! Logging in {_username}");
+
+                    if (shouldReadAuthFile)
+                        await SignInWithTokenFile();
+
+                    if (shouldReconnect && _RefreshToken != null)
                     {
-                        Username = pollResponse.AccountName,
-                        AccessToken = pollResponse.RefreshToken,
-                        ShouldRememberPassword = shouldRememberPassword,
-                    });
+                        // This is when the application has already authenticated and lost connection.             
 
-                    UpdateTokenFile();
+                        //var newTokens = await steamClient.Authentication.GenerateAccessTokenForAppAsync(_steamID, _RefreshToken, allowRenewal: true);
 
-                    // This is not required, but it is possible to parse the JWT access token to see the scope and expiration date.
-                    ParseJsonWebToken(pollResponse.AccessToken, nameof(pollResponse.AccessToken));
-                    ParseJsonWebToken(pollResponse.RefreshToken, nameof(pollResponse.RefreshToken));
+                        //if (!string.IsNullOrEmpty(newTokens.AccessToken))
+                        //{
+                        //    _accessToken = newTokens.AccessToken;
+                        //}
+
+                        //if (!string.IsNullOrEmpty(newTokens.RefreshToken))
+                        //{
+                        //    _RefreshToken = newTokens.RefreshToken;
+                        //}
+
+                        //UpdateTokenFile();
+
+                        steamUser.LogOn(new SteamUser.LogOnDetails
+                        {
+                            Username = _username,
+                            AccessToken = _RefreshToken,
+                            ShouldRememberPassword = shouldRememberPassword
+                        });
+                        return;
+                    }
+
+                    if (!needsToCreateRefreshToken)
+                        return;
+
+                    if (isQRAuthenticator)
+                    {
+                        // Start an authentication session by requesting a link
+                        var authSession = await steamClient.Authentication.BeginAuthSessionViaQRAsync(new AuthSessionDetails()
+                        { IsPersistentSession = shouldRememberPassword });
+
+                        // Steam will periodically refresh the challenge url, this callback allows you to draw a new QR Code
+                        authSession.ChallengeURLChanged = () =>
+                        {
+                            Console.WriteLine();
+                            Console.WriteLine("Steam has refreshed the challenge URL");
+
+                            DrawQRCode(authSession);
+                        };
+
+                        // Draw current QR code right away
+                        DrawQRCode(authSession);
+
+                        // Start polling Steam for authentication response
+                        // This response is later used to logon to Steam after connecting
+                        var pollResponse = await authSession.PollingWaitForResultAsync();
+
+                        Console.WriteLine($"Logging in as '{pollResponse.AccountName}'...");
+
+                        // Logon to Steam with the access token we have recieved
+                        steamUser.LogOn(new SteamUser.LogOnDetails
+                        {
+                            Username = pollResponse.AccountName,
+                            AccessToken = pollResponse.RefreshToken,
+                            ShouldRememberPassword = shouldRememberPassword,
+                        });
+
+                        _username = pollResponse.AccountName;
+                        _accessToken = pollResponse.AccessToken;
+                        _RefreshToken = pollResponse.RefreshToken;
+
+                        UpdateTokenFile();
+
+                        // This is not required, but it is possible to parse the JWT access token to see the scope and expiration date.
+                        ParseJsonWebToken(pollResponse.AccessToken, nameof(pollResponse.AccessToken));
+                        ParseJsonWebToken(pollResponse.RefreshToken, nameof(pollResponse.RefreshToken));
+                    }
+                    else
+                    {
+                        // Begin authenticating via credentials
+                        var authSession = await steamClient.Authentication.BeginAuthSessionViaCredentialsAsync(new AuthSessionDetails
+                        {
+                            Username = _username,
+                            Password = _password,
+                            IsPersistentSession = shouldRememberPassword,
+                            GuardData = previouslyStoredGuardData,
+                            /// <see cref="UserConsoleAuthenticator"/> is the default authenticator implementation provided by SteamKit
+                            /// for ease of use which blocks the thread and asks for user input to enter the code.
+                            /// However, if you require special handling (e.g. you have the TOTP secret and can generate codes on the fly),
+                            /// you can implement your own <see cref="SteamKit2.Authentication.IAuthenticator"/>
+                            Authenticator = new UserConsoleAuthenticator()
+                        });
+
+                        // Starting polling Steam for authentication response
+                        var pollResponse = await authSession.PollingWaitForResultAsync();
+
+                        if (pollResponse.NewGuardData != null || pollResponse.NewGuardData != "")
+                        {
+                            // When using certain two factor methods (such as email 2fa), gaurd data may be provided by Steam
+                            // for use in future authentication sessions to avoid triggering 2FA again (this works similarly to the old sentry file system).
+                            // Do note that this gaurd data is also a JWT token and has an expiration date.
+                            previouslyStoredGuardData = pollResponse.NewGuardData;
+                        }
+
+                        // Log on to Steam with the access token we have recieved
+                        // Note that we are using RefreshToken for logging on here
+                        steamUser.LogOn(new SteamUser.LogOnDetails
+                        {
+                            Username = pollResponse.AccountName,
+                            AccessToken = pollResponse.RefreshToken,
+                            ShouldRememberPassword = shouldRememberPassword,
+                        });
+
+                        UpdateTokenFile();
+
+                        // This is not required, but it is possible to parse the JWT access token to see the scope and expiration date.
+                        ParseJsonWebToken(pollResponse.AccessToken, nameof(pollResponse.AccessToken));
+                        ParseJsonWebToken(pollResponse.RefreshToken, nameof(pollResponse.RefreshToken));
+                    }
+                }
+                catch (Exception e)
+                {
+                    Console.WriteLine($"Unable to sign in to Steam, staying offline: {e}");
+
+                    isRunning = false;
                 }
             }
 
