@@ -1,4 +1,4 @@
-using DataAccessLibrary.Discord.Models;
+using Discord;
 using MinerBot_2._0.Jobs;
 using SteamWebAPIAccess.Models;
 
@@ -107,6 +107,34 @@ namespace MinerBot.Tests
 
             var announced = Assert.Single(discord.Steps, step => step.Name == SendStep);
             Assert.Contains("more lobbies", announced.EmbedDescriptions.Single());
+        }
+
+        [Fact]
+        public async Task MapWithALongDescriptionIsAnnounced()
+        {
+            await using var discord = await StartWithBaselineAsync();
+            discord.Steam.LatestItems.Insert(0, MapEmbedFlowTests.LongMap(NewId));
+
+            await discord.RunNotificationJobAsync();
+
+            Assert.Equal([NewMapTitle], SentTitles(discord));
+        }
+
+        [Fact]
+        public async Task MapsThatPassTheMessageLimitAreAnnouncedInSeveralMessages()
+        {
+            await using var discord = await StartWithBaselineAsync();
+            discord.Steam.LatestItems = Enumerable.Range(NewId, 5).Select(id => MapEmbedFlowTests.LongMap(id)).ToList();
+
+            await discord.RunNotificationJobAsync();
+
+            var messages = discord.Steps.Where(step => step.Name == SendStep).ToList();
+
+            Assert.Equal(2, messages.Count);
+            Assert.All(messages, message => Assert.InRange(message.EmbedsLength, 1, EmbedBuilder.MaxEmbedLength));
+            Assert.Equal(discord.Steam.LatestItems.Select(map => map.Title), SentTitles(discord));
+            Assert.Equal("__**New & Updated Map(s)!**__", messages[0].Content);
+            Assert.True(string.IsNullOrEmpty(messages[1].Content));
         }
 
         // Baselines

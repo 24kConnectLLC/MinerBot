@@ -146,9 +146,7 @@ namespace MinerBot_2._0.Jobs
             try
             {
                 var channel = await _discord.GetChannelAsync(channelId) as IMessageChannel;
-                await channel.SendMessageAsync(
-                    text: "__**New & Updated Map(s)!**__",
-                    embeds: await _SteamAPIService.GetLatestMapsEmbeds(newMaps));
+                await _SteamAPIService.SendLatestMapsEmbeds(channel!, "__**New & Updated Map(s)!**__", newMaps);
                 return true;
             }
             catch (Exception e)

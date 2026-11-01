@@ -22,6 +22,7 @@ namespace MinerBot_2._0.Services
         private readonly IGetData GetData;
         private readonly IMemoryCache _cache;
         private static readonly TimeSpan LatestWorkshopItemsCacheTime = TimeSpan.FromSeconds(60);
+        private const int MaxMapDescriptionLength = 650; // Leaves room for most lists of five maps in one message
         public string WorkshopItemDetailsURI { get; } = "https://steamcommunity.com/workshop/filedetails/?id=";
 
         public int ItemsPerPage = 1;
@@ -274,6 +275,40 @@ namespace MinerBot_2._0.Services
             return embeds.ToArray();
         }
 
+        public async Task SendLatestMapsEmbeds(IMessageChannel channel, string text, List<Steam.Models.PublishedFileDetailsModel> latestMaps = null, int totalMaps = 0)
+        {
+            foreach (var embeds in GroupEmbedsByLength(await GetLatestMapsEmbeds(latestMaps, totalMaps)))
+            {
+                await channel.SendMessageAsync(text: text, embeds: embeds);
+                text = null; // Only the first message has the heading
+            }
+        }
+
+        // Discord limits the length of all the embeds of a message together, so a long list goes out as several messages
+        public static List<Embed[]> GroupEmbedsByLength(IEnumerable<Embed> embeds)
+        {
+            List<Embed[]> groups = new();
+            List<Embed> group = new();
+            int groupLength = 0;
+
+            foreach (var embed in embeds)
+            {
+                if (groupLength + embed.Length > EmbedBuilder.MaxEmbedLength)
+                {
+                    groups.Add(group.ToArray());
+                    group.Clear();
+                    groupLength = 0;
+                }
+
+                group.Add(embed);
+                groupLength += embed.Length;
+            }
+
+            groups.Add(group.ToArray());
+
+            return groups;
+        }
+
         public async Task<Embed> GetLatestMapsEmbed(List<Steam.Models.PublishedFileDetailsModel> latestMaps = null, int page = 0)
         {
             if (latestMaps == null)
@@ -301,7 +336,7 @@ namespace MinerBot_2._0.Services
         {
             Embed embed = new EmbedBuilderTemplate()
             .WithTitle(item.Title)
-            .WithDescription(item.Description)
+            .WithDescription(ShortenMapDescription(item.Description))
             .WithFields([
                 new EmbedFieldBuilder { Name = "Subscriptions:", Value = item.Subscriptions, IsInline = true },
             new EmbedFieldBuilder { Name = "Life-Time Subscriptions:", Value = item.LifetimeSubscriptions, IsInline = true },
@@ -318,6 +353,22 @@ namespace MinerBot_2._0.Services
             .Build();
 
             return embed;
+        }
+
+        // The title of the embed links to the full description on Steam
+        private static string? ShortenMapDescription(string? description)
+        {
+            if (description == null || description.Length <= MaxMapDescriptionLength)
+                return description;
+
+            const string ending = "...";
+            int length = MaxMapDescriptionLength - ending.Length;
+
+            // Half of a surrogate pair isn't a valid character
+            if (char.IsHighSurrogate(description[length - 1]))
+                length--;
+
+            return description.Substring(0, length) + ending;
         }
 
         public async Task<Embed> SteamIDEmbed(string profileURL)

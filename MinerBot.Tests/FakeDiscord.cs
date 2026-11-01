@@ -54,6 +54,15 @@ namespace MinerBot.Tests
             ? embeds.EnumerateArray().Select(embed => embed.GetProperty("description").GetString()!)
             : [];
 
+        // What Discord counts against its limit for all the embeds of a message
+        public int EmbedsLength => Message.TryGetProperty("embeds", out var embeds)
+            ? embeds.EnumerateArray().Sum(embed => TextLength(embed, "title") + TextLength(embed, "description")
+                + TextLength(embed.GetProperty("footer"), "text")
+                + embed.GetProperty("fields").EnumerateArray().Sum(row => TextLength(row, "name") + TextLength(row, "value")))
+            : 0;
+
+        static int TextLength(JsonElement json, string name) => json.TryGetProperty(name, out var text) ? text.GetString()!.Length : 0;
+
         public IEnumerable<string> ButtonIds => Message.TryGetProperty("components", out var rows)
             ? rows.EnumerateArray().SelectMany(row => row.GetProperty("components").EnumerateArray()).Select(button => button.GetProperty("custom_id").GetString()!)
             : [];
