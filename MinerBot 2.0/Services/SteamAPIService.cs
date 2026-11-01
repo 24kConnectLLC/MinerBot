@@ -173,10 +173,16 @@ namespace MinerBot_2._0.Services
             return GetData.InviteUser(lobbyID, userID);
         }
 
-        public async Task<PublishedFileDetailsModel> GetWorkshopItem(string url)
+        public async Task<PublishedFileDetailsModel?> GetWorkshopItem(string url)
         {
-            NameValueCollection queryParameters = HttpUtility.ParseQueryString(new Uri(url).Query);
-            ulong id = ulong.Parse(queryParameters["id"]);
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+                return null;
+
+            NameValueCollection queryParameters = HttpUtility.ParseQueryString(uri.Query);
+
+            if (!ulong.TryParse(queryParameters["id"], out ulong id))
+                return null;
+
             return await GetData.GetWorkshopItem(id);
         }
 
@@ -201,8 +207,8 @@ namespace MinerBot_2._0.Services
 
             if (profileURL.Contains("steamcommunity.com/id/"))
                 steamID = new SteamID(await GetData.ResolveVanityURL(profileURL.Replace("https://steamcommunity.com/id/", "").Replace("/", "")));
-            else if (profileURL.Contains("steamcommunity.com/profiles/"))
-                steamID = new SteamID(ulong.Parse(profileURL.Replace("https://steamcommunity.com/profiles/", "").Replace("/", "")));
+            else if (profileURL.Contains("steamcommunity.com/profiles/") && ulong.TryParse(profileURL.Replace("https://steamcommunity.com/profiles/", "").Replace("/", ""), out ulong id))
+                steamID = new SteamID(id);
             else
                 return (null,null);
 
@@ -235,6 +241,13 @@ namespace MinerBot_2._0.Services
         public async Task<Embed> GetMapEmbed(string workshopURL)
         {
             var result = await GetWorkshopItem(workshopURL);
+            if (result == null)
+            {
+                return new EmbedBuilderTemplate()
+                    .WithTitle("Error: Please Provide a valid Steam Workshop Map URL/Link...")
+                    .WithDescription("Try finding a URL that looks like this:\n https://steamcommunity.com/sharedfiles/filedetails/?id=1234567890")
+                    .Build();
+            }
             return await FormatMapEmbed(result);
         }
 

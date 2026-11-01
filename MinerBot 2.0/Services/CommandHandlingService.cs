@@ -19,6 +19,8 @@ public class CommandHandlingService
 
         // Hook CommandExecuted to handle post-command-execution logic.
         _commands.CommandExecuted += CommandExecutedAsync;
+        // Hook Log, which is where the exceptions of failed commands get recorded.
+        _commands.Log += LogAsync;
         // Hook MessageReceived so we can process each message to see
         // if it qualifies as a command.
         _discord.MessageReceived += MessageReceivedAsync;
@@ -67,7 +69,30 @@ public class CommandHandlingService
         if (result.IsSuccess)
             return;
 
+        // Exceptions were already logged with their stack trace through _commands.Log.
+        if (result.Error != CommandError.Exception)
+            Console.WriteLine($"[Command/Warning] {command.Value.Name} failed for {context.User}: {result}");
+
         // the command failed, let's notify the user that something happened.
-        await context.Channel.SendMessageAsync($"error: {result}");
+        // The details stay in the log, only fixed text goes to the channel.
+        switch (result.Error)
+        {
+            case CommandError.BadArgCount:
+            case CommandError.ParseFailed:
+                await context.Channel.SendMessageAsync("That command needs different input. Type +help to see how to use it.", allowedMentions: AllowedMentions.None);
+                break;
+            case CommandError.UnmetPrecondition:
+                await context.Channel.SendMessageAsync("You can't use that command here.", allowedMentions: AllowedMentions.None);
+                break;
+            default:
+                await context.Channel.SendMessageAsync("Something went wrong with that command. Please try again later.", allowedMentions: AllowedMentions.None);
+                break;
+        }
+    }
+
+    private Task LogAsync(LogMessage log)
+    {
+        Console.WriteLine(log);
+        return Task.CompletedTask;
     }
 }
