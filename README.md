@@ -206,6 +206,23 @@ docker run -d --name minerbot --env-file .env -v minerbot-data:/app/data minerbo
 
 ---
 
+## 🔑 Steam Sign-In
+
+MinerBot signs in to Steam with a saved token in `data/Auth/SteamToken.txt` and renews it every day.
+
+If Steam rejects the token, the bot stops using it and sends a direct message to the owner of the Discord application. Lobbies stay offline until someone signs in again:
+
+- **`STEAM_QRCODE_AUTH=true`:** scan the newest QR code in the bot's log with the Steam Mobile App, restarting the bot first if the log isn't showing one. In Docker, that's `docker restart minerbot`, then `docker logs -f --tail 40 minerbot`. A new code appears about every 20 seconds for 10 minutes.
+- **`STEAM_QRCODE_AUTH=false`:** the bot tries `STEAMUSER_PASSWORD` up to 3 times, and may ask for a Steam Guard code on its console. An unanswered prompt ends the tries. After that it shows QR codes in its log the same way.
+
+If Steam gives an answer that doesn't say what's wrong with the token, the bot keeps trying it for a day before asking for a sign-in. A restart tries it again and starts that day over, so if a restart shows no QR code, rename the token file and restart again. A rejected token otherwise stays in the file until a new sign-in replaces it.
+
+To sign in with a different account, rename the token file, restart and scan with that account. In password mode, change `STEAMUSER_NAME` and `STEAMUSER_PASSWORD` too, which in Docker means creating the container again.
+
+The direct message reaches the owner only if they share a server with the bot and accept direct messages from it. To check, rename the token file to `SteamToken.txt.bak` and restart, then rename it back and restart again. In password mode this really signs in, so it can send a Steam Guard code.
+
+---
+
 ## 🧩 Troubleshooting
 
 - **Slash commands not showing up?**
@@ -217,6 +234,7 @@ docker run -d --name minerbot --env-file .env -v minerbot-data:/app/data minerbo
 
 - **Steam features not working**
   - Verify `STEAMWEB_KEY` (and publisher keys if applicable).
+  - Check for a direct message from the bot, and see [Steam Sign-In](#-steam-sign-in).
 
 ---
 

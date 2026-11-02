@@ -38,6 +38,7 @@ appsettings.*.json
 # Steam login token, and local launch and publish settings
 /MinerBot 2.0/data/
 SteamToken.txt
+SteamToken.txt.*
 **/Properties/launchSettings.json
 **/Properties/PublishProfiles/
 

@@ -32,22 +32,12 @@ namespace MinerBot_2._0
             try
             {
                 if (steamAPI != null)
-                    await jobHandler.StartAsync(stoppingToken);
-
-                while (!stoppingToken.IsCancellationRequested)
                 {
-                    if (_logger.IsEnabled(LogLevel.Information))
-                    {
-                        //_logger.LogInformation("Worker running at: {time}", DateTimeOffset.Now);
-
-
-                        if (steamAPI != null)
-                            steamAPI.UpdateHandlerCallback();
-                        else
-                            _logger.LogInformation("SteamAPI is null!");
-                    }
-                    await Task.Delay(1000, stoppingToken);
+                    await jobHandler.StartAsync(stoppingToken);
+                    await steamAPI.RunCallbacksAsync(stoppingToken);
                 }
+                else
+                    _logger.LogInformation("SteamAPI is null!");
             }
             catch (OperationCanceledException e)
             {

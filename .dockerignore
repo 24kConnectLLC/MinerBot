@@ -29,6 +29,7 @@
 **/Properties/PublishProfiles
 **/secrets.dev.yaml
 **/SteamToken.txt
+**/SteamToken.txt.*
 **/values.dev.yaml
 LICENSE
 MinerBot 2.0/data

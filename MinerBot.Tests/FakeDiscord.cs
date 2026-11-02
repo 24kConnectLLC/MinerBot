@@ -72,7 +72,7 @@ namespace MinerBot.Tests
     // Tests send the gateway JSON that Discord would send, then read what the bot did in response.
     internal sealed class FakeDiscord : IAsyncDisposable
     {
-        public const ulong BotId = 1000, GuildId = 2000, ChannelId = 3000, DeletedChannelId = 3001, MessageId = 4000;
+        public const ulong BotId = 1000, GuildId = 2000, ChannelId = 3000, DeletedChannelId = 3001, DirectChannelId = 3002, MessageId = 4000, TeamId = 7000;
 
         static readonly TimeSpan WaitLimit = TimeSpan.FromSeconds(15);
 
@@ -107,6 +107,13 @@ namespace MinerBot.Tests
 
         public int ExecutedEvents;
 
+        // Holds back READY, the way a slow gateway does, until ReleaseReadyAsync
+        readonly TaskCompletionSource? readyGate;
+        readonly TaskCompletionSource ready = NewSignal();
+
+        // Set to make the bot's application belong to a team with this owner
+        public ulong? TeamOwnerId { get; set; }
+
         public string ConsoleText => console.ToString();
 
         public IReadOnlyList<Step> Steps
@@ -122,8 +129,10 @@ namespace MinerBot.Tests
 
         public Step Single(string name) => Assert.Single(Steps, step => step.Name == name);
 
-        FakeDiscord()
+        FakeDiscord(bool holdReady)
         {
+            readyGate = holdReady ? NewSignal() : null;
+
             // Every run is a new pair of users, because cooldowns are static
             UserId = (ulong)Interlocked.Add(ref lastUserId, 2);
             OtherUserId = UserId + 1;
@@ -160,6 +169,7 @@ namespace MinerBot.Tests
                 .AddSingleton<HttpClient>()
                 .AddSingleton<PictureService>()
                 .AddSingleton<AnnounceService>()
+                .AddSingleton<OwnerAlertService>()
                 .AddSingleton<ArmorService>()
                 .AddSingleton<SteamAPIService>()
                 .AddSingleton<DiscordService>()
@@ -173,11 +183,17 @@ namespace MinerBot.Tests
                 .BuildServiceProvider();
         }
 
-        public static async Task<FakeDiscord> StartAsync()
+        public static async Task<FakeDiscord> StartAsync(bool holdReady = false)
         {
-            var discord = new FakeDiscord();
+            var discord = new FakeDiscord(holdReady);
             await discord.ConnectAsync();
             return discord;
+        }
+
+        public async Task ReleaseReadyAsync()
+        {
+            readyGate!.SetResult();
+            await WaitAsync(ready.Task);
         }
 
         async Task ConnectAsync()
@@ -195,7 +211,6 @@ namespace MinerBot.Tests
             commands.CommandExecuted += (_, _, _) => MarkExecuted();
             interactions.InteractionExecuted += (_, _, _) => MarkExecuted();
 
-            var ready = NewSignal();
             client.Ready += () =>
             {
                 ready.TrySetResult();
@@ -204,7 +219,9 @@ namespace MinerBot.Tests
 
             await client.LoginAsync(TokenType.Bot, "fake token", validateToken: false);
             await client.StartAsync();
-            await WaitAsync(ready.Task);
+
+            if (readyGate == null)
+                await WaitAsync(ready.Task);
         }
 
         // A timeout here means the bot never finished, and the console usually says why
@@ -317,10 +334,28 @@ namespace MinerBot.Tests
 
         public Task LeaveGuildAsync() => gateway.DeliverAsync("GUILD_DELETE", $$"""{"id":"{{GuildId}}"}""");
 
+        public Task SendOwnerAlertAsync(string message) => services.GetRequiredService<OwnerAlertService>().SendAsync(message);
+
         // Gateway JSON
 
         static string UserJson(ulong id, bool bot = false) =>
             $$"""{"id":"{{id}}","username":"user{{id}}","discriminator":"0","global_name":null,"avatar":null,"bot":{{(bot ? "true" : "false")}}}""";
+
+        // The first user owns the application, unless it belongs to a team
+        string ApplicationJson() => $$"""
+            {"id":"{{BotId}}","name":"MinerBot","icon":null,"description":"","bot_public":true,"bot_require_code_grant":false,"verify_key":"key","flags":0,
+             "owner":{{UserJson(TeamOwnerId == null ? UserId : TeamId)}},
+             "team":{{(TeamOwnerId == null ? "null" : TeamJson(TeamOwnerId.Value))}}}
+            """;
+
+        static string TeamJson(ulong ownerId) => $$"""
+            {"id":"{{TeamId}}","name":"Team","icon":null,"owner_user_id":"{{ownerId}}",
+             "members":[{"membership_state":2,"permissions":["*"],"team_id":"{{TeamId}}","user":{{UserJson(ownerId)}}}]}
+            """;
+
+        static string DirectChannelJson(ulong userId) => $$"""
+            {"id":"{{DirectChannelId}}","type":1,"last_message_id":null,"recipients":[{{UserJson(userId)}}]}
+            """;
 
         static string MemberJson(ulong id) =>
             $$"""{"user":{{UserJson(id)}},"roles":[],"joined_at":"2020-01-01T00:00:00+00:00","deaf":false,"mute":false,"permissions":"0"}""";
@@ -380,6 +415,10 @@ namespace MinerBot.Tests
             async Task LoginAsync()
             {
                 await RaiseAsync("""{"op":10,"d":{"heartbeat_interval":3600000}}""");
+
+                if (discord.readyGate != null)
+                    await discord.readyGate.Task;
+
                 await DeliverAsync("READY", discord.ReadyJson());
             }
 
@@ -425,6 +464,15 @@ namespace MinerBot.Tests
                 if (endpoint == "users/@me")
                     return Response(HttpStatusCode.OK, UserJson(BotId, bot: true));
 
+                if (endpoint == "oauth2/applications/@me")
+                    return Response(HttpStatusCode.OK, discord.ApplicationJson());
+
+                if (endpoint == "users/@me/channels")
+                    return Response(HttpStatusCode.OK, DirectChannelJson(ulong.Parse(JsonDocument.Parse(body).RootElement.GetProperty("recipient_id").GetString()!)));
+
+                if (endpoint.StartsWith("users/"))
+                    return Response(HttpStatusCode.OK, UserJson(ulong.Parse(endpoint["users/".Length..])));
+
                 if (endpoint == $"channels/{DeletedChannelId}")
                     return Response(HttpStatusCode.NotFound, """{"code":10003,"message":"Unknown Channel"}""");
 
@@ -458,6 +506,9 @@ namespace MinerBot.Tests
 
                 if (endpoint.Contains("/pins/"))
                     return "pin";
+
+                if (endpoint == "users/@me/channels")
+                    return "open direct message";
 
                 if (endpoint.EndsWith("/messages"))
                     return "send message";
