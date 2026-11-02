@@ -99,17 +99,49 @@ namespace MinerBot_2._0.Services
             }
         }
 
-        public async Task<Embed> NewArmorListEmbed(List<ArmorStyle> newArmors)
+        // The names of a message share one embed description, so a long list goes out as several messages.
+        // Every name is sent, because armor styles stay around and /armor list doesn't show which ones are new.
+        public static List<(Embed Embed, int ArmorCount)> NewArmorListEmbeds(List<ArmorStyle> newArmors)
         {
-            string allArmors = "";
+            List<(Embed, int)> embeds = new();
+
+            int maxLength = EmbedBuilder.MaxDescriptionLength - FormatArmorNames("").Length;
+            string armorNames = "";
+            int armorCount = 0;
+
             foreach (var armor in newArmors)
             {
-                allArmors += armor.ArmorName + "\n";
+                // The title of the armor's own embed can't hold more, and a name that fits no message would hold up the rest
+                string armorName = UIUtils.shortenTextForEmbed(armor.ArmorName, EmbedBuilder.MaxTitleLength) + "\n";
+
+                if (armorNames.Length + armorName.Length > maxLength)
+                {
+                    embeds.Add((NewArmorListEmbed(armorNames), armorCount));
+                    armorNames = "";
+                    armorCount = 0;
+                }
+
+                armorNames += armorName;
+                armorCount++;
             }
 
+            if (armorCount > 0)
+                embeds.Add((NewArmorListEmbed(armorNames), armorCount));
+
+            return embeds;
+        }
+
+        // Discord reads a single word on the first line as the language of the block and hides it, so that line stays empty
+        private static string FormatArmorNames(string armorNames)
+        {
+            return $"```\n{armorNames}```";
+        }
+
+        private static Embed NewArmorListEmbed(string armorNames)
+        {
             var embed = new EmbedBuilderTemplate()
             .WithTitle($"New Armor Styles:")
-            .WithDescription($"```{allArmors}```")
+            .WithDescription(FormatArmorNames(armorNames))
             .WithFields([
             new EmbedFieldBuilder() {
                         Name = "Upload your own Armor Style",

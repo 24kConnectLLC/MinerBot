@@ -107,17 +107,24 @@ namespace MinerBot_2._0.Jobs
             if (newArmor == null || newArmor.Count == 0)
                 return 0;
 
+            int sentArmor = 0;
+
             try
             {
                 var channel = await _discord.GetChannelAsync(channelId) as IMessageChannel;
-                await channel.SendMessageAsync(embed: await _ArmorService.NewArmorListEmbed(newArmor));
-                return newArmor.Count;
+
+                foreach (var (embed, armorCount) in ArmorService.NewArmorListEmbeds(newArmor))
+                {
+                    await channel.SendMessageAsync(embed: embed);
+                    sentArmor += armorCount;
+                }
             }
             catch (Exception e)
             {
                 Console.WriteLine($"Could Send Map Notification to Discord Channel ID: {channelId}\n{e.Message}");
-                return 0;
             }
+
+            return sentArmor;
         }
 
         public async Task<List<Steam.Models.PublishedFileDetailsModel>?> GetNewMaps()
