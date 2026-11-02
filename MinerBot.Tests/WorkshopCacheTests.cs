@@ -1,5 +1,4 @@
 using Microsoft.Extensions.Caching.Memory;
-using Microsoft.Extensions.Internal;
 using MinerBot_2._0.Services;
 
 namespace MinerBot.Tests
@@ -80,11 +79,6 @@ namespace MinerBot.Tests
             Assert.Equal(5, (await service.GetLatestWorkshopItems()).Count);
 
             Assert.Equal(2, Queries);
-        }
-
-        sealed class FakeClock : ISystemClock
-        {
-            public DateTimeOffset UtcNow { get; set; } = DateTimeOffset.UtcNow;
         }
     }
 

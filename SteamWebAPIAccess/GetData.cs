@@ -49,7 +49,7 @@ namespace SteamWebAPIAccess
         // Get
 
         List<SteamMatchmaking.Lobby> _lobbies = new();
-        public async Task<List<LobbyInfo>> GetServerList()
+        public async Task<LobbyListResult> GetServerList()
         {
             // Working With -
             // Host Name
@@ -68,10 +68,36 @@ namespace SteamWebAPIAccess
             // Network Session Properties (ReadOnly)
 
             List<LobbyInfo> lobbyList = new();
-            if (_steamAPI.steamClient.SessionID == null)
-                return null;
+            LobbyListResult unavailable = new() { Available = false };
 
-            var callback = await _steamAPI.steamMatchmaking.GetLobbyList(_steamAPI.appID);
+            if (_steamAPI.steamClient.SessionID == null)
+                return unavailable;
+
+            SteamMatchmaking.GetLobbyListCallback callback;
+
+            try
+            {
+                // SteamKit returns no job while it can't send the request yet
+                var lobbyListJob = _steamAPI.steamMatchmaking.GetLobbyList(_steamAPI.appID);
+
+                if (lobbyListJob == null)
+                    return unavailable;
+
+                callback = await lobbyListJob;
+            }
+            catch (Exception e)
+            {
+                // The job fails or is canceled when Steam times out or the connection drops
+                Console.WriteLine("Error getting the lobby list: " + e.Message);
+                return unavailable;
+            }
+
+            // NoMatch is Steam finding nothing, the same answer as an empty game
+            if (callback.Result != EResult.OK && callback.Result != EResult.NoMatch)
+            {
+                Console.WriteLine($"Steam didn't return the lobby list: {callback.Result}");
+                return unavailable;
+            }
 
             int skippedLobbies = 0;
 
@@ -156,7 +182,7 @@ namespace SteamWebAPIAccess
             if (skippedLobbies > 0)
                 Console.WriteLine($"Skipped {skippedLobbies} lobbies with unreadable metadata");
 
-            return lobbyList;
+            return new LobbyListResult { Available = true, Lobbies = lobbyList };
         }
 
         // The game only writes the Steam persona name here, which stops at 32 characters

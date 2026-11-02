@@ -13,15 +13,10 @@ namespace MinerBot_2._0.Jobs
         private readonly SteamAPIService _SteamAPIService;
         private readonly ArmorService _ArmorService;
         private readonly DiscordService _DiscordService;
+        private readonly NotificationState _state;
 
         private readonly DiscordSocketClient _discord;
         private readonly IServiceProvider _services;
-
-        private static List<ulong> armorIDList = new List<ulong>(),
-                                     mapIDList = new List<ulong>(),
-                                   lobbyIDList = new List<ulong>();
-
-        private static bool FirstRun = true;
 
         // Constructor injection is also a valid way to access the dependencies
         public GuildNotificationJob(ILogger<GuildNotificationJob> logger, IServiceProvider services)
@@ -30,36 +25,38 @@ namespace MinerBot_2._0.Jobs
             _ArmorService = services.GetRequiredService<ArmorService>();
             _SteamAPIService = services.GetRequiredService<SteamAPIService>();
             _DiscordService = services.GetRequiredService<DiscordService>();
+            _state = services.GetRequiredService<NotificationState>();
             _services = services;
         }
 
         [Job("*/5 * * * *")] // Every 5 Minutes
         public async Task NotifyAllGuilds()
         {
-            if (FirstRun)
+            if (!_state.GuildEventsHooked)
             {
-                await GetNewArmor();
-                await GetNewMaps();
-                await GetNewLobbies();
-
                 _discord.JoinedGuild += _discord_JoinedGuild;
                 _discord.LeftGuild += _discord_LeftGuild;
 
-                FirstRun = false;
+                _state.GuildEventsHooked = true;
             }
-            else
-            {
-                var newArmor = await GetNewArmor();
-                var newMaps = await GetNewMaps();
-                var newLobbies = await GetNewLobbies();
 
-                foreach (var guild in await _DiscordService.GetAllGuilds())
-                {
-                    await NotifyNewArmor(guild.armor_channel_id, newArmor);
-                    await NotifyNewMap(guild.map_channel_id, newMaps);
-                    await NotifyNewLobby(guild.lobby_channel_id, newLobbies);
-                }
+            var newArmor = await GetNewArmor();
+            var newMaps = await GetNewMaps();
+            var newLobbies = await GetNewLobbies();
+
+            int armorDelivered = 0, mapsDelivered = 0, lobbiesDelivered = 0;
+
+            foreach (var guild in await _DiscordService.GetAllGuilds())
+            {
+                armorDelivered = Math.Max(armorDelivered, await NotifyNewArmor(guild.armor_channel_id, newArmor));
+                mapsDelivered = Math.Max(mapsDelivered, await NotifyNewMap(guild.map_channel_id, newMaps));
+                lobbiesDelivered = Math.Max(lobbiesDelivered, await NotifyNewLobby(guild.lobby_channel_id, newLobbies));
             }
+
+            // Only now, so a failure before this point leaves these new for the next run
+            _state.Armor.Commit(newArmor, armorDelivered);
+            _state.Maps.Commit(newMaps, mapsDelivered);
+            _state.Lobbies.Commit(newLobbies, lobbiesDelivered);
         }
 
         private async Task _discord_LeftGuild(SocketGuild arg)
@@ -85,113 +82,104 @@ namespace MinerBot_2._0.Jobs
             }
         }
 
-        public async Task<List<ArmorStyle>> GetNewArmor()
+        // A null list means that the source couldn't be read, so these three leave it for the next run.
+        // The NotifyNew methods return how many of the items reached the channel.
+        public async Task<List<ArmorStyle>?> GetNewArmor()
         {
-            var armorList = _ArmorService.GetArmorList().Result;
-
-            if (armorList.Count == 0)
-                return null;
-
-            var newIDList = armorIDList;
-            var newArmorList = new List<ArmorStyle>();
-
-            foreach (var armor in armorList)
+            try
             {
-                if (!armorIDList.Contains((ulong)armor.ID))
-                {
-                    newArmorList.Add(armor);
-                }
+                var armorList = await _ArmorService.GetArmorList();
 
-                newIDList.Add((ulong)armor.ID);
+                if (armorList.Count == 0)
+                    return null;
+
+                return _state.Armor.FindNew(armorList);
             }
-
-            armorIDList = newIDList;
-
-            return newArmorList;
+            catch (Exception e)
+            {
+                Console.WriteLine($"Couldn't read the armor list for notifications\n{e.Message}");
+                return null;
+            }
         }
 
-        public async Task NotifyNewArmor(ulong channelId, List<ArmorStyle> newArmor)
+        public async Task<int> NotifyNewArmor(ulong channelId, List<ArmorStyle>? newArmor)
         {
             if (newArmor == null || newArmor.Count == 0)
-                return;
+                return 0;
 
             try
             {
                 var channel = await _discord.GetChannelAsync(channelId) as IMessageChannel;
                 await channel.SendMessageAsync(embed: await _ArmorService.NewArmorListEmbed(newArmor));
+                return newArmor.Count;
             }
             catch (Exception e)
             {
                 Console.WriteLine($"Could Send Map Notification to Discord Channel ID: {channelId}\n{e.Message}");
+                return 0;
             }
         }
 
-        public async Task<List<Steam.Models.PublishedFileDetailsModel>> GetNewMaps()
+        public async Task<List<Steam.Models.PublishedFileDetailsModel>?> GetNewMaps()
         {
-            var mapList = _SteamAPIService.GetLatestWorkshopItems().Result;
-
-            if (mapList.Count == 0)
-                return null;
-
-            var newIDList = mapIDList;
-            var newMapList = new List<Steam.Models.PublishedFileDetailsModel>();
-
-            foreach (var map in mapList)
+            try
             {
-                if (!mapIDList.Contains(map.PublishedFileId))
-                {
-                    newMapList.Add(map);
-                }
+                var mapList = await _SteamAPIService.GetLatestWorkshopItems();
 
-                newIDList.Add(map.PublishedFileId);
+                // GetData returns an empty list when Steam fails
+                if (mapList.Count == 0)
+                    return null;
+
+                return _state.Maps.FindNew(mapList);
             }
-
-            mapIDList = newIDList;
-
-            return newMapList;
+            catch (Exception e)
+            {
+                Console.WriteLine($"Couldn't read the latest maps for notifications\n{e.Message}");
+                return null;
+            }
         }
 
-        public async Task NotifyNewMap(ulong channelId, List<Steam.Models.PublishedFileDetailsModel> newMaps)
+        public async Task<int> NotifyNewMap(ulong channelId, List<Steam.Models.PublishedFileDetailsModel>? newMaps)
         {
             if (newMaps == null || newMaps.Count == 0)
-                return;
+                return 0;
+
+            int sentMaps = 0;
 
             try
             {
                 var channel = await _discord.GetChannelAsync(channelId) as IMessageChannel;
-                await channel.SendMessageAsync(
-                    text: "__**New & Updated Map(s)!**__",
-                    embeds: await _SteamAPIService.GetLatestMapsEmbeds(newMaps));
+
+                foreach (var (text, embeds) in await _SteamAPIService.GetLatestMapsMessages("__**New & Updated Map(s)!**__", newMaps))
+                {
+                    await channel.SendMessageAsync(text: text, embeds: embeds);
+                    sentMaps += embeds.Length;
+                }
             }
             catch (Exception e)
             {
                 Console.WriteLine($"Could Send Map Notification to Discord Channel ID: {channelId}\n{e.Message}");
             }
+
+            return sentMaps;
         }
 
-        public async Task<List<LobbyInfo>> GetNewLobbies()
+        public async Task<List<LobbyInfo>?> GetNewLobbies()
         {
-            var lobbyList = await _SteamAPIService.GetLobbyList();
-
-            if (lobbyList == null || lobbyList.Count == 0)
-                return null;
-
-            var newIDList = lobbyIDList;
-            var newLobbyList = new List<LobbyInfo>();
-
-            foreach (var lobby in lobbyList)
+            try
             {
-                if (!lobbyIDList.Contains(lobby.LobbyId) && IsInValidVersion(lobby.VersionNumber))
-                {
-                    newLobbyList.Add(lobby);
-                }
+                var lobbyList = await _SteamAPIService.GetLobbyList();
 
-                newIDList.Add(lobby.LobbyId);
+                if (!lobbyList.Available)
+                    return null;
+
+                return _state.Lobbies.FindNew(lobbyList.Lobbies).Where(lobby => IsInValidVersion(lobby.VersionNumber)).ToList();
             }
-
-            lobbyIDList = newIDList;
-
-            return newLobbyList;
+            catch (Exception e)
+            {
+                Console.WriteLine($"Couldn't read the lobby list for notifications\n{e.Message}");
+                return null;
+            }
 
             bool IsInValidVersion(uint versionNumber)
             {
@@ -199,20 +187,22 @@ namespace MinerBot_2._0.Jobs
             }
         }
 
-        public async Task NotifyNewLobby(ulong channelId, List<LobbyInfo> newLobbies)
+        public async Task<int> NotifyNewLobby(ulong channelId, List<LobbyInfo>? newLobbies)
         {
             if (newLobbies == null || newLobbies.Count == 0)
-                return;
+                return 0;
 
             try
             {
                 var channel = await _discord.GetChannelAsync(channelId) as IMessageChannel;
                 await channel.SendMessageAsync(
                     embed: await _SteamAPIService.LobbyListEmbed(await _SteamAPIService.GetLobbiesDisplay(newLobbies, hideEmpty: true), type: "__NEW__"));
+                return newLobbies.Count;
             }
             catch (Exception e)
             {
                 Console.WriteLine($"Could Send Lobby Notification to Discord Channel ID: {channelId}\n{e.Message}");
+                return 0;
             }
         }
 

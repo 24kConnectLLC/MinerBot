@@ -4,6 +4,7 @@ using DataAccessLibrary.Armor.Models;
 using DataAccessLibrary.Discord;
 using DataAccessLibrary.Discord.Models;
 using Steam.Models;
+using Microsoft.Extensions.Internal;
 using Steam.Models.SteamCommunity;
 using SteamKit2;
 using SteamWebAPIAccess;
@@ -26,6 +27,8 @@ namespace MinerBot.Tests
             ProfileUrl = "https://steamcommunity.com/profiles/1"
         };
         public List<LobbyInfo> Lobbies { get; set; } = new();
+        public bool LobbiesAvailable { get; set; } = true;
+        public Exception? LobbyFailure { get; set; }
         public Exception? Failure { get; set; }
         public ulong? RequestedId { get; private set; }
 
@@ -52,7 +55,9 @@ namespace MinerBot.Tests
             return Call(PlayerSummary);
         }
 
-        public Task<List<LobbyInfo>> GetServerList() => Call(Lobbies);
+        public Task<LobbyListResult> GetServerList() => LobbyFailure != null
+            ? Task.FromException<LobbyListResult>(LobbyFailure)
+            : Call(new LobbyListResult { Available = LobbiesAvailable, Lobbies = Lobbies });
 
         Task<T> Call<T>(T value, [CallerMemberName] string name = "")
         {
@@ -83,8 +88,13 @@ namespace MinerBot.Tests
     {
         public IEnumerable<string> ArmorNames { get; set; } = ["Armor One", "Armor Two"];
         public ArmorStyle? Armor { get; set; }
+        public List<ArmorStyle> AllArmor { get; set; } = [CreateArmor(1), CreateArmor(2)];
         public Exception? Failure { get; set; }
         public string? RequestedHelmet { get; private set; }
+
+        public static ArmorStyle CreateArmor(int id) => new() { ID = id, ArmorName = $"Armor {id}" };
+
+        public Task<IEnumerable<ArmorStyle>> GetAllArmor() => Call<IEnumerable<ArmorStyle>>(AllArmor);
 
         public Task<IEnumerable<string>> GetAllArmorNamesCache(TimeSpan timeSpan) => Call(ArmorNames);
 
@@ -103,7 +113,6 @@ namespace MinerBot.Tests
         }
 
         public Task DeleteArmor(ArmorStyle armor) => throw new NotImplementedException();
-        public Task<IEnumerable<ArmorStyle>> GetAllArmor() => throw new NotImplementedException();
         public Task<IEnumerable<string>> GetAllArmorNames() => throw new NotImplementedException();
         public Task InsertArmor(ArmorStyle armor) => throw new NotImplementedException();
         public Task UpdateArmor(ArmorStyle armor) => throw new NotImplementedException();
@@ -113,6 +122,22 @@ namespace MinerBot.Tests
     internal sealed class FakeGuildData(Action<string> addStep) : IGuildData
     {
         public Guild? Guild { get; set; }
+        public List<Guild> AllGuilds { get; set; } = [CreateGuild(FakeDiscord.ChannelId)];
+        public Exception? Failure { get; set; }
+
+        public static Guild CreateGuild(ulong channelId) => new()
+        {
+            guild_id = FakeDiscord.GuildId,
+            armor_channel_id = channelId,
+            map_channel_id = channelId,
+            lobby_channel_id = channelId
+        };
+
+        public Task<IEnumerable<Guild>> GetAllGuilds()
+        {
+            addStep(nameof(GetAllGuilds));
+            return Failure != null ? Task.FromException<IEnumerable<Guild>>(Failure) : Task.FromResult<IEnumerable<Guild>>(AllGuilds);
+        }
 
         public Task<Guild> GetGuild(string guildId)
         {
@@ -133,9 +158,13 @@ namespace MinerBot.Tests
         }
 
         public Task DeleteGuild(ulong guildId) => throw new NotImplementedException();
-        public Task<IEnumerable<Guild>> GetAllGuilds() => throw new NotImplementedException();
         public Task<int> GetArmorChannelID(string guildId) => throw new NotImplementedException();
         public Task<int> GetLobbyChannelID(string guildId) => throw new NotImplementedException();
         public Task<int> GetMapChannelID(string guildId) => throw new NotImplementedException();
+    }
+
+    internal sealed class FakeClock : ISystemClock
+    {
+        public DateTimeOffset UtcNow { get; set; } = DateTimeOffset.UtcNow;
     }
 }

@@ -22,6 +22,7 @@ namespace MinerBot_2._0.Services
         private readonly IGetData GetData;
         private readonly IMemoryCache _cache;
         private static readonly TimeSpan LatestWorkshopItemsCacheTime = TimeSpan.FromSeconds(60);
+        private const int MaxMapDescriptionLength = 650; // Leaves room for most lists of five maps in one message
         public string WorkshopItemDetailsURI { get; } = "https://steamcommunity.com/workshop/filedetails/?id=";
 
         public int ItemsPerPage = 1;
@@ -37,7 +38,7 @@ namespace MinerBot_2._0.Services
         public void Initialize()
         {
         }
-        public async Task<List<LobbyInfo>> GetLobbyList()
+        public async Task<LobbyListResult> GetLobbyList()
         {
             return await GetData.GetServerList();
         }
@@ -45,12 +46,20 @@ namespace MinerBot_2._0.Services
         public async Task<string> GetLobbiesDisplay(List<LobbyInfo> lobbies = null, bool hideEmpty = false)
         {
             if (lobbies == null)
-                lobbies = await GetLobbyList();
+            {
+                var lobbyList = await GetLobbyList();
+
+                if (!lobbyList.Available)
+                    return "Steam can't be reached right now, so the lobbies can't be listed. Please try again later.";
+
+                lobbies = lobbyList.Lobbies;
+            }
 
             string finalString = "No lobbies available!\n\n[Host your own Lobby instead!](https://murderminershub.com/open-murder-miners)\n\n";
 
-            if (lobbies == null)
-                return finalString;
+            // All the rows share one embed description, so the version groups share one budget
+            int charactersLeft = EmbedBuilder.MaxDescriptionLength - MoreLobbiesText(lobbies.Count).Length;
+            int hiddenLobbies = 0;
 
             var latestUpdate = lobbies.Where(result => result.VersionNumber >= 93);
 
@@ -110,13 +119,15 @@ namespace MinerBot_2._0.Services
                 }
             }
 
+            if (hiddenLobbies > 0)
+                finalString += MoreLobbiesText(hiddenLobbies);
+
             return finalString;
 
             string formatLobbyRows(IEnumerable<LobbyInfo> lobbyList, string version)
             {
-                string tempString = "";
-
-                tempString += $"__{version}:__\n\n";
+                string heading = $"__{version}:__\n\n";
+                string tempString = heading;
 
                 if (lobbyList.Count() == 0)
                 {
@@ -132,12 +143,32 @@ namespace MinerBot_2._0.Services
                     string hostName = String.IsNullOrWhiteSpace(UIUtils.cleanTextForEmbed(lobby.HostName)) ? "Host Unknown" : UIUtils.cleanTextForEmbed(lobby.HostName);
                     string mapName = String.IsNullOrWhiteSpace(lobby.MapName) ? "Map Unknown" : lobby.MapName; // Already cleaned in GetData, and cleanTextForEmbed would strip its punctuation
                     string lobbyModes = String.IsNullOrWhiteSpace(lobby.Modes) ? "Modes Unknown" : lobby.Modes; // Written by the bot, not the host
-                    tempString += $"- **Host:** `{hostName}` \u200b **Map:** `{mapName}`\n" + 
+                    string row = $"- **Host:** `{hostName}` \u200b **Map:** `{mapName}`\n" + 
                                     $" \u200b **Mode:** `{lobbyModes}` \u200b **Players:** `{lobby.CurrentPlayers}/{lobby.MaxPlayers}` \u200b {(fullLobby ? "" : $"[Join]({lobby.JoinURL})")}" + "\n\n";
+
+                    // Once a row doesn't fit the rest stay out too, so the list keeps its order
+                    if (hiddenLobbies > 0 || tempString.Length + row.Length > charactersLeft)
+                    {
+                        hiddenLobbies++;
+                        continue;
+                    }
+
+                    tempString += row;
                 }
+
+                if (tempString == heading)
+                    return "";
+
+                charactersLeft -= tempString.Length;
 
                 return tempString;
             }
+        }
+
+        // The website has no lobby list, so this opens the game, which shows all of them
+        private static string MoreLobbiesText(int hiddenLobbies)
+        {
+            return $"...and {hiddenLobbies} more {(hiddenLobbies == 1 ? "lobby" : "lobbies")}\n\n[See them all in Murder Miners](https://murderminershub.com/open-murder-miners)";
         }
 
         public async Task<string> CreateLobby()
@@ -233,7 +264,7 @@ namespace MinerBot_2._0.Services
 
         // Need to embeds seperate into a different class. _SteamAPIService.Embeds.GetMapEmbed()
 
-        public async Task<Embed[]> GetLatestMapsEmbeds(List<Steam.Models.PublishedFileDetailsModel> latestMaps = null, int totalMaps = 0)
+        public async Task<Embed[]> GetLatestMapsEmbeds(List<Steam.Models.PublishedFileDetailsModel>? latestMaps = null, int totalMaps = 0)
         {
             if (latestMaps == null)
                 latestMaps = await GetLatestWorkshopItems(totalMaps);
@@ -242,6 +273,39 @@ namespace MinerBot_2._0.Services
                 embeds.Add(await FormatMapEmbed(item));
 
             return embeds.ToArray();
+        }
+
+        public async Task<List<(string? Text, Embed[] Embeds)>> GetLatestMapsMessages(string heading, List<Steam.Models.PublishedFileDetailsModel>? latestMaps = null, int totalMaps = 0)
+        {
+            var groups = GroupEmbedsByLength(await GetLatestMapsEmbeds(latestMaps, totalMaps));
+
+            // Only the first message has the heading
+            return groups.Select((embeds, index) => (index == 0 ? heading : null, embeds)).ToList();
+        }
+
+        // Discord limits the length of all the embeds of a message together, so a long list goes out as several messages
+        public static List<Embed[]> GroupEmbedsByLength(IEnumerable<Embed> embeds)
+        {
+            List<Embed[]> groups = new();
+            List<Embed> group = new();
+            int groupLength = 0;
+
+            foreach (var embed in embeds)
+            {
+                if (groupLength + embed.Length > EmbedBuilder.MaxEmbedLength)
+                {
+                    groups.Add(group.ToArray());
+                    group.Clear();
+                    groupLength = 0;
+                }
+
+                group.Add(embed);
+                groupLength += embed.Length;
+            }
+
+            groups.Add(group.ToArray());
+
+            return groups;
         }
 
         public async Task<Embed> GetLatestMapsEmbed(List<Steam.Models.PublishedFileDetailsModel> latestMaps = null, int page = 0)
@@ -271,7 +335,7 @@ namespace MinerBot_2._0.Services
         {
             Embed embed = new EmbedBuilderTemplate()
             .WithTitle(item.Title)
-            .WithDescription(item.Description)
+            .WithDescription(ShortenMapDescription(item.Description))
             .WithFields([
                 new EmbedFieldBuilder { Name = "Subscriptions:", Value = item.Subscriptions, IsInline = true },
             new EmbedFieldBuilder { Name = "Life-Time Subscriptions:", Value = item.LifetimeSubscriptions, IsInline = true },
@@ -288,6 +352,22 @@ namespace MinerBot_2._0.Services
             .Build();
 
             return embed;
+        }
+
+        // The title of the embed links to the full description on Steam
+        private static string? ShortenMapDescription(string? description)
+        {
+            if (description == null || description.Length <= MaxMapDescriptionLength)
+                return description;
+
+            const string ending = "...";
+            int length = MaxMapDescriptionLength - ending.Length;
+
+            // Half of a surrogate pair isn't a valid character
+            if (char.IsHighSurrogate(description[length - 1]))
+                length--;
+
+            return description.Substring(0, length) + ending;
         }
 
         public async Task<Embed> SteamIDEmbed(string profileURL)

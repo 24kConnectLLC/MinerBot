@@ -158,7 +158,8 @@ public class PublicModule : ModuleBase<SocketCommandContext>
     [Command("newmaps")]
     public async Task GetLatestMaps()
     {
-        await ReplyAsync(message:"__**Latest Maps:**__",embeds: await _SteamAPIService.GetLatestMapsEmbeds(totalMaps: 3));
+        foreach (var (text, embeds) in await _SteamAPIService.GetLatestMapsMessages("__**Latest Maps:**__", totalMaps: 3))
+            await ReplyAsync(message: text, embeds: embeds);
     }
 
     [Command("Map")]
