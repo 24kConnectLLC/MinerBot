@@ -101,6 +101,18 @@ namespace MinerBot.Tests
         }
 
         [Fact]
+        public async Task LatestMapsReusesTheQueryOfTheNotificationJob()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+            discord.Steam.LatestItems.Add(FakeGetData.CreateItem(6));
+
+            await discord.RunNotificationJobAsync();
+            await discord.SendSlashCommandAsync("maps", "latest");
+
+            Assert.Single(discord.StepNames, step => step == QueryStep);
+        }
+
+        [Fact]
         public async Task NewMapsCommandAsksForItsOwnCount()
         {
             await using var discord = await FakeDiscord.StartAsync();

@@ -15,6 +15,9 @@ namespace MinerBot_2._0.Jobs
         public SeenItems<LobbyInfo> Lobbies { get; } = new("lobbies", lobby => lobby.LobbyId);
 
         public bool GuildEventsHooked { get; set; }
+
+        // When the oldest map of the first good read was last updated, see GuildNotificationJob.GetNewMaps
+        public DateTime? MapBaselineTime { get; set; }
     }
 
     public class SeenItems<T>(string name, Func<T, ulong> getID)
