@@ -137,7 +137,11 @@ namespace MinerBot_2._0.Jobs
                 if (mapList.Count == 0)
                     return null;
 
-                return _state.Maps.FindNew(mapList);
+                // The read is only the top of Steam's ranking by last update, so a map moves into it from below when one above is
+                // deleted or hidden. That map is no newer than the oldest one of the first read, unlike a map that was added or updated.
+                _state.MapBaselineTime ??= mapList.Min(map => map.TimeUpdated);
+
+                return _state.Maps.FindNew(mapList).Where(map => map.TimeUpdated > _state.MapBaselineTime).ToList();
             }
             catch (Exception e)
             {

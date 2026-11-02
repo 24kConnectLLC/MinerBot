@@ -1,5 +1,6 @@
 using Discord;
 using MinerBot_2._0.Jobs;
+using Steam.Models;
 using SteamWebAPIAccess.Models;
 
 namespace MinerBot.Tests
@@ -585,6 +586,114 @@ namespace MinerBot.Tests
             await discord.RunNotificationJobAsync();
 
             Assert.Equal([NewMapTitle], SentTitles(discord));
+        }
+
+        // Maps from under the five of a read
+
+        // Steam ranks maps by their last update, so a map under a read is no newer than the oldest map of that read
+        static PublishedFileDetailsModel MapUnderTheRead(int id, int daysOlder = 1)
+        {
+            var map = FakeGetData.CreateItem(id);
+            map.TimeUpdated = FakeGetData.CreateItem(1).TimeUpdated.AddDays(-daysOlder);
+            return map;
+        }
+
+        [Theory]
+        [InlineData(1)]
+        [InlineData(0)]
+        public async Task MapThatMovesUpWhenOneAboveIsRemovedIsNotAnnounced(int daysOlder)
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+            discord.Steam.LatestItems.Add(MapUnderTheRead(6, daysOlder));
+            await discord.RunNotificationJobAsync();
+
+            discord.Steam.LatestItems.RemoveAt(2);
+            await discord.RunNotificationJobAsync();
+
+            Assert.Empty(SentTitles(discord));
+        }
+
+        [Fact]
+        public async Task MapsThatMoveUpOneAfterAnotherAreNotAnnounced()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+            discord.Steam.LatestItems.Add(MapUnderTheRead(6));
+            discord.Steam.LatestItems.Add(MapUnderTheRead(7, daysOlder: 2));
+            await discord.RunNotificationJobAsync();
+
+            for (int run = 0; run < 2; run++)
+            {
+                discord.Steam.LatestItems.RemoveAt(0);
+                await discord.RunNotificationJobAsync();
+            }
+
+            Assert.Empty(SentTitles(discord));
+
+            discord.Steam.LatestItems.Insert(0, FakeGetData.CreateItem(NewId));
+            await discord.RunNotificationJobAsync();
+
+            Assert.Equal([NewMapTitle], SentTitles(discord));
+        }
+
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task MapThatMovesUpIsNotAnnouncedAfterAFailedFirstRead(bool readThrows)
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+            var maps = discord.Steam.LatestItems;
+            maps.Add(MapUnderTheRead(6));
+
+            if (readThrows)
+                discord.Steam.Failure = new TimeoutException("Steam timed out");
+            else
+                discord.Steam.LatestItems = new();
+
+            await discord.RunNotificationJobAsync();
+
+            discord.Steam.Failure = null;
+            discord.Steam.LatestItems = maps;
+            await discord.RunNotificationJobAsync();
+
+            maps.RemoveAt(2);
+            await discord.RunNotificationJobAsync();
+
+            Assert.Empty(SentTitles(discord));
+        }
+
+        [Fact]
+        public async Task MapThatMovedUpIsAnnouncedOnceItIsUpdated()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+            var map = MapUnderTheRead(6);
+            discord.Steam.LatestItems.Add(map);
+            await discord.RunNotificationJobAsync();
+
+            discord.Steam.LatestItems.RemoveAt(2);
+            await discord.RunNotificationJobAsync();
+
+            // An update puts a map on top of Steam's list
+            map.TimeUpdated = FakeGetData.CreateItem(NewId).TimeUpdated;
+            discord.Steam.LatestItems.Remove(map);
+            discord.Steam.LatestItems.Insert(0, map);
+            await discord.RunNotificationJobAsync();
+            await discord.RunNotificationJobAsync();
+
+            Assert.Equal(["Map 6"], SentTitles(discord));
+        }
+
+        [Fact]
+        public async Task MapMadePublicAfterTheFirstReadIsAnnounced()
+        {
+            await using var discord = await StartWithBaselineAsync();
+
+            // It was hidden during the first read, so its time can be older than that read
+            var map = FakeGetData.CreateItem(6);
+            map.TimeUpdated = FakeGetData.CreateItem(3).TimeUpdated;
+            discord.Steam.LatestItems.Insert(0, map);
+            await discord.RunNotificationJobAsync();
+
+            Assert.Equal(["Map 6"], SentTitles(discord));
         }
 
         // Guild events

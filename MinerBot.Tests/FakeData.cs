@@ -32,13 +32,15 @@ namespace MinerBot.Tests
         public Exception? Failure { get; set; }
         public ulong? RequestedId { get; private set; }
 
+        // Steam's IDs grow over time, so a higher ID is also a newer map
         public static PublishedFileDetailsModel CreateItem(int id) => new()
         {
             PublishedFileId = (ulong)id,
             Title = $"Map {id}",
             Description = "A map",
             FileUrl = new Uri("https://example.com/map"),
-            Tags = new List<string>()
+            Tags = new List<string>(),
+            TimeUpdated = DateTime.UnixEpoch.AddDays(id)
         };
 
         public Task<List<PublishedFileDetailsModel>> GetLatestWorkshopItems(int numPerPage) => Call(LatestItems.Take(numPerPage).ToList());

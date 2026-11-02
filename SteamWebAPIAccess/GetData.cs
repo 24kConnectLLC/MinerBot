@@ -224,7 +224,7 @@ namespace SteamWebAPIAccess
             return callback.Data.FirstOrDefault();
         }
 
-        // Use WEBAPI Query Files, k_PublishedFileQueryType_RankedByPublicationDate (1), k_PFI_MatchingFileType_Items (0)
+        // Use WEBAPI Query Files, k_PublishedFileQueryType_RankedByLastUpdatedDate (21), k_PFI_MatchingFileType_Items (0)
         // Learn more: https://partner.steamgames.com/doc/webapi/IPublishedFileService#EPublishedFileInfoMatchingFileType
         // Ideas:
         // - Every 15 minutes, run a query that fetches the first 5 latest published items. Have an old list to compare to. If any changes are made then display the differences.
@@ -237,7 +237,7 @@ namespace SteamWebAPIAccess
             int pageNum = 1;
             var uriArgs = new Dictionary<string, object?>
             {
-                ["query_type"] = 21, //SteamKit2.EPublishedFileQueryType.RankedByPublicationDate
+                ["query_type"] = 21, //SteamKit2.Internal.EPublishedFileQueryType.k_PublishedFileQueryType_RankedByLastUpdatedDate
                 ["page"] = pageNum,
                 ["cursor"] = "",//*
                 ["numperpage"] = numPerPage,
