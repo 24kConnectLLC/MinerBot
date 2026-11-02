@@ -109,12 +109,21 @@ public class PublicModule : ModuleBase<SocketCommandContext>
     [Alias("ArmourList")]
     public async Task ArmorListByHelmet([Remainder] string helmetType)
     {
+        var helmetName = helmetType.Replace("-","_");
+
+        // TryParse also accepts numbers and comma separated names, which aren't helmets
+        if (!helmetName.All(c => char.IsLetter(c) || c == '_') || !Enum.TryParse(helmetName, true, out HelmentType helmet))
+        {
+            await ReplyAsync("hmmm.. that helmet is not in my helmet list. Please type +helmets to see the full helmet list.", allowedMentions: AllowedMentions.None);
+            return;
+        }
+
         var component = new ComponentBuilder()
             .WithButton("Previous", "previous")
             .WithButton("Next", "next")
             .Build();
 
-        await ReplyAsync(embed: await _ArmorService.ArmorListEmbed(Enum.Parse<HelmentType>(helmetType.Replace("-","_"),true)), components: component);
+        await ReplyAsync(embed: await _ArmorService.ArmorListEmbed(helmet), components: component);
     }
 
     [Command("Armor")]

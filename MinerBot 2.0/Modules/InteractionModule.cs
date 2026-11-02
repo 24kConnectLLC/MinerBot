@@ -54,7 +54,9 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
         [SlashCommand("lobbies", "Finds all Lobbies currently publically open in Murder Miners.")]
         public async Task GetLobbyList()
         {
-            await RespondAsync(embed: await _SteamAPIService.LobbyListEmbed());
+            await DeferAsync();
+
+            await FollowupAsync(embed: await _SteamAPIService.LobbyListEmbed());
         }
 
         //[Discord.Interactions.RequireOwner]
@@ -124,6 +126,8 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
         [SlashCommand("list", "Gets a list of all armor styles.")]
         public async Task ArmorList([Summary(description: "Optional: Filter armor by helmet by adding the helmet name.")] HelmentType helmetType = HelmentType.All)
         {
+            await DeferAsync();
+
             var armors = await _ArmorService.GetArmorListNames(helmetType);
 
             var itemsInPage = armors.Count();
@@ -135,24 +139,26 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
                 .WithButton("Next", $"armorlist:{Context.Interaction.User.Id},0,next,{helmetType}")
                 .Build();
 
-                await RespondAsync(embed: await _ArmorService.ArmorListEmbed(helmetType), components: component);
+                await FollowupAsync(embed: await _ArmorService.ArmorListEmbed(helmetType), components: component);
             }
             else
-                await RespondAsync(embed: await _ArmorService.ArmorListEmbed(helmetType));
+                await FollowupAsync(embed: await _ArmorService.ArmorListEmbed(helmetType));
         }
 
         [SlashCommand("lookup", "Finds the armor style you are looking for. Use /armor list to find all armor styles.")]
         public async Task GetArmor([Summary(description: "Required: Name of armor style.")] [Autocomplete(typeof(ArmorAutocompleteHandler))] string armorName)
         {
+            await DeferAsync();
+
             var armor = await _ArmorService.GetArmorStyle(armorName);
             if (armor == null)
             {
-                await RespondAsync(embed: await _ArmorService.ErrorEmbed());
+                await FollowupAsync(embed: await _ArmorService.ErrorEmbed());
                 return;
             }
 
             var result = await _ArmorService.ArmorEmbed(armor);
-            await RespondWithFileAsync(result.ArmorImage, embed: result.ArmorEmbed);
+            await FollowupWithFileAsync(result.ArmorImage, embed: result.ArmorEmbed);
         }
 
         //[SlashCommand("helmets", "Gets a list of all possible helmet types.")]
@@ -172,13 +178,14 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
         [SlashCommand("latest", "Returns the 5 detailed results of the most Newst Maps on the Murder Miners Workshop.")]
         public async Task GetLatestWorkshopItems()
         {
+            await DeferAsync();
+
             var component = new ComponentBuilder()
                 .WithButton("Previous", $"maplist:{Context.Interaction.User.Id},0,previous", disabled: true)
                 .WithButton("Next", $"maplist:{Context.Interaction.User.Id},0,next")
                 .Build();
 
-            await RespondAsync("__**Latest Maps: (1/5)**__", embed: await _SteamAPIService.GetLatestMapsEmbed(),
-                options: new RequestOptions() { Timeout = 10 },
+            await FollowupAsync("__**Latest Maps: (1/5)**__", embed: await _SteamAPIService.GetLatestMapsEmbed(),
                 components: component);
         }
 
@@ -186,7 +193,9 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
         [SlashCommand("lookup", "Returns a detailed result of the Murder Miners Workshop Map Link you provided.")]
         public async Task GetWorkshopItem([Summary(description: "Required: A Steam Workshop Link of the Map.")] string mapURL)
         {
-            await RespondAsync(embed: await _SteamAPIService.GetMapEmbed(mapURL));
+            await DeferAsync();
+
+            await FollowupAsync(embed: await _SteamAPIService.GetMapEmbed(mapURL));
         }
     }
 
@@ -201,7 +210,9 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
         [SlashCommand("steam_id", "Returns all Steam ID formats for the supplied steam profile.")]
         public async Task GetSteamID([Summary(description: "Required: A USER Steam Profile Link.")] string profileURL)
         {
-            await RespondAsync(embed: await _SteamAPIService.SteamIDEmbed(profileURL));
+            await DeferAsync();
+
+            await FollowupAsync(embed: await _SteamAPIService.SteamIDEmbed(profileURL));
         }
 
         [SlashCommand("info", "More Info and Credits about Miner Bot")]
@@ -223,6 +234,8 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
         [SlashCommand("set_channels", "Sets Channels for Notifications. Scans every 5 minutes (except announce command). Admin Only.")]
         public async Task SetNotificationChannel(IMessageChannel armorChannel, IMessageChannel mapChannel, IMessageChannel lobbyChannel, IMessageChannel announcementsChannel)
         {
+            await DeferAsync();
+
             await _DiscordService.UpdateGuild(new DataAccessLibrary.Discord.Models.Guild()
             {
                 guild_id = Context.Guild.Id,
@@ -231,16 +244,18 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
                 lobby_channel_id = lobbyChannel.Id,
                 announcements_channel_id = announcementsChannel.Id
             });
-            await RespondAsync("Thanks for setting the channels!");
+            await FollowupAsync("Thanks for setting the channels!");
         }
 
         [RequireUserPermission(GuildPermission.Administrator)]
         [SlashCommand("announce", "Creates an announcement. Admin Only.")]
         public async Task Announce(string message)
         {
+            await DeferAsync();
+
             //await AnnounceService.Announce("Announcement", message);
             await _DiscordService.SendAnnouncement(message, Context.Guild.Id);
-            await RespondAsync("Announcement Sent!");
+            await FollowupAsync("Announcement Sent!");
         }
 
         //[Discord.Interactions.RequireOwner]
@@ -265,6 +280,8 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
     [ComponentInteraction("armorlist:*,*,*,*", ignoreGroupNames: true, TreatAsRegex = false)]
     public async Task ChangeArmorListPage(string id, int page, string direction, string helmetType)
     {
+        await DeferAsync();
+
         page += (direction == "previous" ? -1 : 1);
 
         var helmetTypeE = Enum.Parse<HelmentType>(helmetType);
@@ -280,14 +297,15 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
                 .WithButton("Next", $"armorlist:{Context.Interaction.User.Id},{page},next,{helmetTypeE}", disabled: (itemsInPage < _ArmorService.ItemsPerPage ? true : false))
                 .Build();
 
-        var interaction = Context.Interaction as IComponentInteraction;
-        await interaction.UpdateAsync(a => { a.Embed = embed; a.Components = component; });
+        await ModifyOriginalResponseAsync(a => { a.Embed = embed; a.Components = component; });
     }
 
     [DoUserCheck]
     [ComponentInteraction("maplist:*,*,*", ignoreGroupNames: true, TreatAsRegex = false)]
     public async Task ChangeMapListPage(string id, int page, string direction)
     {
+        await DeferAsync();
+
         page += (direction == "previous" ? -1 : 1);
 
         var embed = await _SteamAPIService.GetLatestMapsEmbed(page: page);
@@ -299,8 +317,7 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
                 .WithButton("Next", $"maplist:{Context.Interaction.User.Id},{page},next", disabled: (page >= maxItemPage ? true : false))
                 .Build();
 
-        var interaction = Context.Interaction as IComponentInteraction;
-        await interaction.UpdateAsync(a => { a.Embed = embed; a.Components = component; a.Content = $"__**Latest Maps: ({page + 1}/5)**__"; });
+        await ModifyOriginalResponseAsync(a => { a.Embed = embed; a.Components = component; a.Content = $"__**Latest Maps: ({page + 1}/5)**__"; });
     }
 
     // Use [ComponentInteraction] to handle message component interactions. Message component interaction with the matching customId will be executed.
@@ -332,18 +349,20 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
     [MessageCommand("pin")]
     public async Task PinMessageAsync(IMessage message)
     {
+        await DeferAsync();
+
         // make a safety cast to check if the message is ISystem- or IUserMessage
         if (message is not IUserMessage userMessage)
-            await RespondAsync(text: ":x: You cant pin system messages!");
+            await FollowupAsync(text: ":x: You cant pin system messages!");
 
         // if the pins in this channel are equal to or above 50, no more messages can be pinned.
         else if ((await Context.Channel.GetPinnedMessagesAsync()).Count >= 50)
-            await RespondAsync(text: ":x: You cant pin any more messages, the max has already been reached in this channel!");
+            await FollowupAsync(text: ":x: You cant pin any more messages, the max has already been reached in this channel!");
 
         else
         {
             await userMessage.PinAsync();
-            await RespondAsync(":white_check_mark: Successfully pinned message!");
+            await FollowupAsync(":white_check_mark: Successfully pinned message!");
         }
     }
 

@@ -80,7 +80,7 @@ namespace MinerBot_2._0.Attributes
                 return Task.FromResult(PreconditionResult.FromSuccess());
             }
 
-            return Task.FromResult(PreconditionResult.FromError($"This command is usable <t:{((DateTimeOffset)target.Last().expireAt).ToUnixTimeSeconds()}:R>."));
+            return Task.FromResult(PreconditionResult.FromError($"This command is usable <t:{((DateTimeOffset)commands.Last().expireAt).ToUnixTimeSeconds()}:R>."));
         }
         public static Task ClearExpiredCommands()
         {
