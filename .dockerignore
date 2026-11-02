@@ -1,6 +1,7 @@
 **/.classpath
 **/.dockerignore
 **/.env
+**/.env.*
 **/.git
 **/.gitignore
 **/.project
@@ -11,6 +12,11 @@
 **/*.*proj.user
 **/*.dbmdl
 **/*.jfm
+**/*.key
+**/*.pem
+**/*.pfx
+**/*.snk
+**/appsettings*.json
 **/azds.yaml
 **/bin
 **/charts
@@ -19,9 +25,13 @@
 **/node_modules
 **/npm-debug.log
 **/obj
+**/Properties/launchSettings.json
+**/Properties/PublishProfiles
 **/secrets.dev.yaml
+**/SteamToken.txt
 **/values.dev.yaml
 LICENSE
+MinerBot 2.0/data
 README.md
 !**/.gitignore
 !.git/HEAD

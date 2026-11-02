@@ -187,6 +187,25 @@ dotnet run
 
 ---
 
+## 🐳 Run in Docker
+
+Local settings stay out of the image, so pass them when the container starts. Add the connection string to your `.env` file:
+
+```env
+ConnectionStrings__DefaultConnection=SERVER={Server Host};PORT=3306;DATABASE={Database Name};UID={User ID};PASSWORD={Password};SSLMODE=Preferred;Connection Timeout=30;
+```
+
+Then build from the repository root and start the container:
+
+```bash
+docker build -f "MinerBot 2.0/Dockerfile" -t minerbot .
+docker run -d --name minerbot --env-file .env -v minerbot-data:/app/data minerbot
+```
+
+`/app/data` holds the Steam login token, so keep it on a named volume.
+
+---
+
 ## 🧩 Troubleshooting
 
 - **Slash commands not showing up?**
