@@ -357,17 +357,7 @@ namespace MinerBot_2._0.Services
         // The title of the embed links to the full description on Steam
         private static string? ShortenMapDescription(string? description)
         {
-            if (description == null || description.Length <= MaxMapDescriptionLength)
-                return description;
-
-            const string ending = "...";
-            int length = MaxMapDescriptionLength - ending.Length;
-
-            // Half of a surrogate pair isn't a valid character
-            if (char.IsHighSurrogate(description[length - 1]))
-                length--;
-
-            return description.Substring(0, length) + ending;
+            return UIUtils.shortenTextForEmbed(description, MaxMapDescriptionLength);
         }
 
         public async Task<Embed> SteamIDEmbed(string profileURL)
