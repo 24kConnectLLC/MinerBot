@@ -23,6 +23,7 @@ builder.Services.AddSingleton<CommandHandlingService>();
 builder.Services.AddSingleton<HttpClient>();
 builder.Services.AddSingleton<PictureService>();
 builder.Services.AddSingleton<AnnounceService>();
+builder.Services.AddSingleton<OwnerAlertService>();
 builder.Services.AddSingleton<ArmorService>();
 builder.Services.AddSingleton<SteamAPIService>();
 builder.Services.AddSingleton<DiscordService>();
@@ -91,6 +92,7 @@ steamApi.SetCredentials(Environment.GetEnvironmentVariable("STEAMWEB_PUB_KEY"),
                         Environment.GetEnvironmentVariable("STEAMUSER_REMEMBERME"),
                         Environment.GetEnvironmentVariable("STEAMUSER_NAME"),
                         Environment.GetEnvironmentVariable("STEAMUSER_PASSWORD"));
+steamApi.AlertOwner = host.Services.GetRequiredService<OwnerAlertService>().SendAsync;
 steamApi.AuthenticateClient();
 
 var getSteamAPI = host.Services.GetService<IGetData>();
