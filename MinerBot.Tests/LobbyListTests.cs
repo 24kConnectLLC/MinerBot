@@ -215,17 +215,6 @@ namespace MinerBot.Tests
         }
 
         [Fact]
-        public async Task PrefixCommandShowsAFullGame()
-        {
-            await using var discord = await FakeDiscord.StartAsync();
-            discord.Steam.Lobbies = ManyLobbies();
-
-            await discord.SendMessageAsync("+Lobbies");
-
-            Assert.Contains("more lobbies", Assert.Single(discord.Single("send message").EmbedDescriptions));
-        }
-
-        [Fact]
         public async Task SlashCommandSaysWhenSteamCanNotBeReached()
         {
             await using var discord = await FakeDiscord.StartAsync();
@@ -236,17 +225,6 @@ namespace MinerBot.Tests
             var description = Assert.Single(discord.Single("followup").EmbedDescriptions);
             Assert.StartsWith(Unreachable, description);
             Assert.DoesNotContain(NoLobbies, description);
-        }
-
-        [Fact]
-        public async Task PrefixCommandSaysWhenSteamCanNotBeReached()
-        {
-            await using var discord = await FakeDiscord.StartAsync();
-            discord.Steam.LobbiesAvailable = false;
-
-            await discord.SendMessageAsync("+Lobbies");
-
-            Assert.StartsWith(Unreachable, Assert.Single(discord.Single("send message").EmbedDescriptions));
         }
 
         [Fact]

@@ -721,5 +721,41 @@ namespace MinerBot.Tests
 
             Assert.Single(discord.Steps, step => step.Name == nameof(FakeGuildData.GetGuild));
         }
+
+        // These show what the bot does with a join event. Whether a real one lists the bot and its role can only be seen on live Discord.
+        [Fact]
+        public async Task JoiningAServerAsAdministratorSendsTheWelcomeMessage()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+            await discord.RunNotificationJobAsync();
+
+            await discord.JoinGuildAsync($"[{FakeDiscord.BotMemberJson(FakeDiscord.BotRoleId)}]");
+
+            Assert.Contains("/admin set_channels", discord.Single(SendStep).Content);
+        }
+
+        [Fact]
+        public async Task JoiningAServerWithoutAdministratorSendsNothing()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+            await discord.RunNotificationJobAsync();
+
+            await discord.JoinGuildAsync($"[{FakeDiscord.BotMemberJson()}]");
+
+            Assert.DoesNotContain(SendStep, discord.StepNames);
+            Assert.DoesNotContain("Couldn't send welcome message!", discord.ConsoleText);
+        }
+
+        [Fact]
+        public async Task JoinEventWithoutTheBotIsLoggedAndSendsNothing()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+            await discord.RunNotificationJobAsync();
+
+            await discord.JoinGuildAsync("[]");
+
+            Assert.DoesNotContain(SendStep, discord.StepNames);
+            Assert.Contains("Couldn't send welcome message!", discord.ConsoleText);
+        }
     }
 }

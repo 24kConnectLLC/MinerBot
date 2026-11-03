@@ -32,6 +32,7 @@ MinerBot 2.0 uses modern **Slash Commands** to streamline your Murder Miners com
 
 - `/armor list (optional) [helmet-type]` — Lists all armor styles (optionally filtered by helmet type).
 - `/armor lookup [armor-name]` — Finds an armor style by name (use `/armor list` to browse).
+- `/armor helmets` — Lists all helmet types.
 
 ### Maps
 
@@ -44,6 +45,7 @@ MinerBot 2.0 uses modern **Slash Commands** to streamline your Murder Miners com
 
 ### Info
 
+- `/help` — Lists all slash commands.
 - `/more info` — Credits + more info about MinerBot.
 
 ### Lobbies
@@ -93,10 +95,12 @@ https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=8&
 MinerBot may require these capabilities depending on which features you enable:
 
 - Create slash commands in your server
-- Read and send messages in configured channels
+- Send messages in configured channels
 - Post embeds
 - Read message history
 - *(Optional)* Administrator for admin messaging / channel automation
+
+MinerBot doesn't use any privileged gateway intents, so the Message Content, Server Members and Presence switches in the Discord Developer Portal can stay off.
 
 ---
 
@@ -228,6 +232,7 @@ The direct message reaches the owner only if they share a server with the bot an
 - **Slash commands not showing up?**
   - Ensure the bot invite included the `applications.commands` scope.
   - Reuse the invite link to update scopes/permissions (no need to kick the bot).
+  - Check that members have the **Use Application Commands** permission in that channel.
 
 - **Database connection issues**
   - Verify host/port/credentials in `DefaultConnection`.

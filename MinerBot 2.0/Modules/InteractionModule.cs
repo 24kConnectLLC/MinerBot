@@ -45,6 +45,13 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
     //    => await RespondAsync(text: $"This voice channel has a bitrate of {(channel as IVoiceChannel).Bitrate}");
 
     [RateLimit(3)]
+    [SlashCommand("help", "Lists all of Miner Bot's slash commands.")]
+    public async Task Help()
+    {
+        await RespondAsync(embed: DiscordService.GetHelpEmbed());
+    }
+
+    [RateLimit(3)]
     [Group("murder-miners", "Commands for Murder Miners")]
 
     public class MurderMinersGroupModule() : InteractionModuleBase<SocketInteractionContext>
@@ -124,25 +131,31 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
         public ArmorService _ArmorService { get; set; }
 
         [SlashCommand("list", "Gets a list of all armor styles.")]
-        public async Task ArmorList([Summary(description: "Optional: Filter armor by helmet by adding the helmet name.")] HelmentType helmetType = HelmentType.All)
+        public async Task ArmorList([Summary(description: "Optional: Filter armor by helmet by adding the helmet name.")] [Autocomplete(typeof(HelmetAutocompleteHandler))] string helmetType = "All")
         {
+            if (!ArmorService.TryParseHelmet(helmetType, out var helmet))
+            {
+                await RespondAsync("hmmm.. that helmet is not in my helmet list. Please use /armor helmets to see the full helmet list.", ephemeral: true, allowedMentions: AllowedMentions.None);
+                return;
+            }
+
             await DeferAsync();
 
-            var armors = await _ArmorService.GetArmorListNames(helmetType);
+            var armors = await _ArmorService.GetArmorListNames(helmet);
 
             var itemsInPage = armors.Count();
 
             if (itemsInPage > _ArmorService.ItemsPerPage)
             {
                 var component = new ComponentBuilder()
-                .WithButton("Previous", $"armorlist:{Context.Interaction.User.Id},0,previous,{helmetType}", disabled: true)
-                .WithButton("Next", $"armorlist:{Context.Interaction.User.Id},0,next,{helmetType}")
+                .WithButton("Previous", $"armorlist:{Context.Interaction.User.Id},0,previous,{helmet}", disabled: true)
+                .WithButton("Next", $"armorlist:{Context.Interaction.User.Id},0,next,{helmet}")
                 .Build();
 
-                await FollowupAsync(embed: await _ArmorService.ArmorListEmbed(helmetType), components: component);
+                await FollowupAsync(embed: await _ArmorService.ArmorListEmbed(helmet), components: component);
             }
             else
-                await FollowupAsync(embed: await _ArmorService.ArmorListEmbed(helmetType));
+                await FollowupAsync(embed: await _ArmorService.ArmorListEmbed(helmet));
         }
 
         [SlashCommand("lookup", "Finds the armor style you are looking for. Use /armor list to find all armor styles.")]
@@ -161,14 +174,13 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
             await FollowupWithFileAsync(result.ArmorImage, embed: result.ArmorEmbed);
         }
 
-        //[SlashCommand("helmets", "Gets a list of all possible helmet types.")]
-        //public async Task GetHelmets()
-        //{
-        //    await RespondAsync(embed: await _ArmorService.GetHelmetsEmbed());
-        //}
+        [SlashCommand("helmets", "Gets a list of all possible helmet types.")]
+        public async Task GetHelmets()
+        {
+            await RespondAsync(embed: await _ArmorService.GetHelmetsEmbed());
+        }
     }
 
-    [RequireContext(ContextType.Guild)]
     [Group("maps", "Commands for Steam Workshop Maps.")]
     public class WorkshopGroupModule() : InteractionModuleBase<SocketInteractionContext>
     {
@@ -200,7 +212,6 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
     }
 
     [RateLimit(3)]
-    [RequireContext(ContextType.Guild)]
     [Group("more", "Other Useful Commands.")]
     public class MoreGroupModule() : InteractionModuleBase<SocketInteractionContext>
     {

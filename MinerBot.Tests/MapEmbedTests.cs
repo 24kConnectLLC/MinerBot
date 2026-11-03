@@ -138,49 +138,5 @@ namespace MinerBot.Tests
 
             Assert.EndsWith("...", ShortDescription(discord.Single("followup")));
         }
-
-        [Fact]
-        public async Task MapPrefixCommandShowsAMapWithALongDescription()
-        {
-            await using var discord = await FakeDiscord.StartAsync();
-            discord.Steam.WorkshopItem = LongMap(1);
-
-            await discord.SendMessageAsync($"+Map {MapUrl}");
-
-            Assert.EndsWith("...", ShortDescription(discord.Single("send message")));
-        }
-
-        [Fact]
-        public async Task NewMapsCommandSplitsAReplyThatPassesTheMessageLimit()
-        {
-            await using var discord = await FakeDiscord.StartAsync();
-            discord.Steam.LatestItems = Enumerable.Range(1, 3).Select(LongMap).ToList();
-
-            foreach (var map in discord.Steam.LatestItems)
-                map.Title = new string('t', EmbedBuilder.MaxTitleLength);
-
-            await discord.SendMessageAsync("+newmaps");
-
-            var messages = discord.Steps.Where(step => step.Name == "send message").ToList();
-
-            Assert.Equal(2, messages.Count);
-            Assert.All(messages, message => Assert.InRange(message.EmbedsLength, 1, EmbedBuilder.MaxEmbedLength));
-            Assert.Equal(3, messages.Sum(message => message.EmbedTitles.Count()));
-            Assert.Equal("__**Latest Maps:**__", messages[0].Content);
-            Assert.True(string.IsNullOrEmpty(messages[1].Content));
-        }
-
-        [Fact]
-        public async Task NewMapsCommandThatFindsNoMapsStillSendsItsHeading()
-        {
-            await using var discord = await FakeDiscord.StartAsync();
-            discord.Steam.LatestItems = new();
-
-            await discord.SendMessageAsync("+newmaps");
-
-            var reply = discord.Single("send message");
-            Assert.Equal("__**Latest Maps:**__", reply.Content);
-            Assert.Empty(reply.EmbedTitles);
-        }
     }
 }

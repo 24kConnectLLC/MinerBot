@@ -5,7 +5,6 @@ using System.Text.Json;
 using DataAccessLibrary.Armor;
 using DataAccessLibrary.Discord;
 using Discord;
-using Discord.Commands;
 using Discord.Interactions;
 using Discord.Net.Rest;
 using Discord.Net.WebSockets;
@@ -66,20 +65,22 @@ namespace MinerBot.Tests
         public IEnumerable<string> ButtonIds => Message.TryGetProperty("components", out var rows)
             ? rows.EnumerateArray().SelectMany(row => row.GetProperty("components").EnumerateArray()).Select(button => button.GetProperty("custom_id").GetString()!)
             : [];
+
+        public IEnumerable<(string Name, string Value)> Choices => Message.GetProperty("choices").EnumerateArray()
+            .Select(choice => (choice.GetProperty("name").GetString()!, choice.GetProperty("value").GetString()!));
     }
 
     // Runs the bot's real handlers on the real Discord.Net pipeline, with only the network and the data layer faked.
     // Tests send the gateway JSON that Discord would send, then read what the bot did in response.
     internal sealed class FakeDiscord : IAsyncDisposable
     {
-        public const ulong BotId = 1000, GuildId = 2000, ChannelId = 3000, DeletedChannelId = 3001, DirectChannelId = 3002, MessageId = 4000, TeamId = 7000;
+        public const ulong BotId = 1000, GuildId = 2000, JoinedGuildId = 2100, BotRoleId = 2101, ChannelId = 3000, DeletedChannelId = 3001, DirectChannelId = 3002, JoinedChannelId = 3100, MessageId = 4000, TeamId = 7000;
 
         static readonly TimeSpan WaitLimit = TimeSpan.FromSeconds(15);
 
         static long lastUserId = 5000;
 
         readonly DiscordSocketClient client;
-        readonly CommandService commands = new();
         readonly InteractionService interactions;
         readonly ServiceProvider services;
         readonly FakeGateway gateway;
@@ -116,6 +117,12 @@ namespace MinerBot.Tests
 
         public string ConsoleText => console.ToString();
 
+        // Group and name of every slash command the bot loaded, such as "armor list", or "help" for a top-level one
+        public IEnumerable<string> LoadedSlashCommands => interactions.SlashCommands.Select(command => (command.Module.SlashGroupName + " " + command.Name).Trim());
+
+        // The JSON the bot sent to register its commands with Discord
+        public string? RegisteredCommands { get; private set; }
+
         public IReadOnlyList<Step> Steps
         {
             get
@@ -145,7 +152,7 @@ namespace MinerBot.Tests
             client = new DiscordSocketClient(new DiscordSocketConfig
             {
                 GatewayHost = "wss://gateway.invalid",
-                GatewayIntents = GatewayIntents.Guilds | GatewayIntents.GuildMessages,
+                GatewayIntents = GatewayIntents.Guilds,
                 LogGatewayIntentWarnings = false,
                 LogLevel = LogSeverity.Debug,
                 RestClientProvider = _ => new FakeRest(this),
@@ -163,9 +170,7 @@ namespace MinerBot.Tests
             services = new ServiceCollection()
                 .AddSingleton(client)
                 .AddSingleton(interactions)
-                .AddSingleton(commands)
                 .AddSingleton<InteractionHandler>()
-                .AddSingleton<CommandHandlingService>()
                 .AddSingleton<HttpClient>()
                 .AddSingleton<PictureService>()
                 .AddSingleton<AnnounceService>()
@@ -200,16 +205,16 @@ namespace MinerBot.Tests
         {
             Console.SetOut(console);
 
-            await services.GetRequiredService<CommandHandlingService>().InitializeAsync();
             await services.GetRequiredService<InteractionHandler>().InitializeAsync();
 
             // InitializeAsync looks in the entry assembly, which is the test runner here
-            await commands.AddModulesAsync(typeof(CommandHandlingService).Assembly, services);
-            await interactions.AddModulesAsync(typeof(CommandHandlingService).Assembly, services);
+            await interactions.AddModulesAsync(typeof(InteractionHandler).Assembly, services);
 
             // Added after the bot's own handlers, so these fire once those are done
-            commands.CommandExecuted += (_, _, _) => MarkExecuted();
             interactions.InteractionExecuted += (_, _, _) => MarkExecuted();
+
+            // Autocomplete handlers don't raise InteractionExecuted
+            interactions.AutocompleteHandlerExecuted += (_, _, _) => MarkExecuted();
 
             client.Ready += () =>
             {
@@ -264,37 +269,46 @@ namespace MinerBot.Tests
 
         // Sending
 
-        // A message in the guild's channel, waits until the command is done
-        public async Task SendMessageAsync(string content, ulong? userId = null)
-        {
-            var authorId = userId ?? UserId;
-
-            await SendAsync("MESSAGE_CREATE", $$"""
-                {"id":"{{SnowflakeUtils.ToSnowflake(DateTimeOffset.UtcNow)}}","channel_id":"{{ChannelId}}","guild_id":"{{GuildId}}",
-                 "author":{{UserJson(authorId)}},"member":{{MemberJson(authorId)}},"content":{{JsonSerializer.Serialize(content)}},
-                 "timestamp":"2026-01-01T00:00:00+00:00","tts":false,"mention_everyone":false,"mentions":[],"mention_roles":[],
-                 "attachments":[],"embeds":[],"pinned":false,"type":0}
-                """);
-        }
-
         // /group subcommand with options like {"name":"map-url","type":3,"value":"x"}
-        public Task SendSlashCommandAsync(string group, string subcommand, string options = "", string resolved = "{}", ulong? userId = null, TimeSpan age = default)
+        public Task SendSlashCommandAsync(string group, string subcommand, string options = "", string resolved = "{}", ulong? userId = null, TimeSpan age = default, bool direct = false)
         {
             var data = $$"""{"id":"1","name":"{{group}}","type":1,"options":[{"name":"{{subcommand}}","type":1,"options":[{{options}}]}],"resolved":{{resolved}}}""";
-            return SendInteractionAsync(type: 2, data, userId ?? UserId, age);
+            return SendInteractionAsync(type: 2, data, userId ?? UserId, age, direct: direct);
+        }
+
+        // /name, with no group
+        public Task SendTopLevelCommandAsync(string name, bool direct = false)
+        {
+            var data = $$"""{"id":"1","name":"{{name}}","type":1}""";
+            return SendInteractionAsync(type: 2, data, UserId, default, direct: direct);
+        }
+
+        // What Discord sends while the user types in an option of /group subcommand
+        public Task SendAutocompleteAsync(string group, string subcommand, string option, string typed, bool direct = false)
+        {
+            var data = $$"""{"id":"1","name":"{{group}}","type":1,"options":[{"name":"{{subcommand}}","type":1,"options":[{"name":"{{option}}","type":3,"value":{{JsonSerializer.Serialize(typed)}},"focused":true}]}]}""";
+            return SendInteractionAsync(type: 4, data, UserId, default, direct: direct);
         }
 
         // A click on a button of the bot's message
-        public Task SendButtonAsync(string customId, ulong? userId = null)
+        public Task SendButtonAsync(string customId, ulong? userId = null, bool direct = false)
         {
             var data = $$"""{"custom_id":{{JsonSerializer.Serialize(customId)}},"component_type":2}""";
-            return SendInteractionAsync(type: 3, data, userId ?? UserId, default, $$""","message":{{MessageJson()}}""");
+            return SendInteractionAsync(type: 3, data, userId ?? UserId, default, $$""","message":{{MessageJson(channelId: direct ? DirectChannelId : ChannelId)}}""", direct);
         }
 
         public Task SendMessageCommandAsync(string name, int messageType = 0)
         {
             var data = $$"""{"id":"1","name":"{{name}}","type":3,"target_id":"{{MessageId}}","resolved":{"messages":{"{{MessageId}}":{{MessageJson(messageType)}} } } }""";
             return SendInteractionAsync(type: 2, data, UserId, default);
+        }
+
+        // A member of a resolved list has no user field, Discord sends the user next to it
+        public Task SendUserCommandAsync(string name, ulong targetId, ulong? userId = null)
+        {
+            var member = """{"roles":[],"joined_at":"2020-01-01T00:00:00+00:00","deaf":false,"mute":false,"permissions":"0"}""";
+            var data = $$"""{"id":"1","name":"{{name}}","type":2,"target_id":"{{targetId}}","resolved":{"users":{"{{targetId}}":{{UserJson(targetId)}} },"members":{"{{targetId}}":{{member}} } } }""";
+            return SendInteractionAsync(type: 2, data, userId ?? UserId, default);
         }
 
         // Autocomplete for a slash command that doesn't exist, which is the only way the handler sees one
@@ -304,15 +318,23 @@ namespace MinerBot.Tests
             return SendInteractionAsync(type: 4, data, UserId, default);
         }
 
-        Task SendInteractionAsync(int type, string data, ulong userId, TimeSpan age, string extraFields = "")
+        Task SendInteractionAsync(int type, string data, ulong userId, TimeSpan age, string extraFields = "", bool direct = false)
         {
             // Discord.Net reads the age of an interaction from its ID
             var id = SnowflakeUtils.ToSnowflake(DateTimeOffset.UtcNow - age);
 
+            // In a direct message there's no guild, and a user instead of a member
+            var place = direct
+                ? $$"""
+                  "channel_id":"{{DirectChannelId}}","channel":{{DirectChannelJson(userId)}},"user":{{UserJson(userId)}}
+                  """
+                : $$"""
+                  "guild_id":"{{GuildId}}","channel_id":"{{ChannelId}}","channel":{"id":"{{ChannelId}}","type":0},"member":{{MemberJson(userId)}}
+                  """;
+
             return SendAsync("INTERACTION_CREATE", $$"""
                 {"id":"{{id}}","application_id":"{{BotId}}","type":{{type}},"token":"interaction-token","version":1,
-                 "guild_id":"{{GuildId}}","channel_id":"{{ChannelId}}","channel":{"id":"{{ChannelId}}","type":0},
-                 "member":{{MemberJson(userId)}},"data":{{data}},"entitlements":[],"app_permissions":"0"{{extraFields}}}
+                 {{place}},"data":{{data}},"entitlements":[],"app_permissions":"0"{{extraFields}}}
                 """);
         }
 
@@ -333,6 +355,23 @@ namespace MinerBot.Tests
         }
 
         public Task LeaveGuildAsync() => gateway.DeliverAsync("GUILD_DELETE", $$"""{"id":"{{GuildId}}"}""");
+
+        // The bot's member the way a join event lists it, BotRoleId gives it Administrator
+        public static string BotMemberJson(params ulong[] roles) => $$"""
+            {"user":{{UserJson(BotId, bot: true)}},"roles":[{{string.Join(",", roles.Select(role => $"\"{role}\""))}}],"joined_at":"2026-01-01T00:00:00+00:00","deaf":false,"mute":false}
+            """;
+
+        // Being added to a server. An "unavailable":false here would make it an existing guild coming back, and JoinedGuild wouldn't fire.
+        public Task JoinGuildAsync(string members) => gateway.DeliverAsync("GUILD_CREATE", $$"""
+            {"id":"{{JoinedGuildId}}","name":"New guild","owner_id":"{{OtherUserId}}","verification_level":0,"default_message_notifications":0,
+             "explicit_content_filter":0,"mfa_level":0,"premium_tier":0,"nsfw_level":0,"features":[],"emojis":[],"stickers":[],
+             "system_channel_id":"{{JoinedChannelId}}","public_updates_channel_id":null,
+             "roles":[{"id":"{{JoinedGuildId}}","name":"@everyone","permissions":"0","position":0,"color":0,"hoist":false,"managed":false,"mentionable":false},
+                      {"id":"{{BotRoleId}}","name":"MinerBot","permissions":"8","position":1,"color":0,"hoist":false,"managed":true,"mentionable":false,"tags":{"bot_id":"{{BotId}}"} }],
+             "channels":[{"id":"{{JoinedChannelId}}","type":0,"name":"general","position":0,"permission_overwrites":[]}],
+             "member_count":2,"large":false,"members":{{members}},"presences":[],"threads":[],"voice_states":[],"guild_scheduled_events":[],
+             "joined_at":"2026-01-01T00:00:00+00:00"}
+            """);
 
         public Task SendOwnerAlertAsync(string message) => services.GetRequiredService<OwnerAlertService>().SendAsync(message);
 
@@ -360,8 +399,8 @@ namespace MinerBot.Tests
         static string MemberJson(ulong id) =>
             $$"""{"user":{{UserJson(id)}},"roles":[],"joined_at":"2020-01-01T00:00:00+00:00","deaf":false,"mute":false,"permissions":"0"}""";
 
-        static string MessageJson(int type = 0) => $$"""
-            {"id":"{{MessageId}}","channel_id":"{{ChannelId}}","author":{{UserJson(BotId, bot: true)}},"content":"",
+        static string MessageJson(int type = 0, ulong channelId = ChannelId) => $$"""
+            {"id":"{{MessageId}}","channel_id":"{{channelId}}","author":{{UserJson(BotId, bot: true)}},"content":"",
              "timestamp":"2026-01-01T00:00:00+00:00","tts":false,"mention_everyone":false,"mentions":[],"mention_roles":[],
              "attachments":[],"embeds":[],"pinned":false,"type":{{type}}}
             """;
@@ -461,6 +500,9 @@ namespace MinerBot.Tests
                 if (name != null && name == discord.FailStep && Interlocked.Decrement(ref discord.FailStepAfter) < 0)
                     return Response(HttpStatusCode.Forbidden, """{"code":50013,"message":"Missing Permissions"}""");
 
+                if (method == "PUT" && endpoint.EndsWith("/commands"))
+                    discord.RegisteredCommands = body;
+
                 if (endpoint == "users/@me")
                     return Response(HttpStatusCode.OK, UserJson(BotId, bot: true));
 
@@ -492,6 +534,7 @@ namespace MinerBot.Tests
                         5 => "defer",
                         6 => "defer update",
                         7 => "update message",
+                        8 => "autocomplete",
                         var type => $"callback {type}"
                     };
 

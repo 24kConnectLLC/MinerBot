@@ -264,10 +264,8 @@ namespace MinerBot_2._0.Services
 
         // Need to embeds seperate into a different class. _SteamAPIService.Embeds.GetMapEmbed()
 
-        public async Task<Embed[]> GetLatestMapsEmbeds(List<Steam.Models.PublishedFileDetailsModel>? latestMaps = null, int totalMaps = 0)
+        public async Task<Embed[]> GetLatestMapsEmbeds(List<Steam.Models.PublishedFileDetailsModel> latestMaps)
         {
-            if (latestMaps == null)
-                latestMaps = await GetLatestWorkshopItems(totalMaps);
             List<Embed> embeds = new();
             foreach (var item in latestMaps)
                 embeds.Add(await FormatMapEmbed(item));
@@ -275,9 +273,9 @@ namespace MinerBot_2._0.Services
             return embeds.ToArray();
         }
 
-        public async Task<List<(string? Text, Embed[] Embeds)>> GetLatestMapsMessages(string heading, List<Steam.Models.PublishedFileDetailsModel>? latestMaps = null, int totalMaps = 0)
+        public async Task<List<(string? Text, Embed[] Embeds)>> GetLatestMapsMessages(string heading, List<Steam.Models.PublishedFileDetailsModel> latestMaps)
         {
-            var groups = GroupEmbedsByLength(await GetLatestMapsEmbeds(latestMaps, totalMaps));
+            var groups = GroupEmbedsByLength(await GetLatestMapsEmbeds(latestMaps));
 
             // Only the first message has the heading
             return groups.Select((embeds, index) => (index == 0 ? heading : null, embeds)).ToList();

@@ -111,17 +111,5 @@ namespace MinerBot.Tests
 
             Assert.Single(discord.StepNames, step => step == QueryStep);
         }
-
-        [Fact]
-        public async Task NewMapsCommandAsksForItsOwnCount()
-        {
-            await using var discord = await FakeDiscord.StartAsync();
-
-            await discord.SendMessageAsync("+newmaps");
-            await discord.SendSlashCommandAsync("maps", "latest");
-
-            Assert.Equal(2, discord.StepNames.Count(step => step == QueryStep));
-            Assert.Equal(["Map 1", "Map 2", "Map 3"], discord.Single("send message").EmbedTitles);
-        }
     }
 }
