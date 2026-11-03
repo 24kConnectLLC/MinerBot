@@ -297,15 +297,19 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
 
         var helmetTypeE = Enum.Parse<HelmentType>(helmetType);
 
-        var armors = await _ArmorService.GetArmorListNames(helmetTypeE, page);
+        var allArmors = (await _ArmorService.GetArmorListNames(helmetTypeE)).ToList();
 
-        var itemsInPage = armors.Count();
+        // A page past the end shows the last one, because armor can be removed after the buttons were made
+        var lastPage = Math.Max(0, (allArmors.Count - 1) / _ArmorService.ItemsPerPage);
+        page = Math.Clamp(page, 0, lastPage);
+
+        var armors = allArmors.Skip(page * _ArmorService.ItemsPerPage).Take(_ArmorService.ItemsPerPage);
 
         var embed = await _ArmorService.ArmorListEmbed(helmetTypeE, armors, page);
 
         var component = new ComponentBuilder()
                 .WithButton("Previous", $"armorlist:{Context.Interaction.User.Id},{page},previous,{helmetTypeE}", disabled: (page == 0 ? true : false))
-                .WithButton("Next", $"armorlist:{Context.Interaction.User.Id},{page},next,{helmetTypeE}", disabled: (itemsInPage < _ArmorService.ItemsPerPage ? true : false))
+                .WithButton("Next", $"armorlist:{Context.Interaction.User.Id},{page},next,{helmetTypeE}", disabled: (page == lastPage ? true : false))
                 .Build();
 
         await ModifyOriginalResponseAsync(a => { a.Embed = embed; a.Components = component; });
@@ -354,8 +358,10 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
     public async Task GreetUserAsync(IUser user)
         => await RespondAsync(text: $":wave: {Context.User} said hi to you, <@{user.Id}>!");
 
-    // Pins a message in the channel it is in.
-    [RequireUserPermission(GuildPermission.ManageChannels)]
+    // Pins a message in the channel it is in. The bot pins with its own permission, so the member needs Pin Messages in that channel.
+    // Discord offers it in DMs too, where there's no such permission to check, so a DM is refused first.
+    [RequireContext(ContextType.Guild)]
+    [RequireUserPermission(ChannelPermission.PinMessages)]
     [RateLimit(4)]
     [MessageCommand("pin")]
     public async Task PinMessageAsync(IMessage message)

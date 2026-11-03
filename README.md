@@ -69,13 +69,14 @@ Most servers can start with these permissions:
 - Send Messages
 - Embed Links
 - Read Message History
+- Pin Messages (for the `pin` message command)
 
-**Permissions integer (recommended):** `84992`
+**Permissions integer (recommended):** `2251799813770240`
 
 Invite URL template:
 
 ```text
-https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=84992&scope=bot%20applications.commands
+https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=2251799813770240&scope=bot%20applications.commands
 ```
 
 > Replace `YOUR_CLIENT_ID` with your Discord application’s Client ID.
@@ -98,6 +99,7 @@ MinerBot may require these capabilities depending on which features you enable:
 - Send messages in configured channels
 - Post embeds
 - Read message history
+- Pin messages, for the `pin` message command
 - *(Optional)* Administrator for admin messaging / channel automation
 
 MinerBot doesn't use any privileged gateway intents, so the Message Content, Server Members and Presence switches in the Discord Developer Portal can stay off.

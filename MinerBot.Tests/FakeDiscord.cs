@@ -62,9 +62,15 @@ namespace MinerBot.Tests
 
         static int TextLength(JsonElement json, string name) => json.TryGetProperty(name, out var text) ? text.GetString()!.Length : 0;
 
-        public IEnumerable<string> ButtonIds => Message.TryGetProperty("components", out var rows)
-            ? rows.EnumerateArray().SelectMany(row => row.GetProperty("components").EnumerateArray()).Select(button => button.GetProperty("custom_id").GetString()!)
+        IEnumerable<JsonElement> Buttons => Message.TryGetProperty("components", out var rows)
+            ? rows.EnumerateArray().SelectMany(row => row.GetProperty("components").EnumerateArray())
             : [];
+
+        public IEnumerable<string> ButtonIds => Buttons.Select(button => button.GetProperty("custom_id").GetString()!);
+
+        public IEnumerable<string> DisabledButtonIds => Buttons
+            .Where(button => button.TryGetProperty("disabled", out var disabled) && disabled.GetBoolean())
+            .Select(button => button.GetProperty("custom_id").GetString()!);
 
         public IEnumerable<(string Name, string Value)> Choices => Message.GetProperty("choices").EnumerateArray()
             .Select(choice => (choice.GetProperty("name").GetString()!, choice.GetProperty("value").GetString()!));
@@ -75,6 +81,9 @@ namespace MinerBot.Tests
     internal sealed class FakeDiscord : IAsyncDisposable
     {
         public const ulong BotId = 1000, GuildId = 2000, JoinedGuildId = 2100, BotRoleId = 2101, ChannelId = 3000, DeletedChannelId = 3001, DirectChannelId = 3002, JoinedChannelId = 3100, MessageId = 4000, TeamId = 7000;
+
+        // Roles of the first guild, which a member only has when a test sets MemberRoles. The last one is denied Pin Messages in ChannelId.
+        public const ulong PinnerRoleId = 2001, ChannelManagerRoleId = 2002, DeniedPinnerRoleId = 2003;
 
         static readonly TimeSpan WaitLimit = TimeSpan.FromSeconds(15);
 
@@ -94,6 +103,9 @@ namespace MinerBot.Tests
         // The first user owns the guild, so it passes the admin checks. The other one has no permissions.
         public ulong UserId { get; }
         public ulong OtherUserId { get; }
+
+        // Roles of the member who sends an interaction in the guild
+        public ulong[] MemberRoles { get; set; } = [];
 
         public FakeGetData Steam { get; }
         public FakeArmorData Armor { get; }
@@ -297,10 +309,11 @@ namespace MinerBot.Tests
             return SendInteractionAsync(type: 3, data, userId ?? UserId, default, $$""","message":{{MessageJson(channelId: direct ? DirectChannelId : ChannelId)}}""", direct);
         }
 
-        public Task SendMessageCommandAsync(string name, int messageType = 0)
+        public Task SendMessageCommandAsync(string name, int messageType = 0, ulong? userId = null, bool direct = false)
         {
-            var data = $$"""{"id":"1","name":"{{name}}","type":3,"target_id":"{{MessageId}}","resolved":{"messages":{"{{MessageId}}":{{MessageJson(messageType)}} } } }""";
-            return SendInteractionAsync(type: 2, data, UserId, default);
+            var message = MessageJson(messageType, channelId: direct ? DirectChannelId : ChannelId);
+            var data = $$"""{"id":"1","name":"{{name}}","type":3,"target_id":"{{MessageId}}","resolved":{"messages":{"{{MessageId}}":{{message}} } } }""";
+            return SendInteractionAsync(type: 2, data, userId ?? UserId, default, direct: direct);
         }
 
         // A member of a resolved list has no user field, Discord sends the user next to it
@@ -396,8 +409,11 @@ namespace MinerBot.Tests
             {"id":"{{DirectChannelId}}","type":1,"last_message_id":null,"recipients":[{{UserJson(userId)}}]}
             """;
 
-        static string MemberJson(ulong id) =>
-            $$"""{"user":{{UserJson(id)}},"roles":[],"joined_at":"2020-01-01T00:00:00+00:00","deaf":false,"mute":false,"permissions":"0"}""";
+        string MemberJson(ulong id) =>
+            $$"""{"user":{{UserJson(id)}},"roles":[{{string.Join(",", MemberRoles.Select(role => $"\"{role}\""))}}],"joined_at":"2020-01-01T00:00:00+00:00","deaf":false,"mute":false,"permissions":"0"}""";
+
+        static string RoleJson(ulong id, string name, GuildPermission permissions) =>
+            $$"""{"id":"{{id}}","name":"{{name}}","permissions":"{{(ulong)permissions}}","position":1,"color":0,"hoist":false,"managed":false,"mentionable":false}""";
 
         static string MessageJson(int type = 0, ulong channelId = ChannelId) => $$"""
             {"id":"{{MessageId}}","channel_id":"{{channelId}}","author":{{UserJson(BotId, bot: true)}},"content":"",
@@ -410,8 +426,12 @@ namespace MinerBot.Tests
              "private_channels":[],"application":{"id":"{{BotId}}","flags":0},
              "guilds":[{"id":"{{GuildId}}","name":"Guild","owner_id":"{{UserId}}","verification_level":0,"default_message_notifications":0,
                         "explicit_content_filter":0,"mfa_level":0,"premium_tier":0,"nsfw_level":0,"features":[],"emojis":[],"stickers":[],
-                        "roles":[{"id":"{{GuildId}}","name":"@everyone","permissions":"0","position":0,"color":0,"hoist":false,"managed":false,"mentionable":false}],
-                        "channels":[{"id":"{{ChannelId}}","type":0,"name":"general","position":0,"permission_overwrites":[]}],
+                        "roles":[{"id":"{{GuildId}}","name":"@everyone","permissions":"0","position":0,"color":0,"hoist":false,"managed":false,"mentionable":false},
+                                 {{RoleJson(PinnerRoleId, "Pinner", GuildPermission.ViewChannel | GuildPermission.PinMessages)}},
+                                 {{RoleJson(ChannelManagerRoleId, "Channel manager", GuildPermission.ViewChannel | GuildPermission.ManageChannels)}},
+                                 {{RoleJson(DeniedPinnerRoleId, "Pinner denied in general", GuildPermission.ViewChannel | GuildPermission.PinMessages)}}],
+                        "channels":[{"id":"{{ChannelId}}","type":0,"name":"general","position":0,
+                                     "permission_overwrites":[{"id":"{{DeniedPinnerRoleId}}","type":0,"allow":"0","deny":"{{(ulong)ChannelPermission.PinMessages}}"}]}],
                         "unavailable":false,"member_count":1,"large":false,"members":[],"presences":[],"threads":[],
                         "voice_states":[],"guild_scheduled_events":[],"joined_at":"2020-01-01T00:00:00+00:00"}]}
             """;
