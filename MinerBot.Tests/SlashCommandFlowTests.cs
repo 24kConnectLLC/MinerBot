@@ -101,6 +101,29 @@ namespace MinerBot.Tests
             Assert.Equal("image", reply.File);
         }
 
+        // Discord reads a single word right after the opening backticks as the language of the block and hides it
+        [Fact]
+        public async Task ArmorLookupShowsAOneWordDescription()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+            using var imageServer = new TcpListener(IPAddress.Loopback, 0);
+            imageServer.Start();
+            var serving = ServeImageAsync(imageServer);
+            discord.Armor.Armor = new ArmorStyle
+            {
+                ArmorName = "Armor One",
+                ArmorDescription = "Spooky",
+                Author = "Author",
+                ArmorChoice = "Bug",
+                ArmorScreenshot = $"http://127.0.0.1:{((IPEndPoint)imageServer.LocalEndpoint).Port}/armor.png"
+            };
+
+            await discord.SendSlashCommandAsync("armor", "lookup", Option("armor-name", "Armor One"));
+            await serving;
+
+            Assert.Equal("```\nSpooky\nMade by Author```", Assert.Single(discord.Single("followup").EmbedDescriptions));
+        }
+
         static async Task ServeImageAsync(TcpListener server)
         {
             using var client = await server.AcceptTcpClientAsync();

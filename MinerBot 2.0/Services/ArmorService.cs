@@ -56,7 +56,7 @@ namespace MinerBot_2._0.Services
                 armors = await _armorData.GetArmorNamesByHelmet(helmetChoice.ToName());
 
             if (page != -1)
-                armors = armors.Skip(page * ItemsPerPage).Take(ItemsPerPage + page);
+                armors = armors.Skip(page * ItemsPerPage).Take(ItemsPerPage);
             
             return armors;
         }
@@ -167,9 +167,11 @@ namespace MinerBot_2._0.Services
 
         public async Task<Embed> ArmorListEmbed(HelmentType helmetType, IEnumerable<string> armors = null, int page = 0)
         {
+            var armorNames = await ArmorListNamesFormated(helmetType, armors, page);
+
             var embed = new EmbedBuilderTemplate()
             .WithTitle($"Armor List: {helmetType.ToName()}")
-            .WithDescription($"```{await ArmorListNamesFormated(helmetType, armors, page)}```")
+            .WithDescription(armorNames.Length > 0 ? FormatArmorNames(armorNames) : "No armor styles yet.")
             .WithFields([
             new EmbedFieldBuilder() {
                         Name = "Upload your own Armor Style",
@@ -219,7 +221,8 @@ namespace MinerBot_2._0.Services
             var imageName = FormatImageURL(armor.ArmorName, ".png");
             var embed = new EmbedBuilderTemplate()
                 .WithTitle(armor.ArmorName)
-                .WithDescription($"```{armor.ArmorDescription}\nMade by {armor.Author}```")
+                // The empty first line keeps a one-word description from being read as the language of the block
+                .WithDescription($"```\n{armor.ArmorDescription}\nMade by {armor.Author}```")
                 .WithFields([
                     new EmbedFieldBuilder{
                     Name = "Armor Style",
