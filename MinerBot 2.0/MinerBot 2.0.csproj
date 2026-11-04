@@ -19,6 +19,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\DataAccessLibrary\DataAccessLibrary.csproj" />
+    <ProjectReference Include="..\MinerBot.Shared\MinerBot.Shared.csproj" />
     <ProjectReference Include="..\SteamWebAPIAccess\SteamWebAPIAccess.csproj" />
   </ItemGroup>
 

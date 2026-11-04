@@ -7,7 +7,8 @@ namespace DataAccessLibrary
     {
         Armor,
         Blacklist,
-        Guild
+        Guild,
+        Bot
     }
 
     public sealed class SQLConnectionFactory : ISQLConnectionFactory

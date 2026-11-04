@@ -138,7 +138,8 @@ Create an `appsettings.json` file and fill in your credentials:
 ```json
 {
   "ConnectionStrings": {
-    "DefaultConnection": "SERVER={Server Host};PORT=3306;DATABASE={Database Name};UID={User ID};PASSWORD={Password};SSLMODE=Preferred;Connection Timeout=30;"
+    "DefaultConnection": "SERVER={Server Host};PORT=3306;DATABASE={Website Database Name};UID={User ID};PASSWORD={Password};SSLMODE=Preferred;Connection Timeout=30;CharSet=utf8mb4;",
+    "BotConnection": "SERVER={Server Host};PORT=3306;DATABASE={MinerBot Database Name};UID={User ID};PASSWORD={Password};SSLMODE=Preferred;Connection Timeout=30;CharSet=utf8mb4;"
   },
   "Logging": {
     "LogLevel": {
@@ -148,6 +149,8 @@ Create an `appsettings.json` file and fill in your credentials:
   }
 }
 ```
+
+`DefaultConnection` is the website's database, which holds the armor, the blacklist and each server's channels. `BotConnection` is MinerBot's own database, for the coming web dashboard. The bot doesn't use it yet, so it can be left out. Both end in `CharSet=utf8mb4`, the tables' own character set: without it, MySql.Data sends text in the server's default character set, which can turn an emoji into a question mark.
 
 ✅ Recommended: Commit a **safe template** called `appsettings.example.json` with placeholders only.
 
@@ -193,10 +196,11 @@ dotnet run
 
 ## 🐳 Run in Docker
 
-Local settings stay out of the image, so pass them when the container starts. Add the connection string to your `.env` file:
+Local settings stay out of the image, so pass them when the container starts. Add the connection strings to your `.env` file:
 
 ```env
-ConnectionStrings__DefaultConnection=SERVER={Server Host};PORT=3306;DATABASE={Database Name};UID={User ID};PASSWORD={Password};SSLMODE=Preferred;Connection Timeout=30;
+ConnectionStrings__DefaultConnection=SERVER={Server Host};PORT=3306;DATABASE={Website Database Name};UID={User ID};PASSWORD={Password};SSLMODE=Preferred;Connection Timeout=30;CharSet=utf8mb4;
+ConnectionStrings__BotConnection=SERVER={Server Host};PORT=3306;DATABASE={MinerBot Database Name};UID={User ID};PASSWORD={Password};SSLMODE=Preferred;Connection Timeout=30;CharSet=utf8mb4;
 ```
 
 Then build from the repository root and start the container:
@@ -254,6 +258,23 @@ Contributions are welcome!
 3. Commit your changes: `git commit -m "Add my feature"`
 4. Push: `git push origin feature/my-feature`
 5. Open a Pull Request
+
+### Projects
+
+- `MinerBot 2.0`: the bot.
+- `DataAccessLibrary`: all of the SQL, for the website's tables and for MinerBot's own database, with the migrations that create MinerBot's tables.
+- `SteamWebAPIAccess`: Steam sign-in, lobbies and the Steam Web API.
+- `MinerBot.Shared`: rules and formats that the bot and the coming dashboard share, such as the armor approval rules, SteamID formats and Discord's limits. It references nothing outside .NET.
+- `MinerBot.Tests`, `SteamWebAPIAccess.Tests`, `DataAccessLibrary.Tests` and `MinerBot.Shared.Tests`: the tests.
+- `docs/schema/wordpress-tables.sql`: the structure of the three website tables MinerBot uses.
+
+### Tests
+
+```bash
+dotnet test --solution "MinerBot 2.0.sln"
+```
+
+The database tests start MariaDB 11.4 in Docker, so the first run downloads it. Without Docker they're skipped, with the reason. Set `MINERBOT_DB_TESTS=required`, as CI does, to make that a failure.
 
 ---
 
