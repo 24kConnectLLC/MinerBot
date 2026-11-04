@@ -21,4 +21,8 @@
     <ProjectReference Include="..\DataAccessLibrary\DataAccessLibrary.csproj" />
     <ProjectReference Include="..\SteamWebAPIAccess\SteamWebAPIAccess.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="MinerBot.Tests" />
+  </ItemGroup>
 </Project>

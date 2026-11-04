@@ -111,6 +111,7 @@ namespace MinerBot.Tests
         public FakeArmorData Armor { get; }
         public FakeGuildData Guilds { get; }
         public NotificationState Notifications => services.GetRequiredService<NotificationState>();
+        public ArmorService ArmorService => services.GetRequiredService<ArmorService>();
 
         // Name of the Discord request that gets refused, to test what happens when a reply can't be sent
         public string? FailStep { get; set; }
@@ -183,7 +184,7 @@ namespace MinerBot.Tests
                 .AddSingleton(client)
                 .AddSingleton(interactions)
                 .AddSingleton<InteractionHandler>()
-                .AddSingleton<HttpClient>()
+                .AddWebClient()
                 .AddSingleton<AnnounceService>()
                 .AddSingleton<OwnerAlertService>()
                 .AddSingleton<ArmorService>()

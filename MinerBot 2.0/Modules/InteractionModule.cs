@@ -112,7 +112,15 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
             }
 
             var result = await _ArmorService.ArmorEmbed(armor);
-            await FollowupWithFileAsync(result.ArmorImage, embed: result.ArmorEmbed);
+
+            if (result.ArmorImage is FileAttachment image)
+            {
+                // The attachment holds the image, and is closed even when the followup fails
+                using (image)
+                    await FollowupWithFileAsync(image, embed: result.ArmorEmbed);
+            }
+            else
+                await FollowupAsync(embed: result.ArmorEmbed);
         }
 
         [SlashCommand("helmets", "Gets a list of all possible helmet types.")]
@@ -188,14 +196,27 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
         {
             await DeferAsync();
 
-            await _DiscordService.UpdateGuild(new DataAccessLibrary.Discord.Models.Guild()
+            var guild = new DataAccessLibrary.Discord.Models.Guild()
             {
                 guild_id = Context.Guild.Id,
                 armor_channel_id = armorChannel.Id,
                 map_channel_id = mapChannel.Id,
                 lobby_channel_id = lobbyChannel.Id,
                 announcements_channel_id = announcementsChannel.Id
-            });
+            };
+
+            try
+            {
+                await _DiscordService.UpdateGuild(guild);
+            }
+            // A save the database didn't answer in time can still go through later, so this asks for a wait, not a retry
+            catch (TimeoutException e)
+            {
+                Console.WriteLine($"[Interaction/Warning] set_channels timed out for {Context.User}: {e.Message}");
+                await FollowupAsync("The database didn't answer in time, so the channels may or may not be saved. Please wait a few minutes before setting them again.");
+                return;
+            }
+
             await FollowupAsync("Thanks for setting the channels!");
         }
 

@@ -10,5 +10,8 @@ namespace MinerBot_2._0.Models
         public JobAttribute Details { get; set; }
         public Type DeclaringType { get; set; }
         public DateTimeOffset NextRun { get; set; }
+
+        // The last run, which can still be going after it was cut off
+        public Task? Running { get; set; }
     }
 }

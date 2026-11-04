@@ -208,19 +208,44 @@ namespace MinerBot.Tests
             Assert.Equal(["respond"], discord.StepNames);
         }
 
-        [Fact]
-        public async Task SetChannelsDefersBeforeAskingTheDatabase()
+        // Every channel of the command is the guild's one channel
+        static Task SetChannelsAsync(FakeDiscord discord)
         {
-            await using var discord = await FakeDiscord.StartAsync();
             var channel = FakeDiscord.ChannelId;
             var options = string.Join(",", new[] { "armor-channel", "map-channel", "lobby-channel", "announcements-channel" }
                 .Select(name => $$"""{"name":"{{name}}","type":7,"value":"{{channel}}"}"""));
             var resolved = $$"""{"channels":{"{{channel}}":{"id":"{{channel}}","type":0,"name":"general","permissions":"0"} } }""";
 
-            await discord.SendSlashCommandAsync("admin", "set_channels", options, resolved);
+            return discord.SendSlashCommandAsync("admin", "set_channels", options, resolved);
+        }
+
+        [Fact]
+        public async Task SetChannelsDefersBeforeAskingTheDatabase()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+
+            await SetChannelsAsync(discord);
 
             Assert.Equal(["defer", "GetGuild", "InsertGuild", "followup"], discord.StepNames);
             Assert.Equal("Thanks for setting the channels!", discord.Single("followup").Content);
+        }
+
+        // A save that timed out can still go through, so the usual "try again later" could store the server twice
+        [Theory]
+        [InlineData(false, nameof(FakeGuildData.InsertGuild))]
+        [InlineData(true, nameof(FakeGuildData.UpdateGuild))]
+        public async Task SetChannelsThatTimesOutSaysToWaitBeforeTryingAgain(bool alreadySet, string save)
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+            discord.Guilds.Guild = alreadySet ? FakeGuildData.CreateGuild(FakeDiscord.ChannelId) : null;
+            discord.Guilds.SaveFailure = new TimeoutException("The database didn't answer within 15 seconds");
+
+            await SetChannelsAsync(discord);
+
+            Assert.Equal(["defer", "GetGuild", save, "followup"], discord.StepNames);
+            Assert.Equal("The database didn't answer in time, so the channels may or may not be saved. Please wait a few minutes before setting them again.",
+                discord.Single("followup").Content);
+            Assert.Contains("set_channels timed out", discord.ConsoleText);
         }
 
         [Fact]

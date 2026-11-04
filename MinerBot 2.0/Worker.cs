@@ -28,7 +28,16 @@ namespace MinerBot_2._0
             {
                 if (steamAPI != null)
                 {
-                    await jobHandler.StartAsync(stoppingToken);
+                    // A failed start only costs the scheduled jobs, so Steam and Discord carry on
+                    try
+                    {
+                        await jobHandler.StartAsync(stoppingToken);
+                    }
+                    catch (Exception e)
+                    {
+                        _logger.LogCritical(e, "The scheduled jobs couldn't start, so nothing runs on a schedule until a restart");
+                    }
+
                     await steamAPI.RunCallbacksAsync(stoppingToken);
                 }
                 else
@@ -37,6 +46,12 @@ namespace MinerBot_2._0
             catch (OperationCanceledException e)
             {
                 _logger.LogCritical($"The Operation was canceled!\n{e.ToString()}");
+            }
+            // The host stops after this, and a restart policy of on-failure only acts on an exit code that says so
+            catch (Exception) when (!stoppingToken.IsCancellationRequested)
+            {
+                Environment.ExitCode = 1;
+                throw;
             }
             finally
             {

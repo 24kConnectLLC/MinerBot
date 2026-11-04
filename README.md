@@ -200,10 +200,12 @@ Then build from the repository root and start the container:
 
 ```bash
 docker build -f "MinerBot 2.0/Dockerfile" -t minerbot .
-docker run -d --name minerbot --env-file .env -v minerbot-data:/app/data minerbot
+docker run -d --name minerbot --restart unless-stopped --env-file .env -v minerbot-data:/app/data minerbot
 ```
 
 `/app/data` holds the Steam login token, so keep it on a named volume.
+
+The bot exits when it hits a failure it can't recover from, and `--restart unless-stopped` has Docker start it again. To add that to a container that already exists, run `docker update --restart unless-stopped minerbot`.
 
 ---
 
