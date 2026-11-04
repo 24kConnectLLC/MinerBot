@@ -6,6 +6,7 @@ namespace MinerBot.Tests
     public class InteractionFailureTests
     {
         const string FailedCommandReply = "Something went wrong with that command. Please try again later.";
+        const string BadInputReply = "That input didn't work. Please check it and try again.";
 
         [Fact]
         public async Task FailureBeforeAnyReplyGetsAnEphemeralResponse()
@@ -124,12 +125,27 @@ namespace MinerBot.Tests
         {
             await using var discord = await FakeDiscord.StartAsync();
 
-            await discord.SendSlashCommandAsync("armor", "list", """{"name":"helmet-type","type":3,"value":"typed by the user"}""");
+            await discord.SendSlashCommandAsync("test", "takes-enum", """{"name":"helmet","type":3,"value":"typed by the user"}""");
 
             var reply = discord.Single("respond");
-            Assert.Equal("That input didn't work. Please check it and try again.", reply.Content);
+            Assert.Equal(BadInputReply, reply.Content);
             Assert.True(reply.IsEphemeral);
             Assert.DoesNotContain("typed by the user", reply.Body);
+        }
+
+        [Fact]
+        public async Task MissingInputGetsAReplyAndALogLine()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+
+            await discord.SendSlashCommandAsync("maps", "lookup");
+
+            var reply = discord.Single("respond");
+            Assert.Equal(BadInputReply, reply.Content);
+            Assert.True(reply.IsEphemeral);
+            Assert.Equal(["respond"], discord.StepNames);
+            Assert.Contains("[Interaction/Warning] lookup failed for", discord.ConsoleText);
+            Assert.Contains("BadArgs", discord.ConsoleText);
         }
 
         [Fact]

@@ -41,6 +41,16 @@ namespace MinerBot.Tests
         }
 
         [Fact]
+        public async Task FilteredArmorListDefersBeforeAskingTheDatabase()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+
+            await discord.SendSlashCommandAsync("armor", "list", Option("helmet-type", "Bug"));
+
+            Assert.Equal(["defer", "GetArmorNamesByHelmet", "GetArmorNamesByHelmet", "followup"], discord.StepNames);
+        }
+
+        [Fact]
         public async Task LongArmorListKeepsItsButtons()
         {
             await using var discord = await FakeDiscord.StartAsync();
@@ -62,6 +72,7 @@ namespace MinerBot.Tests
 
             Assert.Equal(["defer", "GetArmorStyle", "followup"], discord.StepNames);
             Assert.Equal(["hmmm..."], discord.Single("followup").EmbedTitles);
+            Assert.Contains("/armor list", Assert.Single(discord.Single("followup").EmbedDescriptions));
         }
 
         [Fact]
@@ -223,6 +234,17 @@ namespace MinerBot.Tests
 
             Assert.Equal(["defer", "followup"], discord.StepNames);
             Assert.Equal(":x: You cant pin system messages!", discord.Single("followup").Content);
+        }
+
+        [Fact]
+        public async Task GreetWorksOnAUserThatIsNotInTheMemberCache()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+
+            await discord.SendUserCommandAsync("greet", discord.OtherUserId);
+
+            Assert.Equal(["respond"], discord.StepNames);
+            Assert.Contains($"<@{discord.OtherUserId}>", discord.Single("respond").Content);
         }
 
         [Theory]

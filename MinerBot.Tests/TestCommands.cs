@@ -21,5 +21,9 @@ namespace MinerBot.Tests
 
         [SlashCommand("succeed", "Replies")]
         public Task Succeed() => RespondAsync("Done");
+
+        // No real command takes an enum, and Discord.Net can refuse the text of one before the command runs
+        [SlashCommand("takes-enum", "Takes an enum")]
+        public Task TakesEnum(MinerBot_2._0.HelmentType helmet) => RespondAsync("Done");
     }
 }

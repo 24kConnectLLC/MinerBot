@@ -73,7 +73,7 @@ namespace MinerBot_2._0.Jobs
                 if (permissions.Administrator)
                 {
                     var channel = arg.GetTextChannel(arg.PublicUpdatesChannel == null ? arg.SystemChannel.Id : arg.PublicUpdatesChannel.Id);
-                    await channel.SendMessageAsync("Set up your channels for notifications using the /more setchannels command!\nFirst, make sure that I can access the channels.");
+                    await channel.SendMessageAsync("Set up your channels for notifications using the /admin set_channels command!\nFirst, make sure that I can access the channels.");
                 }
             }
             catch

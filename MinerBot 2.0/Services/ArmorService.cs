@@ -23,6 +23,17 @@ namespace MinerBot_2._0.Services
             _armorData = armorData;
         }
 
+        // Discord doesn't hold an autocomplete option to its suggestions, so this can be any text
+        public static bool TryParseHelmet(string name, out HelmentType helmet)
+        {
+            helmet = default;
+
+            var helmetName = name.Trim().Replace("-", "_");
+
+            // TryParse also accepts numbers and comma separated names, which aren't helmets
+            return helmetName.All(c => char.IsLetter(c) || c == '_') && Enum.TryParse(helmetName, true, out helmet);
+        }
+
         // Create a modal interaction to have users upload their armor just like on the website.
 
         public async Task<List<ArmorStyle>> GetArmorList()
@@ -242,7 +253,7 @@ namespace MinerBot_2._0.Services
         {
             var embed = new EmbedBuilderTemplate()
                 .WithTitle("hmmm...")
-                .WithDescription("That armor is not in my armor list. Please type /armor_list to see the full armor list.")
+                .WithDescription("That armor is not in my armor list. Please type /armor list to see the full armor list.")
                 .WithColor(Color.Red)
                 .WithFields([
                 new EmbedFieldBuilder() {
@@ -259,7 +270,7 @@ namespace MinerBot_2._0.Services
         {
             var embed = new EmbedBuilderTemplate()
                 .WithTitle($"Helmets:")
-                .WithDescription($"```{String.Join("\n",Enum.GetNames<HelmentType>()).Replace("_","-")}```")
+                .WithDescription(FormatArmorNames(string.Concat(Enum.GetValues<HelmentType>().Select(helmet => helmet.ToName() + "\n"))))
                 .Build();
             return embed;
         }

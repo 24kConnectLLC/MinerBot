@@ -1,6 +1,5 @@
 using DataAccessLibrary;
 using Discord;
-using Discord.Commands;
 using Discord.Interactions;
 using Discord.WebSocket;
 using MinerBot_2._0;
@@ -12,14 +11,12 @@ using System.Reflection;
 
 var builder = Host.CreateApplicationBuilder(args);
 builder.Services.AddHostedService<Worker>();
-builder.Services.AddSingleton(new DiscordSocketConfig { GatewayIntents = GatewayIntents.All, AlwaysDownloadUsers = true, MessageCacheSize = 100 });
+builder.Services.AddSingleton(new DiscordSocketConfig { GatewayIntents = GatewayIntents.Guilds });
 builder.Services.AddSingleton<DiscordSocketClient>();
 builder.Services.AddSingleton(new InteractionServiceConfig { LocalizationManager = new ResxLocalizationManager("InteractionFramework.Resources.CommandLocales", Assembly.GetEntryAssembly()) }); // ,new CultureInfo("en-US")
 //builder.Services.AddSingleton<InteractionService>();
 builder.Services.AddSingleton<InteractionService>(p => new InteractionService(p.GetRequiredService<DiscordSocketClient>()));
 builder.Services.AddSingleton<InteractionHandler>();
-builder.Services.AddSingleton<CommandService>();
-builder.Services.AddSingleton<CommandHandlingService>();
 builder.Services.AddSingleton<HttpClient>();
 builder.Services.AddSingleton<PictureService>();
 builder.Services.AddSingleton<AnnounceService>();
@@ -80,11 +77,12 @@ await client.SetGameAsync("Murder Miners on my PC", type:ActivityType.Playing);
 // MM Game Embed, RPC needed
 //client.Activity.
 
+// Before connecting, because a Ready event during this would register an empty list and delete every command
+await host.Services.GetRequiredService<InteractionHandler>().InitializeAsync();
+
 await client.LoginAsync(TokenType.Bot, Environment.GetEnvironmentVariable("BOTTOKEN"));
 await client.StartAsync();
 
-await host.Services.GetRequiredService<CommandHandlingService>().InitializeAsync();
-await host.Services.GetRequiredService<InteractionHandler>().InitializeAsync();
 await host.Services.GetRequiredService<AnnounceService>().InitializeWebhookAsync();
 
 var steamApi = host.Services.GetService<ISteamAPIAccess>();
@@ -107,14 +105,7 @@ host.Run();
 
 Task Client_Log(LogMessage msg)
 {
-    if (msg.Exception is CommandException cmdException)
-    {
-        Console.WriteLine($"[Command/{msg.Severity}] {cmdException.Command.Aliases.First()}"
-            + $" failed to execute in {cmdException.Context.Channel}.");
-        Console.WriteLine(cmdException);
-    }
-    else
-        Console.WriteLine($"[General/{msg.Severity}] {msg}");
+    Console.WriteLine($"[General/{msg.Severity}] {msg}");
 
     return Task.CompletedTask;
 }
