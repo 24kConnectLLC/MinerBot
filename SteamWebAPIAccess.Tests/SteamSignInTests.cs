@@ -40,6 +40,15 @@ namespace SteamWebAPIAccess.Tests
             Directory.Delete(authFolder, recursive: true);
         }
 
+        // A server whose firewall only lets out common ports, such as 443, can't reach Steam's TCP servers
+        [Fact]
+        public void SteamIsReachedThroughWebSocketsOnly()
+        {
+            var steam = CreateSteam("user", ValidTokenFile());
+
+            Assert.Equal(ProtocolTypes.WebSocket, steam.steamClient.Configuration.ProtocolTypes);
+        }
+
         // Reading the token file
 
         [Fact]

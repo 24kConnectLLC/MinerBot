@@ -92,8 +92,8 @@ namespace SteamWebAPIAccess
         // Separate from connecting, so tests can run the sign-in callbacks offline
         internal void CreateClient()
         {
-            // Create our SteamClient Instance
-            steamClient = new SteamClient();
+            // Web sockets go out on port 443, which firewalls let through, where Steam's TCP servers use ports 27017 to 27037
+            steamClient = new SteamClient(SteamConfiguration.Create(config => config.WithProtocolTypes(ProtocolTypes.WebSocket)));
 
             // Create the Callback Manager which will route callbacks to function calls
             manager = new CallbackManager(steamClient);
