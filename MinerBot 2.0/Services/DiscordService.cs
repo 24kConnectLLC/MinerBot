@@ -1,6 +1,8 @@
-﻿using DataAccessLibrary.Discord;
+﻿using System.Net;
+using DataAccessLibrary.Discord;
 using DataAccessLibrary.Discord.Models;
 using Discord;
+using Discord.Net;
 using Discord.WebSocket;
 using MinerBot_2._0.Builders;
 
@@ -8,14 +10,20 @@ namespace MinerBot_2._0.Services
 {
     public class DiscordService
     {
+        // Discord's own names, the way an admin sees them in a channel's settings
+        private static readonly Dictionary<ChannelPermission, string> PermissionNames = new()
+        {
+            [ChannelPermission.ViewChannel] = "View Channel",
+            [ChannelPermission.SendMessages] = "Send Messages",
+            [ChannelPermission.EmbedLinks] = "Embed Links"
+        };
+
         private readonly IGuildData _guildData;
-        private readonly DiscordSocketClient _discord;
         private readonly IServiceProvider _services;
 
         public DiscordService(IGuildData guildData, IServiceProvider services)
         {
             _guildData = guildData;
-            _discord = services.GetRequiredService<DiscordSocketClient>();
             _services = services;
         }
 
@@ -29,30 +37,63 @@ namespace MinerBot_2._0.Services
             return await _guildData.GetAllGuilds();
         }
 
-        public async Task UpdateGuild(Guild guild)
-        {
-            if (await GetGuild(guild.guild_id) != null)
-                await _guildData.UpdateGuild(guild);
-            else
-                await _guildData.InsertGuild(guild);
-        }
+        public Task SaveGuild(Guild guild) => _guildData.SaveGuild(guild);
 
-        public async Task InsertGuild(Guild guild)
+        // Posts the announcement in the server's announcements channel, and returns the reply for the admin
+        public async Task<string> SendAnnouncement(string message, SocketGuild guild)
         {
-            await _guildData.InsertGuild(guild);
-        }
+            var settings = await GetGuild(guild.Id);
 
-        public async Task SendAnnouncement(string message, ulong guildId)
-        {
-            var guild = await GetGuild(guildId);
-            var channel = await _discord.GetChannelAsync(guild.announcements_channel_id) as IMessageChannel;
-            await channel.SendMessageAsync(message);
+            if (settings == null || settings.announcements_channel_id == Guild.ChannelOff)
+                return "Nothing was sent, because this server has no announcements channel. Choose one with /admin set_channels, and include the other channels you want to keep, as any you leave out are turned off.";
+
+            // A deleted channel leaves the cache, so there's no need to ask Discord
+            var channel = guild.GetTextChannel(settings.announcements_channel_id);
+
+            if (channel == null)
+                return "Nothing was sent, because the announcements channel set for this server no longer exists. Choose a new one with /admin set_channels, and include the other channels you want to keep, as any you leave out are turned off.";
+
+            // Plain text, so it needs no Embed Links
+            var missing = MissingPermissions(guild.CurrentUser, channel, ChannelPermission.ViewChannel, ChannelPermission.SendMessages);
+
+            if (missing.Count > 0)
+                return $"Nothing was sent, because I'm missing permissions in {channel.Mention}: {string.Join(", ", missing)}. Give me View Channel and Send Messages there, then try again.";
+
+            try
+            {
+                await channel.SendMessageAsync(message);
+            }
+            // The cache can be a moment behind, and Discord refuses a bot that's timed out too
+            catch (HttpException e) when (e.HttpCode == HttpStatusCode.Forbidden)
+            {
+                Console.WriteLine($"[Interaction/Warning] Discord refused an announcement in channel {channel.Id} of guild {guild.Id}: {e.Message}");
+                return $"Nothing was sent, because Discord didn't let me post in {channel.Mention}. Check that I have View Channel and Send Messages there, then try again.";
+            }
+
+            return $"Sent your announcement to {channel.Mention}.";
         }
 
         public async Task DeleteGuild(ulong guildId)
         {
             if (await GetGuild(guildId) != null)
                 await _guildData.DeleteGuild(guildId);
+        }
+
+        // The permissions the bot lacks in a channel, from the guild's cached roles and overwrites.
+        // Discord.Net works these out the way Discord does, apart from timeouts.
+        public static List<string> MissingPermissions(SocketGuildUser bot, IGuildChannel channel, params ChannelPermission[] needed)
+        {
+            var permissions = bot.GetPermissions(channel);
+
+            return needed.Where(permission => !permissions.Has(permission)).Select(permission => PermissionNames[permission]).ToList();
+        }
+
+        // Each kind of notification with its channel. A server that never set its channels has no row, so every kind shows as off.
+        public static string ChannelList(Guild? guild)
+        {
+            return $"- Armor styles: {Channel(guild?.armor_channel_id)}\n- Workshop maps: {Channel(guild?.map_channel_id)}\n- Lobbies: {Channel(guild?.lobby_channel_id)}\n- Announcements: {Channel(guild?.announcements_channel_id)}";
+
+            static string Channel(ulong? id) => id is null || id == Guild.ChannelOff ? "off" : MentionUtils.MentionChannel(id.Value);
         }
 
         public async Task<Embed> GetInfoEmbed()
@@ -105,7 +146,8 @@ namespace MinerBot_2._0.Services
                 new EmbedFieldBuilder {
                     Name = "__Admin Commands:__",
                     Value =
-                         "**/admin set_channels**: Sets Channels for Notifications.\n\n" +
+                         "**/admin set_channels**: Sets where I post each kind of notification. Any kind you leave out is turned off.\n\n" +
+                         "**/admin show_channels**: Shows where I post each kind of notification.\n\n" +
                          "**/admin announce**: Creates an announcement."
                 },
                 new EmbedFieldBuilder {

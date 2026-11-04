@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Discord;
 
 namespace MinerBot.Tests
 {
@@ -84,6 +85,64 @@ namespace MinerBot.Tests
 
         static JsonElement Registered(FakeDiscord discord, string name) =>
             JsonDocument.Parse(discord.RegisteredCommands!).RootElement.EnumerateArray().Single(command => command.GetProperty("name").GetString() == name);
+
+        static JsonElement Subcommand(FakeDiscord discord, string group, string name) =>
+            Registered(discord, group).GetProperty("options").EnumerateArray().Single(option => option.GetProperty("name").GetString() == name);
+
+        static IEnumerable<int> Contexts(JsonElement command) => command.GetProperty("contexts").EnumerateArray().Select(context => context.GetInt32());
+
+        // Discord hides the admin commands from members without Administrator. A server can show them to other roles, so they check too.
+        [Fact]
+        public async Task AdminCommandsAreRegisteredForAdministratorsInServersOnly()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+
+            var admin = Registered(discord, "admin");
+
+            // ToString reads the value whether it's written as a number or as a string
+            Assert.Equal(((ulong)GuildPermission.Administrator).ToString(), admin.GetProperty("default_member_permissions").ToString());
+            Assert.Equal([(int)InteractionContextType.Guild], Contexts(admin));
+        }
+
+        [Theory]
+        [InlineData("pin")]
+        [InlineData("greet")]
+        public async Task ContextCommandIsOfferedInServersOnly(string name)
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+
+            Assert.Equal([(int)InteractionContextType.Guild], Contexts(Registered(discord, name)));
+        }
+
+        [Fact]
+        public async Task SetChannelsOffersOnlyOptionalTextAndAnnouncementChannels()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+
+            var options = Subcommand(discord, "admin", "set_channels").GetProperty("options").EnumerateArray().ToList();
+
+            Assert.Equal(["armor-channel", "map-channel", "lobby-channel", "announcements-channel"], options.Select(option => option.GetProperty("name").GetString()));
+            Assert.All(options, option =>
+            {
+                Assert.Equal(7, option.GetProperty("type").GetInt32());
+                Assert.False(option.GetProperty("required").GetBoolean());
+                Assert.Equal([(int)ChannelType.Text, (int)ChannelType.News], option.GetProperty("channel_types").EnumerateArray().Select(type => type.GetInt32()));
+                Assert.Contains("Leave out to turn", option.GetProperty("description").GetString());
+            });
+        }
+
+        [Fact]
+        public async Task AnnounceMessageIsCappedAtOneDiscordMessage()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+
+            var message = Assert.Single(Subcommand(discord, "admin", "announce").GetProperty("options").EnumerateArray());
+
+            Assert.Equal("message", message.GetProperty("name").GetString());
+            Assert.Equal(2000, message.GetProperty("max_length").GetInt32());
+            Assert.True(message.GetProperty("required").GetBoolean());
+            Assert.NotEqual("message", message.GetProperty("description").GetString());
+        }
 
         [Theory]
         [InlineData("armor", "list", "followup")]

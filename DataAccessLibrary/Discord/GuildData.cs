@@ -26,19 +26,12 @@ namespace DataAccessLibrary.Discord
             return LoadFirstData<Guild, dynamic>(sql, new { guildId });
         }
 
-        public Task UpdateGuild(Guild guild)
+        // One statement on the guild_id primary key, so two saves at once can't both try to insert, and the last one wins
+        public Task SaveGuild(Guild guild)
         {
-            string sql = @"UPDATE ihvph_discord_servers
-                            SET armor_channel_id = @armor_channel_id, map_channel_id = @map_channel_id, lobby_channel_id = @lobby_channel_id, announcements_channel_id = @announcements_channel_id
-                            WHERE guild_id = @guild_id";
-
-            return SaveData(sql, guild);
-        }
-
-        public Task InsertGuild(Guild guild)
-        {
-            string sql = @"INSERT into ihvph_discord_servers (guild_id, armor_channel_id, map_channel_id, lobby_channel_id, announcements_channel_id)
-                            values (@guild_id, @armor_channel_id, @map_channel_id, @lobby_channel_id, @announcements_channel_id)";
+            string sql = @"INSERT INTO ihvph_discord_servers (guild_id, armor_channel_id, map_channel_id, lobby_channel_id, announcements_channel_id)
+                            VALUES (@guild_id, @armor_channel_id, @map_channel_id, @lobby_channel_id, @announcements_channel_id)
+                            ON DUPLICATE KEY UPDATE armor_channel_id = @armor_channel_id, map_channel_id = @map_channel_id, lobby_channel_id = @lobby_channel_id, announcements_channel_id = @announcements_channel_id";
 
             return SaveData(sql, guild);
         }

@@ -119,7 +119,7 @@ namespace MinerBot.Tests
     public class ArmorNotificationTests
     {
         const string SendStep = "send message";
-        const string SendFailure = "Notification to Discord Channel";
+        const string SendFailure = "Couldn't send the armor notification";
         const int NewId = 100;
         const int BatchSize = 200;
 

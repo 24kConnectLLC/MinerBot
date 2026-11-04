@@ -53,7 +53,7 @@ namespace MinerBot.Tests
         {
             var database = new FakeDatabase().Never();
 
-            await TimesOutAsync(new GuildData(database) { CallLimit = ShortLimit }.UpdateGuild(AnyGuild()));
+            await TimesOutAsync(new GuildData(database) { CallLimit = ShortLimit }.SaveGuild(AnyGuild()));
         }
 
         // A driver that blocks before it hands back a task would hold the caller before a plain limit started
@@ -129,9 +129,26 @@ namespace MinerBot.Tests
         {
             var database = new FakeDatabase().Error(FakeDatabase.MySqlError((int)MySqlErrorCode.LockDeadlock)).Rows();
 
-            await Assert.ThrowsAsync<MySqlException>(() => new GuildData(database).UpdateGuild(AnyGuild()));
+            await Assert.ThrowsAsync<MySqlException>(() => new GuildData(database).SaveGuild(AnyGuild()));
 
             Assert.Equal(1, database.Calls);
+        }
+
+        // A check and then an insert or an update could race with another save of the same server
+        [Fact]
+        public async Task SavingAServerIsOneStatementThatInsertsOrUpdates()
+        {
+            var database = new FakeDatabase().Rows();
+
+            await new GuildData(database).SaveGuild(AnyGuild());
+
+            var command = Assert.Single(database.Commands);
+            Assert.StartsWith("INSERT INTO ihvph_discord_servers", command);
+            Assert.Contains("ON DUPLICATE KEY UPDATE", command);
+
+            var update = command[command.IndexOf("ON DUPLICATE KEY UPDATE")..];
+            Assert.All(["armor_channel_id", "map_channel_id", "lobby_channel_id", "announcements_channel_id"],
+                column => Assert.Contains($"{column} = @{column}", update));
         }
 
         [Fact]

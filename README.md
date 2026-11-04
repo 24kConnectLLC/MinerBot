@@ -25,8 +25,11 @@ MinerBot 2.0 uses modern **Slash Commands** to streamline your Murder Miners com
 
 ### Admin *(Admin Only)*
 
-- `/admin announce [message]` — Creates an announcement.
-- `/admin set_channels [armor-channel] [map-channel] [lobby-channel] [announcements-channel]` — Sets channels used for bot notifications.
+- `/admin announce [message]` — Posts an announcement of up to 2,000 characters in the server's announcements channel.
+- `/admin set_channels (optional) [armor-channel] (optional) [map-channel] (optional) [lobby-channel] (optional) [announcements-channel]` — Sets where the bot posts each kind of notification. Any kind you leave out is turned off, so list every channel you want to keep.
+- `/admin show_channels` — Shows each kind of notification with its channel, or `off`.
+
+The bot needs View Channel, Send Messages and Embed Links in each channel you choose, and `/admin set_channels` saves nothing until it has them.
 
 ### Armor
 
@@ -100,7 +103,6 @@ MinerBot may require these capabilities depending on which features you enable:
 - Post embeds
 - Read message history
 - Pin messages, for the `pin` message command
-- *(Optional)* Administrator for admin messaging / channel automation
 
 MinerBot doesn't use any privileged gateway intents, so the Message Content, Server Members and Presence switches in the Discord Developer Portal can stay off.
 
