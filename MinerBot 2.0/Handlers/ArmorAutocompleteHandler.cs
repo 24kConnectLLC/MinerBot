@@ -1,11 +1,6 @@
 ﻿using Discord;
 using Discord.Interactions;
 using MinerBot_2._0.Services;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace MinerBot_2._0.Handlers
 {

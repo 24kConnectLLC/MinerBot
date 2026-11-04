@@ -1,14 +1,7 @@
 ﻿using DataAccessLibrary.Armor.Models;
-using Discord.WebSocket;
 using MinerBot_2._0.Attributes;
 using MinerBot_2._0.Services;
 using MinerBot_2._0.Extensions;
-using ProtoBuf;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace MinerBot_2._0.Jobs
 {

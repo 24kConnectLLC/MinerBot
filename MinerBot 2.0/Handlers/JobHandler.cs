@@ -26,7 +26,7 @@ namespace MinerBot_2._0.Handlers
         {
             _logger.LogInformation("Starting JobService");
 
-            _jobs = AppDomain.CurrentDomain.GetAssemblies().SelectMany(x => x.GetTypes())
+            _jobs = typeof(JobHandler).Assembly.GetTypes()
                       .SelectMany(t => t.GetMethods())
                       .Where(m => m.GetCustomAttributes(typeof(JobAttribute), false).Length > 0)
                       .Select(x =>
@@ -35,7 +35,6 @@ namespace MinerBot_2._0.Handlers
                             Name = x.Name,
                             MethodInfo = x,
                             Details = x.GetCustomAttribute<JobAttribute>(),
-                            Parameters = x.GetParameters(),
                             DeclaringType = x.DeclaringType,
                             NextRun = GetNextRun(x.GetCustomAttribute<JobAttribute>().Cron)
                         })
@@ -62,7 +61,7 @@ namespace MinerBot_2._0.Handlers
                     {
                         job.NextRun = GetNextRun(job.Details.Cron);
                         _logger.LogInformation("Running Job {jobDeclareType}.{jobName}, Current time: {currentTime}, next run at {nextRun}",
-                            job.DeclaringType.Name, job.Name, $"{DateTimeOffset.Now:h:mm:ss:ff}", $"{job.NextRun:h:mm:ss:ff}");
+                            job.DeclaringType.Name, job.Name, $"{DateTimeOffset.UtcNow:HH:mm:ss}", $"{job.NextRun.UtcDateTime:HH:mm:ss}");
                         var timer = System.Diagnostics.Stopwatch.StartNew();
                         await RunJobAsync(job);
                         _logger.LogInformation("{jobDeclareType}.{jobName} took {timerHumanized}",

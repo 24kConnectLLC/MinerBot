@@ -26,33 +26,6 @@ namespace DataAccessLibrary.Discord
             return LoadFirstData<Guild, dynamic>(sql, new { guildId });
         }
 
-        public Task<int> GetArmorChannelID(string guildId)
-        {
-            string sql = @"SELECT armor_channel_id
-                            FROM ihvph_discord_servers
-                            WHERE guild_id = @guildId";
-
-            return LoadFirstData<int, dynamic>(sql, new { guildId });
-        }
-
-        public Task<int> GetMapChannelID(string guildId)
-        {
-            string sql = @"SELECT map_channel_id
-                            FROM ihvph_discord_servers
-                            WHERE guild_id = @guildId";
-
-            return LoadFirstData<int, dynamic>(sql, new { guildId });
-        }
-
-        public Task<int> GetLobbyChannelID(string guildId)
-        {
-            string sql = @"SELECT lobby_channel_id
-                            FROM ihvph_discord_servers
-                            WHERE guild_id = @guildId";
-
-            return LoadFirstData<int, dynamic>(sql, new { guildId });
-        }
-
         public Task UpdateGuild(Guild guild)
         {
             string sql = @"UPDATE ihvph_discord_servers

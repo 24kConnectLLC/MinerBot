@@ -1,9 +1,6 @@
 ﻿using QRCoder;
 using SteamKit2;
 using SteamKit2.Authentication;
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Text;
 
 namespace SteamWebAPIAccess
@@ -33,14 +30,13 @@ namespace SteamWebAPIAccess
         const int MaxPasswordAttempts = 3;
 
         public string PublisherWebAPIKey { get; set; }
-        public string VolumeName = "minerbot20";
         public string AuthPath = "data/Auth", AuthName = "SteamToken.txt", refreshTokenSymbol = "$RT$", accessTokenSymbol = "$AT$", steamIDTokenSymbol = "$SID$", accountNameSymbol = "$NAME$";
         public string AuthFullPath => AuthPath + "/" + AuthName;
         public bool hasReadAuthFile = false;
         public bool needsToCreateRefreshToken => string.IsNullOrEmpty(_RefreshToken);
         public uint appID { get; set; } = uint.Parse(Environment.GetEnvironmentVariable("STEAMAPP_ID"));
         private string? _username, _password, _accessToken, _RefreshToken, _tokenAccount;
-        public bool isRunning = false, shouldRememberPassword = false, isQRAuthenticator = false;
+        public bool shouldRememberPassword = false, isQRAuthenticator = false;
         public bool connectAsAnon = false;
         public SteamID? _steamID;
         private HttpClient httpClient { get; set; }
@@ -82,8 +78,6 @@ namespace SteamWebAPIAccess
         public void AuthenticateClient()
         {
             CreateClient();
-
-            isRunning = true;
 
             // Initiate the Connection
             ConnectToSteam();
@@ -321,8 +315,6 @@ namespace SteamWebAPIAccess
             {
                 Console.WriteLine($"Unable to logon to Steam: {callback.Result} / {callback.ExtendedResult}");
 
-                isRunning = false;
-
                 HandleFailedLogOn(callback.Result);
 
                 return;
@@ -330,7 +322,6 @@ namespace SteamWebAPIAccess
 
             StopStallCheck();
 
-            isRunning = true;
             reconnectAttempts = 0;
             passwordAttempts = 0;
             offlineSince = null;
@@ -504,8 +495,6 @@ namespace SteamWebAPIAccess
                 Console.WriteLine(qrSession != null
                     ? $"The connection closed while waiting for the QR code to be scanned: {e.GetType().Name}"
                     : $"Unable to sign in to Steam: {(e is TimeoutException or AuthenticationException ? e.Message : e)}");
-
-                isRunning = false;
 
                 // Every failure leaves through the same reconnect path
                 Disconnect();

@@ -1,20 +1,9 @@
-﻿using Newtonsoft.Json;
-using Steam.Models;
+﻿using Steam.Models;
 using Steam.Models.SteamCommunity;
 using SteamKit2;
-using SteamKit2.Internal;
-using SteamWebAPI2.Interfaces;
-using SteamWebAPI2.Models;
 using SteamWebAPI2.Utilities;
 using SteamWebAPIAccess.Models;
 using SteamWebAPIAccess.Murder_Miners_Networking;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Net.Http;
-using System.Text;
-using System.Text.Json.Nodes;
-using System.Threading.Tasks;
 
 namespace SteamWebAPIAccess
 {
@@ -48,7 +37,6 @@ namespace SteamWebAPIAccess
 
         // Get
 
-        List<SteamMatchmaking.Lobby> _lobbies = new();
         public async Task<LobbyListResult> GetServerList()
         {
             // Working With -
@@ -103,7 +91,7 @@ namespace SteamWebAPIAccess
 
             foreach (var lobby in callback.Lobbies)
             {
-                if (lobby.Metadata.Count == 0 || lobby.Metadata == null)
+                if (lobby.Metadata.Count == 0)
                     continue;
 
                 lobby.Metadata.TryGetValue("host_steam_id", out string ownerSteamID);
@@ -176,8 +164,6 @@ namespace SteamWebAPIAccess
                 //}
                 //Console.WriteLine();
             }
-
-            _lobbies = callback.Lobbies;
 
             if (skippedLobbies > 0)
                 Console.WriteLine($"Skipped {skippedLobbies} lobbies with unreadable metadata");
@@ -321,47 +307,10 @@ namespace SteamWebAPIAccess
             return $"LobbyID: {callback.LobbySteamID}, AppID: {callback.AppID}";
         }
 
-        public async Task<string> KickUser(ulong removeID, ulong lobbyID)
-        {
-            var uriArgs = new Dictionary<string, object?> { ["appid"] = _steamAPI.appID, ["steamid_to_remove"] = removeID, ["steamid_lobby"] = lobbyID };
-            using (var matchmakingService = WebAPI.GetAsyncInterface("ILobbyMatchmakingService", _steamAPI.PublisherWebAPIKey))
-            {
-                var callback = await matchmakingService.CallAsync(HttpMethod.Post, "RemoveUserFromLobby", args: uriArgs);
-                return callback.Value;
-            }
-            return "User Not Kicked";
-        }
-
         public string InviteUser(ulong lobbyID, ulong userSteamID)
         {
             _steamAPI.steamMatchmaking.InviteToLobby(_steamAPI.appID, lobbyID, userSteamID);
             return "Attempted to Invite User...";
-        }
-
-        public async Task<string> JoinLobby(ulong lobbyID)
-        {
-            var callback = await _steamAPI.steamMatchmaking.JoinLobby(_steamAPI.appID, lobbyID);
-            return callback.ChatRoomEnterResponse.ToString();
-        }
-
-        public async Task<string> LeaveLobby(ulong lobbyID)
-        {
-            var callback = await _steamAPI.steamMatchmaking.LeaveLobby(_steamAPI.appID, lobbyID);
-            return callback.Result.ToString();
-        }
-
-        public string SendMessageToLobby(ulong lobbyID, string msg)
-        {
-            int singleDigitCode = 0;
-            var message = new ClientMsgProtobuf<CMsgClientMMSSendLobbyChatMsg>(EMsg.ClientMMSSendLobbyChatMsg);
-            message.Body.app_id = _steamAPI.appID;
-            message.Body.steam_id_lobby = lobbyID;
-            message.Body.lobby_message = Encoding.ASCII.GetBytes(singleDigitCode + msg);
-            message.SteamID = _steamAPI.steamClient.SteamID;
-
-            _steamAPI.steamMatchmaking.Send(message, _steamAPI.appID);
-
-            return "Message has been sent!";
         }
 
         // Helper Methods (Should move these to a seperate class)
@@ -432,14 +381,6 @@ namespace SteamWebAPIAccess
             ulong convertedTo64bit = steamID3;// * 2;
             convertedTo64bit += ValveMagicNumber; // Valve's magic constant
             //convertedTo64bit += 1; // Universe number
-            return convertedTo64bit;
-        }
-
-        public ulong getSteamIDTo64(uint steamID)
-        {
-            ulong convertedTo64bit = steamID * 2;
-            convertedTo64bit += ValveMagicNumber; // Valve's magic constant
-            convertedTo64bit += 1; // Universe number (Might or might not need this)
             return convertedTo64bit;
         }
     }

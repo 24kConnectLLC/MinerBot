@@ -73,17 +73,12 @@ namespace MinerBot.Tests
         public Task<string> GetInviteLink(uint lobbyID) => throw new NotImplementedException();
         public Task<string> GetLobbyData(ulong lobbyID) => throw new NotImplementedException();
         public ulong GetSteamID3To64(uint steamID3) => throw new NotImplementedException();
-        public ulong getSteamIDTo64(uint steamID) => throw new NotImplementedException();
         public Task<List<SteamMatchmaking.Lobby.Member>> GetUsersInLobby(ulong lobbyID) => throw new NotImplementedException();
         public void Initilization() => throw new NotImplementedException();
         public string InviteUser(ulong lobbyID, ulong userSteamID) => throw new NotImplementedException();
-        public Task<string> JoinLobby(ulong lobbyID) => throw new NotImplementedException();
-        public Task<string> KickUser(ulong removeID, ulong lobbyID) => throw new NotImplementedException();
-        public Task<string> LeaveLobby(ulong lobbyID) => throw new NotImplementedException();
         public Task<NetworkSessionProperties> ReadLobbyMetadata(IReadOnlyDictionary<string, string> keyPairs) => throw new NotImplementedException();
         public void Reconnect() => throw new NotImplementedException();
         public Task<ulong> ResolveVanityURL(string vanityURL) => throw new NotImplementedException();
-        public string SendMessageToLobby(ulong lobbyID, string msg) => throw new NotImplementedException();
     }
 
     internal sealed class FakeArmorData(Action<string> addStep) : IArmorData
@@ -160,9 +155,6 @@ namespace MinerBot.Tests
         }
 
         public Task DeleteGuild(ulong guildId) => throw new NotImplementedException();
-        public Task<int> GetArmorChannelID(string guildId) => throw new NotImplementedException();
-        public Task<int> GetLobbyChannelID(string guildId) => throw new NotImplementedException();
-        public Task<int> GetMapChannelID(string guildId) => throw new NotImplementedException();
     }
 
     internal sealed class FakeClock : ISystemClock

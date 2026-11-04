@@ -117,7 +117,6 @@ You can run MinerBot:
 
 - Latest Visual Studio recommended (or a compatible .NET SDK)
 - Database access (connection strings indicate MySQL-style configuration)
-- Optional Redis (if used in your deployment)
 
 ---
 
@@ -125,7 +124,7 @@ You can run MinerBot:
 
 MinerBot uses:
 
-- `appsettings.json` for application configuration (DB/Redis/Logging)
+- `appsettings.json` for application configuration (DB/Logging)
 - Environment variables (or a `.env` file) for secrets (tokens/keys/passwords)
 
 > 🔒 **Do not commit secrets**. Keep `appsettings.json` and `.env` out of Git.
@@ -137,15 +136,11 @@ Create an `appsettings.json` file and fill in your credentials:
 ```json
 {
   "ConnectionStrings": {
-    "DefaultConnection": "SERVER={Server Host};PORT=3306;DATABASE={Database Name};UID={User ID};PASSWORD={Password};SSLMODE=Preferred;Connection Timeout=30;",
-    "HangfireConnection": "SERVER={Server Host};DATABASE={Database Name};UID={User ID};PWD={Password};",
-    "Redis": "127.18.0.1:6379",
-    "RedisRemote": "{Redis Host Address}:5002"
+    "DefaultConnection": "SERVER={Server Host};PORT=3306;DATABASE={Database Name};UID={User ID};PASSWORD={Password};SSLMODE=Preferred;Connection Timeout=30;"
   },
   "Logging": {
     "LogLevel": {
       "Default": "Information",
-      "Hangfire": "Information",
       "Microsoft.Hosting.Lifetime": "Information"
     }
   }

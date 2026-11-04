@@ -1,11 +1,7 @@
 ﻿using Discord;
 using Discord.Interactions;
 using Discord.WebSocket;
-using Microsoft.Extensions.Configuration;
-using Microsoft.VisualBasic;
-using System;
 using System.Reflection;
-using System.Threading.Tasks;
 
 namespace MinerBot_2._0.Handlers;
 

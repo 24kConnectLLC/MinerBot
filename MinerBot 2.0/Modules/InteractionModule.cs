@@ -3,7 +3,6 @@ using Discord.Interactions;
 using MinerBot_2._0.Attributes;
 using MinerBot_2._0.Handlers;
 using MinerBot_2._0.Services;
-using System.ComponentModel;
 
 namespace MinerBot_2._0.Modules;
 
@@ -12,7 +11,6 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
 {
     // Dependencies can be accessed through Property injection, public properties with public setters will be set by the service provider
     // Dependency Injection will fill this value in for us
-    public PictureService _PictureService { get; set; }
     public AnnounceService _AnnounceService { get; set; }
     public SteamAPIService _SteamAPIService { get; set; }
     public ArmorService _ArmorService { get; set; }
@@ -65,63 +63,6 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
 
             await FollowupAsync(embed: await _SteamAPIService.LobbyListEmbed());
         }
-
-        //[Discord.Interactions.RequireOwner]
-        //[Group("admin", "Admin Commands for Murder Miners")]
-
-        //public class MurderMinersAdminGroupModule() : InteractionModuleBase<SocketInteractionContext>
-        //{
-        //    public SteamAPIService _SteamAPIService { get; set; }
-
-        //    [SlashCommand("create_lobby", "Creates a Murder Miners Lobby.")]
-        //    [RequireUserPermission(GuildPermission.BanMembers)]
-        //    public async Task CreateLobby()
-        //    {
-        //        await RespondAsync("Lobby has been created! " + await _SteamAPIService.CreateLobby());
-        //    }
-
-        //    [SlashCommand("find_users", "Find users in a lobby.")]
-        //    [RequireUserPermission(GuildPermission.BanMembers)]
-        //    public async Task FindUsers(string lobbyID)
-        //    {
-        //        await RespondAsync(await _SteamAPIService.GetUsersInLobby(ulong.Parse(lobbyID)));
-        //    }
-
-        //    [SlashCommand("kick_user", "Kicks a user from a lobby.")]
-        //    [RequireUserPermission(GuildPermission.BanMembers)]
-        //    public async Task KickUser(string userID, string lobbyID)
-        //    {
-        //        await RespondAsync(await _SteamAPIService.KickUserFromLobby(ulong.Parse(userID), ulong.Parse(lobbyID)));
-        //    }
-
-        //    [SlashCommand("send_message", "Sends a message to a lobby.")]
-        //    [RequireUserPermission(GuildPermission.BanMembers)]
-        //    public async Task SendMessageToLobby(string lobbyID, string message)
-        //    {
-        //        await RespondAsync(await _SteamAPIService.SendMessageToLobby(ulong.Parse(lobbyID), message));
-        //    }
-
-        //    [SlashCommand("invite_user", "Invite a user to a lobby.")]
-        //    [RequireUserPermission(GuildPermission.BanMembers)]
-        //    public async Task InviteUserToLobby(string lobbyID, string userID)
-        //    {
-        //        await RespondAsync(await _SteamAPIService.InviteUserToLobby(ulong.Parse(lobbyID), ulong.Parse(userID)));
-        //    }
-
-        //    [SlashCommand("join_lobby", "Join a lobby.")]
-        //    [RequireUserPermission(GuildPermission.BanMembers)]
-        //    public async Task JoinLobby(string lobbyID)
-        //    {
-        //        await RespondAsync(await _SteamAPIService.JoinLobby(ulong.Parse(lobbyID)));
-        //    }
-
-        //    [SlashCommand("leave_lobby", "Leave a lobby")]
-        //    [RequireUserPermission(GuildPermission.BanMembers)]
-        //    public async Task LeaveLobby(string lobbyID)
-        //    {
-        //        await RespondAsync(await _SteamAPIService.LeaveLobby(ulong.Parse(lobbyID)));
-        //    }
-        //}
     }
 
     [RateLimit(5)]
@@ -268,20 +209,6 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
             await _DiscordService.SendAnnouncement(message, Context.Guild.Id);
             await FollowupAsync("Announcement Sent!");
         }
-
-        //[Discord.Interactions.RequireOwner]
-        //[SlashCommand("reconnect", "Reconnects to Steam")]
-        //public async Task ReconnectToSteam()
-        //{
-        //    await RespondAsync(_SteamAPIService.ReconnectToSteam());
-        //}
-
-        //[Discord.Interactions.RequireOwner]
-        //[SlashCommand("disconnect", "Disconnects from Steam")]
-        //public async Task DisconnectFromSteam()
-        //{
-        //    await RespondAsync(_SteamAPIService.DisconnectFromSteam());
-        //}
     }
 
     // With the Attribute DoUserCheck you can make sure that only the user this button targets can click it. This is defined by the first wildcard: *.
