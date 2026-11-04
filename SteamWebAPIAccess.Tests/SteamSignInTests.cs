@@ -54,7 +54,7 @@ namespace SteamWebAPIAccess.Tests
             Assert.Equal("user", logOn.Username);
             Assert.Equal(GoodToken, logOn.AccessToken);
             Assert.DoesNotContain(SignInFailed, ConsoleText);
-            Assert.True(steam.isRunning);
+            Assert.Equal(0, steam.Disconnects);
             Assert.False(steam.needsToCreateRefreshToken);
             Assert.Empty(steam.Alerts);
         }
@@ -159,7 +159,6 @@ namespace SteamWebAPIAccess.Tests
             Connected(steam);
 
             Assert.Contains(SignInFailed, ConsoleText);
-            Assert.False(steam.isRunning);
             Assert.Equal(1, steam.Disconnects);
         }
 
@@ -171,7 +170,6 @@ namespace SteamWebAPIAccess.Tests
             Connected(steam);
 
             Assert.Contains(SignInFailed, ConsoleText);
-            Assert.False(steam.isRunning);
             Assert.Equal(1, steam.Disconnects);
         }
 
@@ -184,7 +182,6 @@ namespace SteamWebAPIAccess.Tests
             Connected(steam);
 
             Assert.Contains(SignInFailed, ConsoleText);
-            Assert.False(steam.isRunning);
             Assert.Equal(1, steam.Disconnects);
         }
 
@@ -393,7 +390,7 @@ namespace SteamWebAPIAccess.Tests
             Disconnected(steam);
 
             Assert.True(steam.needsToCreateRefreshToken);
-            Assert.False(steam.isRunning);
+            Assert.Contains($"Unable to logon to Steam: {result}", ConsoleText);
             Assert.Contains(result.ToString(), Assert.Single(steam.Alerts));
 
             Connected(steam);
@@ -583,7 +580,7 @@ namespace SteamWebAPIAccess.Tests
             LoggedOn(steam, EResult.Expired);
 
             Assert.False(steam.needsToCreateRefreshToken);
-            Assert.True(steam.isRunning);
+            Assert.DoesNotContain("Unable to logon", ConsoleText);
         }
 
         // Reconnecting
@@ -1617,7 +1614,7 @@ namespace SteamWebAPIAccess.Tests
 
         OfflineSteam CreateSteam(string? username, string? tokenFile)
         {
-            var steam = new OfflineSteam { AuthPath = authFolder, AuthName = "TestToken.txt", isRunning = true };
+            var steam = new OfflineSteam { AuthPath = authFolder, AuthName = "TestToken.txt" };
 
             steam.SetCredentials("key", "false", username!, null!);
             steam.CreateClient();

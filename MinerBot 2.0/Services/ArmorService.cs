@@ -1,14 +1,9 @@
 ﻿using DataAccessLibrary.Armor;
 using DataAccessLibrary.Armor.Models;
 using Discord;
-using Microsoft.Extensions.Caching.Distributed;
 using MinerBot_2._0.Builders;
 using MinerBot_2._0.Extensions;
-using ProtoBuf;
-using SteamWebAPIAccess;
-using System.Runtime.CompilerServices;
 using System.Text;
-using System.Text.RegularExpressions;
 
 namespace MinerBot_2._0.Services
 {

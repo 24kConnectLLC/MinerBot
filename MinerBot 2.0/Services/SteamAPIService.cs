@@ -1,18 +1,12 @@
 ﻿using Discord;
 using Microsoft.Extensions.Caching.Memory;
 using MinerBot_2._0.Builders;
-using Mysqlx.Crud;
 using Steam.Models;
 using Steam.Models.SteamCommunity;
 using SteamKit2;
 using SteamWebAPIAccess;
 using SteamWebAPIAccess.Models;
-using System;
-using System.Collections.Generic;
 using System.Collections.Specialized;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using System.Web;
 
 namespace MinerBot_2._0.Services
@@ -193,16 +187,6 @@ namespace MinerBot_2._0.Services
             return users;
         }
 
-        public async Task<string> KickUserFromLobby(ulong userID, ulong lobbyID)
-        {
-            return await GetData.KickUser(userID, lobbyID);
-        }
-
-        public async Task<string> SendMessageToLobby(ulong lobbyID, string msg)
-        {
-            return GetData.SendMessageToLobby(lobbyID, msg);
-        }
-
         public async Task<string> InviteUserToLobby(ulong lobbyID, ulong userID)
         {
             return GetData.InviteUser(lobbyID, userID);
@@ -236,16 +220,6 @@ namespace MinerBot_2._0.Services
                 _cache.Set(key, items, LatestWorkshopItemsCacheTime);
 
             return items;
-        }
-
-        public async Task<string> JoinLobby(ulong lobbyID)
-        {
-            return await GetData.JoinLobby(lobbyID);
-        }
-
-        public async Task<string> LeaveLobby(ulong lobbyID)
-        {
-            return await GetData.LeaveLobby(lobbyID);
         }
 
         public async Task<(PlayerSummaryModel PlayerSummary, SteamID SteamID)> GetSteamIDSummary(string profileURL)

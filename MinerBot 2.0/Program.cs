@@ -7,18 +7,15 @@ using MinerBot_2._0.Handlers;
 using MinerBot_2._0.Jobs;
 using MinerBot_2._0.Services;
 using SteamWebAPIAccess;
-using System.Reflection;
 
 var builder = Host.CreateApplicationBuilder(args);
 builder.Services.AddHostedService<Worker>();
 builder.Services.AddSingleton(new DiscordSocketConfig { GatewayIntents = GatewayIntents.Guilds });
 builder.Services.AddSingleton<DiscordSocketClient>();
-builder.Services.AddSingleton(new InteractionServiceConfig { LocalizationManager = new ResxLocalizationManager("InteractionFramework.Resources.CommandLocales", Assembly.GetEntryAssembly()) }); // ,new CultureInfo("en-US")
 //builder.Services.AddSingleton<InteractionService>();
 builder.Services.AddSingleton<InteractionService>(p => new InteractionService(p.GetRequiredService<DiscordSocketClient>()));
 builder.Services.AddSingleton<InteractionHandler>();
 builder.Services.AddSingleton<HttpClient>();
-builder.Services.AddSingleton<PictureService>();
 builder.Services.AddSingleton<AnnounceService>();
 builder.Services.AddSingleton<OwnerAlertService>();
 builder.Services.AddSingleton<ArmorService>();
@@ -39,31 +36,10 @@ builder.Services.AddDataAccessServices(builder.Configuration)
 // Steam API Access
 builder.Services.AddSteamAPIServices();
 
-// Redis Caching
-//builder.Services.AddStackExchangeRedisCache(options =>
-//{
-//    options.Configuration = builder.Configuration.GetConnectionString(builder.Environment.IsDevelopment() ? "RedisRemote" : "Redis"); // builder.Environment.IsDevelopment() ? "RedisRemote" : "Redis"
-//    options.InstanceName = "Minerbot20_";
-//});
-
 // In Memory Caching
 builder.Services.AddMemoryCache();
 
 //builder.Services.AddSingleton<AutomatedNotificationService>();
-// Add Hangfire Services
-//builder.Services.AddHangfire(configuration => configuration
-//                    .SetDataCompatibilityLevel(CompatibilityLevel.Version_180)
-//                    .UseSimpleAssemblyNameTypeSerializer()
-//                    .UseRecommendedSerializerSettings()
-//                    .UseSqlServerStorage(builder.Configuration.GetConnectionString("HangfireConnection"), new Hangfire.SqlServer.SqlServerStorageOptions
-//                    {
-//                        CommandBatchMaxTimeout = TimeSpan.FromMinutes(5),
-//                        SlidingInvisibilityTimeout = TimeSpan.FromMinutes(5),
-//                        QueuePollInterval = TimeSpan.Zero,
-//                        UseRecommendedIsolationLevel = true,
-//                        DisableGlobalLocks = true
-//                    }))
-//    .AddHangfireServer();
 
 var host = builder.Build();
 

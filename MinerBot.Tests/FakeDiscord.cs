@@ -184,7 +184,6 @@ namespace MinerBot.Tests
                 .AddSingleton(interactions)
                 .AddSingleton<InteractionHandler>()
                 .AddSingleton<HttpClient>()
-                .AddSingleton<PictureService>()
                 .AddSingleton<AnnounceService>()
                 .AddSingleton<OwnerAlertService>()
                 .AddSingleton<ArmorService>()

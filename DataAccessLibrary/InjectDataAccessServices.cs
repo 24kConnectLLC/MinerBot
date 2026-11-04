@@ -1,4 +1,5 @@
-﻿using DataAccessLibrary.Armor;
+﻿using Dapper;
+using DataAccessLibrary.Armor;
 using DataAccessLibrary.Blacklist;
 using DataAccessLibrary.Discord;
 using Microsoft.Extensions.Configuration;
@@ -19,7 +20,9 @@ namespace DataAccessLibrary
 
             services.AddSingleton<IDictionary<DBConnectionName, string>>(connectionDict);
 
-            services.AddTransient<ISQLConnectionFactory, SQLConnectionFactory>();
+            SqlMapper.Settings.CommandTimeout = 60;
+
+            services.AddSingleton<ISQLConnectionFactory, SQLConnectionFactory>();
 
             services.AddMemoryCache();
 

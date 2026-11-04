@@ -1,11 +1,5 @@
-﻿using Discord;
-using Discord.Webhook;
+﻿using Discord.Webhook;
 using MinerBot_2._0.Builders;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace MinerBot_2._0.Services;
 public class AnnounceService

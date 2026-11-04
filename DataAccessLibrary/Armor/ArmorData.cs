@@ -41,32 +41,12 @@ namespace DataAccessLibrary.Armor
 
             if (output == null)
             {
-                if (timeSpan == null)
-                    timeSpan = TimeSpan.FromMinutes(1);
-
                 output = await GetAllArmorNames();
                 _memoryCache.Set(key, output, timeSpan);
             }
 
             return output;
         }
-
-        // Redis Caching
-        //public async Task<IEnumerable<string>> GetArmorListNamesRCache(HelmentType helmetChoice, int page = -1)
-        //{
-        //    string recordKey = "ArmorNameList_" + DateTime.Now.ToString("yyyyMMdd_hhmm");
-
-        //    var armors = await _cache.GetRecordAsync<IEnumerable<string>>(recordKey);
-
-        //    if (armors == null)
-        //    {
-        //        armors = await GetArmorListNames(helmetChoice, page);
-
-        //        await _cache.SetRecordAsync(recordKey, armors, TimeSpan.FromMinutes(5));
-        //    }
-
-        //    return armors;
-        //}
 
         public Task<IEnumerable<string>> GetArmorNamesByHelmet(string helmetChoice)
         {
@@ -123,7 +103,7 @@ namespace DataAccessLibrary.Armor
             string sql = @"DELETE FROM ihvph_armor_styles
                             WHERE ID = @ID";
 
-            return SaveData(sql, new { armor });
+            return SaveData(sql, new { armor.ID });
         }
     }
 }

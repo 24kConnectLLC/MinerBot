@@ -1,6 +1,4 @@
-using Microsoft.AspNetCore.Components;
 using MinerBot_2._0.Handlers;
-using MinerBot_2._0.Models;
 using SteamWebAPIAccess;
 
 namespace MinerBot_2._0
@@ -10,10 +8,7 @@ namespace MinerBot_2._0
         private readonly ILogger<Worker> _logger;
         private readonly IHost _host;
 
-        [Inject]
         private ISteamAPIAccess steamAPI { get; set; }
-
-        [Inject]
         private JobHandler jobHandler { get; set; }
 
         public Worker(ILogger<Worker> logger, IHost host)
