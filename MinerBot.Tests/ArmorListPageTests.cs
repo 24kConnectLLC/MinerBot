@@ -27,7 +27,7 @@ namespace MinerBot.Tests
         [InlineData(2, 41, 45)]
         public async Task PageHoldsTheTwentyNamesAfterThePageBefore(int page, int first, int last)
         {
-            var service = new ArmorService(new FakeArmorData(_ => { }) { ArmorNames = Names(1, 45) });
+            var service = new ArmorService(new FakeArmorData(_ => { }) { ArmorNames = Names(1, 45) }, new HttpClient());
 
             Assert.Equal(Names(first, last), await service.GetArmorListNames(HelmentType.Bug, page));
         }

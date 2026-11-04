@@ -12,8 +12,11 @@ namespace MinerBot_2._0.Attributes
 {
     internal class RateLimitAttribute : PreconditionAttribute
     {
-        public static ConcurrentDictionary<ulong, List<RateLimitItem>> Items = new ConcurrentDictionary<ulong, List<RateLimitItem>>();
+        // One entry per id (a user, channel or guild, or 0 for everyone) and command, holding when each use that still
+        // counts stops counting. The arrays are only ever replaced, never changed, so every reader sees a whole one.
+        public static ConcurrentDictionary<(ulong Id, string Command), DateTime[]> Items = new();
         private static DateTime _removeExpiredCommandsTime = DateTime.MinValue;
+        private static readonly object _removeExpiredCommandsLock = new();
         private readonly RateLimitType? _context;
         private readonly RateLimitBaseType _baseType;
         private readonly int _requests;
@@ -27,15 +30,11 @@ namespace MinerBot_2._0.Attributes
         }
         public override Task<PreconditionResult> CheckRequirementsAsync(IInteractionContext context, ICommandInfo commandInfo, IServiceProvider services)
         {
+            var now = DateTime.UtcNow;
+
             // clear old expired commands every 30m
-            if (DateTime.UtcNow > _removeExpiredCommandsTime)
-            {
-                _ = Task.Run(async () =>
-                {
-                    await ClearExpiredCommands();
-                    _removeExpiredCommandsTime = DateTime.UtcNow.AddMinutes(30);
-                });
-            }
+            if (IsCleanupDue(now))
+                ClearExpiredCommands(now);
 
             ulong id = _context.Value switch
             {
@@ -57,58 +56,56 @@ namespace MinerBot_2._0.Attributes
                 _ => "unknown"
             };
 
-            var dateTime = DateTime.UtcNow;
-
-            var target = Items.GetOrAdd(id, new List<RateLimitItem>());
-
-            var commands = target.Where(
-                a =>
-                a.command == contextId
-            );
-
-            foreach (var c in commands.ToList())
-                if (dateTime >= c.expireAt)
-                    target.Remove(c);
-
-            if (commands.Count() < _requests)
-            {
-                target.Add(new RateLimitItem()
-                {
-                    command = contextId,
-                    expireAt = DateTime.UtcNow + TimeSpan.FromSeconds(_seconds)
-                });
+            if (TryUse((id, contextId), now, out var usableAt))
                 return Task.FromResult(PreconditionResult.FromSuccess());
-            }
 
-            return Task.FromResult(PreconditionResult.FromError($"This command is usable <t:{((DateTimeOffset)commands.Last().expireAt).ToUnixTimeSeconds()}:R>."));
+            return Task.FromResult(PreconditionResult.FromError($"This command is usable <t:{((DateTimeOffset)usableAt).ToUnixTimeSeconds()}:R>."));
         }
-        public static Task ClearExpiredCommands()
+
+        // The decision and the use it adds are stored in one step, so two uses at the same moment can't both get through.
+        // AddOrUpdate can run a factory more than once when two uses race, and keeps only the result of the last run,
+        // which also set allowed, so the decision always matches what was stored.
+        internal bool TryUse((ulong Id, string Command) key, DateTime now, out DateTime usableAt)
         {
-            foreach (var doc in Items)
+            bool allowed = false;
+
+            var uses = Items.AddOrUpdate(key, _ => Decide([]), (_, previous) => Decide(previous));
+
+            usableAt = uses.LastOrDefault();
+            return allowed;
+
+            DateTime[] Decide(DateTime[] previous)
             {
-                var utcTime = DateTime.UtcNow;
-                foreach (var command in doc.Value.Where(a => utcTime > a.expireAt).ToList())
-                    doc.Value.Remove(command);
+                var current = previous.Where(expireAt => now < expireAt).ToArray();
+                allowed = current.Length < _requests;
+                return allowed ? [.. current, now.AddSeconds(_seconds)] : current;
             }
+        }
+
+        // Checked and pushed forward together, so two uses can't both start a cleanup
+        private static bool IsCleanupDue(DateTime now)
+        {
+            lock (_removeExpiredCommandsLock)
+            {
+                if (now <= _removeExpiredCommandsTime)
+                    return false;
+
+                _removeExpiredCommandsTime = now.AddMinutes(30);
+                return true;
+            }
+        }
+
+        public static Task ClearExpiredCommands() => ClearExpiredCommands(DateTime.UtcNow);
+
+        // Removing the pair only removes the entry while it still holds the array that was checked,
+        // so a use that lands in the meantime stays.
+        internal static Task ClearExpiredCommands(DateTime now)
+        {
+            foreach (var item in Items)
+                if (item.Value.All(expireAt => now >= expireAt))
+                    Items.TryRemove(item);
+
             return Task.CompletedTask;
-        }
-        public static List<RateLimitItem> GetCommandsByIdAsync(ulong id)
-        {
-            return Items.GetOrAdd(id, new List<RateLimitItem>()).ToList();
-        }
-        public static void ExpireCommandsById(ulong id)
-        {
-            var target = Items.GetOrAdd(id, new List<RateLimitItem>());
-            target.Clear();
-        }
-        public static void ExpireCommands()
-        {
-            Items.Clear();
-        }
-        public class RateLimitItem
-        {
-            public string command { get; set; }
-            public DateTime expireAt { get; set; }
         }
         public enum RateLimitType
         {

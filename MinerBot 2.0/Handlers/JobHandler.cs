@@ -10,6 +10,11 @@ namespace MinerBot_2._0.Handlers
         private readonly ILogger<JobHandler> _logger;
         private readonly IServiceProvider _service;
         private List<Job> _jobs;
+
+        // A little under the 5 minutes between notification runs, so a stuck run is cut off before the next one is due.
+        // Shorter in tests.
+        internal TimeSpan JobTimeLimit = TimeSpan.FromSeconds(270);
+
         public JobHandler(ILogger<JobHandler> logger, IServiceProvider service) 
         {
             _logger = logger;
@@ -22,7 +27,8 @@ namespace MinerBot_2._0.Handlers
             return CronExpression.Parse(cronString).GetNextOccurrence(DateTimeOffset.UtcNow, easternTimeZone).Value;
         }
 
-        public Task StartAsync(CancellationToken cancellationToken)
+        // Virtual so a test can make the start fail
+        public virtual Task StartAsync(CancellationToken cancellationToken)
         {
             _logger.LogInformation("Starting JobService");
 
@@ -40,11 +46,49 @@ namespace MinerBot_2._0.Handlers
                         })
                       .ToList();
 
-            _ = Main(cancellationToken);
+            // On the thread pool, so no job runs on the thread that started the handler
+            _ = Task.Run(() => Main(cancellationToken));
             return Task.CompletedTask;
         }
 
-        private async Task RunJobAsync(Job job)
+        private async Task RunJobAsync(Job job, CancellationToken cancellationToken)
+        {
+            var timer = System.Diagnostics.Stopwatch.StartNew();
+
+            // On the thread pool too, because a job that blocks before it hands back its task would hold up the limit
+            var run = Task.Run(() => InvokeJobAsync(job));
+            job.Running = run;
+
+            try
+            {
+                await run.WaitAsync(JobTimeLimit, cancellationToken);
+                _logger.LogInformation("{jobDeclareType}.{jobName} took {timerHumanized}",
+                    job.DeclaringType.Name, job.Name, timer.Elapsed.ToString());
+            }
+            // A job that throws a TimeoutException of its own has failed, it wasn't cut off
+            catch (TimeoutException) when (!run.IsCompleted)
+            {
+                _logger.LogWarning("{jobDeclareType}.{jobName} was cut off after {timeLimit}. It carries on in the background, and this job isn't started again until it ends.",
+                    job.DeclaringType.Name, job.Name, JobTimeLimit.ToString());
+
+                // Otherwise nothing would show when, and how, it ended
+                _ = run.ContinueWith(ended =>
+                {
+                    if (ended.IsFaulted)
+                        _logger.LogError(ended.Exception, "{jobDeclareType}.{jobName}, which was cut off, failed after {timerHumanized}",
+                            job.DeclaringType.Name, job.Name, timer.Elapsed.ToString());
+                    else
+                        _logger.LogInformation("{jobDeclareType}.{jobName}, which was cut off, ended after {timerHumanized}",
+                            job.DeclaringType.Name, job.Name, timer.Elapsed.ToString());
+                }, TaskScheduler.Default);
+            }
+            catch (Exception e) when (!cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogError(e, "{jobDeclareType}.{jobName} failed", job.DeclaringType.Name, job.Name);
+            }
+        }
+
+        private async Task InvokeJobAsync(Job job)
         {
             var jobClass = ActivatorUtilities.CreateInstance(_service, job.DeclaringType);
             await (Task)job.DeclaringType.GetMethod(job.Name).Invoke(jobClass, null);
@@ -54,24 +98,8 @@ namespace MinerBot_2._0.Handlers
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                try
-                {
-                    var jobs = _jobs.Where(x => x.NextRun < DateTimeOffset.Now).OrderBy(x => x.NextRun);
-                    foreach (var job in jobs)
-                    {
-                        job.NextRun = GetNextRun(job.Details.Cron);
-                        _logger.LogInformation("Running Job {jobDeclareType}.{jobName}, Current time: {currentTime}, next run at {nextRun}",
-                            job.DeclaringType.Name, job.Name, $"{DateTimeOffset.UtcNow:HH:mm:ss}", $"{job.NextRun.UtcDateTime:HH:mm:ss}");
-                        var timer = System.Diagnostics.Stopwatch.StartNew();
-                        await RunJobAsync(job);
-                        _logger.LogInformation("{jobDeclareType}.{jobName} took {timerHumanized}",
-                            job.DeclaringType.Name, job.Name, timer.Elapsed.ToString());
-                    }
-                }
-                catch (Exception e)
-                {
-                    _logger.LogError(e, "Error running job");
-                }
+                await RunDueJobsAsync(_jobs, cancellationToken);
+
                 var nextJob = _jobs.OrderBy(x => x.NextRun).FirstOrDefault();
                 if (nextJob != null)
                 {
@@ -89,6 +117,35 @@ namespace MinerBot_2._0.Handlers
                     _logger.LogTrace($"No jobs found, delaying for 1 second");
                     await Task.Delay(1000, cancellationToken);
                 }
+            }
+        }
+
+        // One pass over the jobs that are due. A job that fails or is cut off doesn't stop the others.
+        internal async Task RunDueJobsAsync(List<Job> jobs, CancellationToken cancellationToken)
+        {
+            try
+            {
+                var dueJobs = jobs.Where(x => x.NextRun < DateTimeOffset.Now).OrderBy(x => x.NextRun);
+                foreach (var job in dueJobs)
+                {
+                    job.NextRun = GetNextRun(job.Details.Cron);
+
+                    // Two runs of a job at once would share its state, and could post the same thing twice
+                    if (job.Running is { IsCompleted: false })
+                    {
+                        _logger.LogWarning("{jobDeclareType}.{jobName} is still running from a run that was cut off, so this run is skipped",
+                            job.DeclaringType.Name, job.Name);
+                        continue;
+                    }
+
+                    _logger.LogInformation("Running Job {jobDeclareType}.{jobName}, Current time: {currentTime}, next run at {nextRun}",
+                        job.DeclaringType.Name, job.Name, $"{DateTimeOffset.UtcNow:HH:mm:ss}", $"{job.NextRun.UtcDateTime:HH:mm:ss}");
+                    await RunJobAsync(job, cancellationToken);
+                }
+            }
+            catch (Exception e) when (!cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogError(e, "Error running job");
             }
         }
     }

@@ -122,6 +122,9 @@ namespace MinerBot.Tests
         public List<Guild> AllGuilds { get; set; } = [CreateGuild(FakeDiscord.ChannelId)];
         public Exception? Failure { get; set; }
 
+        // For InsertGuild and UpdateGuild only, so the read before them still answers
+        public Exception? SaveFailure { get; set; }
+
         public static Guild CreateGuild(ulong channelId) => new()
         {
             guild_id = FakeDiscord.GuildId,
@@ -145,13 +148,13 @@ namespace MinerBot.Tests
         public Task InsertGuild(Guild guild)
         {
             addStep(nameof(InsertGuild));
-            return Task.CompletedTask;
+            return SaveFailure != null ? Task.FromException(SaveFailure) : Task.CompletedTask;
         }
 
         public Task UpdateGuild(Guild guild)
         {
             addStep(nameof(UpdateGuild));
-            return Task.CompletedTask;
+            return SaveFailure != null ? Task.FromException(SaveFailure) : Task.CompletedTask;
         }
 
         public Task DeleteGuild(ulong guildId) => throw new NotImplementedException();

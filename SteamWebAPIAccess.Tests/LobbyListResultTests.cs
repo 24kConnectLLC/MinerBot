@@ -23,7 +23,8 @@ namespace SteamWebAPIAccess.Tests
 
             steam = new SteamAPIAccess();
             steam.CreateClient();
-            data = new GetData(steam);
+            // These tests make no web requests
+            data = new GetData(steam, new HttpClient(), new WebRetryHandler());
         }
 
         [Fact]

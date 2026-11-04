@@ -10,15 +10,20 @@ namespace SteamWebAPIAccess
     public class GetData : IGetData
     {
         private readonly ISteamAPIAccess _steamAPI;
+        private readonly HttpClient _httpClient;
+        private readonly WebRetryHandler _webHandler;
         public SteamWebInterfaceFactory webInterfaceFactory;
         public SteamWebAPI2.Interfaces.SteamUser steamUser;
         public SteamWebAPI2.Interfaces.SteamRemoteStorage steamRemoteStorage;
+        private SteamConfiguration? _steamWebAPI;
 
         public bool IsConnected => _steamAPI.steamClient.IsConnected;
 
-        public GetData(ISteamAPIAccess steamAPI)
+        public GetData(ISteamAPIAccess steamAPI, HttpClient httpClient, WebRetryHandler webHandler)
         {
             _steamAPI = steamAPI;
+            _httpClient = httpClient;
+            _webHandler = webHandler;
         }
 
         public void Initilization()
@@ -31,8 +36,22 @@ namespace SteamWebAPIAccess
 
             // For SteamWebAPI2
             webInterfaceFactory = new SteamWebInterfaceFactory(_steamAPI.PublisherWebAPIKey);
-            steamUser = webInterfaceFactory.CreateSteamWebInterface<SteamWebAPI2.Interfaces.SteamUser>(new HttpClient());
-            steamRemoteStorage = webInterfaceFactory.CreateSteamWebInterface<SteamWebAPI2.Interfaces.SteamRemoteStorage>(new HttpClient());
+            steamUser = webInterfaceFactory.CreateSteamWebInterface<SteamWebAPI2.Interfaces.SteamUser>(_httpClient);
+            steamRemoteStorage = webInterfaceFactory.CreateSteamWebInterface<SteamWebAPI2.Interfaces.SteamRemoteStorage>(_httpClient);
+
+            // For SteamKit2's web calls. SteamKit sets its own timeout on a client and disposes it with the interface,
+            // so each interface gets a client of its own on the shared handler.
+            _steamWebAPI = SteamConfiguration.Create(config => config
+                .WithHttpClientFactory(_ => new HttpClient(_webHandler, disposeHandler: false))
+                .WithWebAPIKey(_steamAPI.PublisherWebAPIKey));
+        }
+
+        // In place of SteamKit's timeout, which is 100 seconds
+        internal WebAPI.AsyncInterface GetSteamInterface(string name)
+        {
+            var steamInterface = _steamWebAPI!.GetAsyncWebAPIInterface(name);
+            steamInterface.Timeout = _webHandler.ClientTimeout;
+            return steamInterface;
         }
 
         // Get
@@ -255,7 +274,7 @@ namespace SteamWebAPIAccess
 
             try
             {
-                using (var steamuser = WebAPI.GetAsyncInterface("IPublishedFileService", _steamAPI.PublisherWebAPIKey))
+                using (var steamuser = GetSteamInterface("IPublishedFileService"))
                 {
                     List<PublishedFileDetailsModel> workshopItems = new List<PublishedFileDetailsModel>();
 
@@ -288,7 +307,7 @@ namespace SteamWebAPIAccess
         public async Task<string> GetLobbyData(ulong lobbyID)
         {
             var uriArgs = new Dictionary<string, object?> { ["appid"] = _steamAPI.appID, ["steamid_lobby"] = lobbyID };
-            using (var matchmakingService = WebAPI.GetAsyncInterface("ILobbyMatchmakingService", _steamAPI.PublisherWebAPIKey))
+            using (var matchmakingService = GetSteamInterface("ILobbyMatchmakingService"))
             {
                 var callback = await matchmakingService.CallAsync(HttpMethod.Get, "GetLobbyData", args: uriArgs);
                 return callback.AsString();
@@ -366,7 +385,7 @@ namespace SteamWebAPIAccess
         public async Task<ulong> ResolveVanityURL(string vanityURL)
         {
             var uriArgs = new Dictionary<string, object?> { ["vanityurl"] = vanityURL };
-            using (var steamuser = WebAPI.GetAsyncInterface("ISteamUser", _steamAPI.PublisherWebAPIKey))
+            using (var steamuser = GetSteamInterface("ISteamUser"))
             {
                 var callback = await steamuser.CallAsync(HttpMethod.Get, "ResolveVanityURL", args: uriArgs);
                 return ulong.Parse(callback.Children[0].Value);

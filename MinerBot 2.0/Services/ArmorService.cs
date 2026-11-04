@@ -10,12 +10,20 @@ namespace MinerBot_2._0.Services
     public class ArmorService
     {
         private readonly IArmorData _armorData;
+        private readonly HttpClient _httpClient;
 
         public int ItemsPerPage = 20;
 
-        public ArmorService(IArmorData armorData)
+        // Shorter in tests
+        internal TimeSpan ScreenshotLimit = TimeSpan.FromSeconds(8);
+
+        // Discord's limit for the description of an attachment
+        const int MaxAttachmentDescriptionLength = 1024;
+
+        public ArmorService(IArmorData armorData, HttpClient httpClient)
         {
             _armorData = armorData;
+            _httpClient = httpClient;
         }
 
         // Discord doesn't hold an autocomplete option to its suggestions, so this can be any text
@@ -208,12 +216,15 @@ namespace MinerBot_2._0.Services
             return formattedName + imageType;
         }
 
-        public async Task<(Embed ArmorEmbed, FileAttachment ArmorImage)> ArmorEmbed(ArmorStyle armor = null, string armorName = "Free Palestine")
+        // Without an image when there's no screenshot or it can't be fetched, so the lookup still answers
+        public async Task<(Embed ArmorEmbed, FileAttachment? ArmorImage)> ArmorEmbed(ArmorStyle armor = null, string armorName = "Free Palestine")
         {
             if (armor == null)
                 armor = await GetArmorStyle(armorName);
 
             var imageName = FormatImageURL(armor.ArmorName, ".png");
+            var image = await GetFileAttachmentAsync(FormatImageURL(armor.ArmorScreenshot, includeSpecial: true), imageName, armor.ArmorDescription);
+
             var embed = new EmbedBuilderTemplate()
                 .WithTitle(armor.ArmorName)
                 // The empty first line keeps a one-word description from being read as the language of the block
@@ -228,22 +239,36 @@ namespace MinerBot_2._0.Services
                     Value = $"`{(armor.ColorArray == null ? armor.CreateColorArray() : armor.ColorArray)}`",
                     IsInline = true
                 }
-                ])
-                .WithImageUrl($"attachment://{imageName}")
-                .Build();
+                ]);
 
-            var image = await GetFileAttachmentAsync(FormatImageURL(armor.ArmorScreenshot, includeSpecial: true), imageName, armor.ArmorDescription);
+            if (image != null)
+                embed.WithImageUrl($"attachment://{imageName}");
 
-            return (embed, image);
+            return (embed.Build(), image);
         }
 
-        public async Task<FileAttachment> GetFileAttachmentAsync(string url, string fileName, string description = "")
+        // Null when the url isn't a web link or the image can't be fetched in time
+        public async Task<FileAttachment?> GetFileAttachmentAsync(string url, string fileName, string description = "")
         {
-            using (HttpClient client = new HttpClient())
+            // An empty screenshot reaches here as "MinerPreview", and on Linux a path like /armor.png is an absolute file URI
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+                return null;
+
+            try
             {
-                var response = await client.GetStreamAsync(url);
-                var imageFile = new FileAttachment(response, fileName, description);
-                return imageFile;
+                // The whole image is read inside the limit, so a server that stops halfway can't hold up the reply
+                using var limit = new CancellationTokenSource(ScreenshotLimit);
+                var image = await _httpClient.GetByteArrayAsync(uri, limit.Token);
+
+                return new FileAttachment(new MemoryStream(image), fileName, UIUtils.shortenTextForEmbed(description, MaxAttachmentDescriptionLength));
+            }
+            catch (Exception e)
+            {
+                // The limit ends the fetch with a cancellation, which doesn't say why
+                var reason = e is OperationCanceledException ? $"no answer within {ScreenshotLimit.TotalSeconds:0.#} seconds" : e.Message;
+
+                Console.WriteLine($"Couldn't fetch the screenshot for {fileName}: {reason}");
+                return null;
             }
         }
 

@@ -15,7 +15,7 @@ builder.Services.AddSingleton<DiscordSocketClient>();
 //builder.Services.AddSingleton<InteractionService>();
 builder.Services.AddSingleton<InteractionService>(p => new InteractionService(p.GetRequiredService<DiscordSocketClient>()));
 builder.Services.AddSingleton<InteractionHandler>();
-builder.Services.AddSingleton<HttpClient>();
+builder.Services.AddWebClient();
 builder.Services.AddSingleton<AnnounceService>();
 builder.Services.AddSingleton<OwnerAlertService>();
 builder.Services.AddSingleton<ArmorService>();
@@ -25,7 +25,6 @@ builder.Services.AddSingleton<NotificationState>();
 builder.Services.AddSingleton<JobHandler>();
 //builder.Logging.ClearProviders();
 //builder.Logging.AddConsole();
-builder.Services.Configure<HostOptions>(options => options.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
 
 // SQL Data Access
 builder.Services.AddDataAccessServices(builder.Configuration)
