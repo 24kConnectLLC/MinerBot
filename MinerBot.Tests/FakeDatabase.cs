@@ -17,10 +17,14 @@ namespace MinerBot.Tests
         static readonly TimeSpan WaitLimit = TimeSpan.FromSeconds(15);
 
         readonly ConcurrentQueue<Func<Task>> answers = new();
+        readonly ConcurrentQueue<string> commands = new();
         readonly TaskCompletionSource firstCall = new(TaskCreationOptions.RunContinuationsAsynchronously);
         int calls;
 
         public int Calls => Volatile.Read(ref calls);
+
+        // The text of every command, in the order they came
+        public IReadOnlyList<string> Commands => commands.ToList();
 
         // Done once the first command arrives. A call that was cut off can fail before its command gets this far.
         public Task FirstCall => firstCall.Task;
@@ -55,8 +59,9 @@ namespace MinerBot.Tests
                 .GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic, [typeof(string), typeof(int), typeof(Exception)])!
                 .Invoke([$"MySQL error {number}", number, inner]);
 
-        async Task<T> AnswerAsync<T>(Func<T> result)
+        async Task<T> AnswerAsync<T>(string commandText, Func<T> result)
         {
+            commands.Enqueue(commandText);
             Interlocked.Increment(ref calls);
             firstCall.TrySetResult();
 
@@ -115,9 +120,9 @@ namespace MinerBot.Tests
             protected override DbParameter CreateDbParameter() => new MySqlParameter();
 
             protected override Task<DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior, CancellationToken cancellationToken) =>
-                database.AnswerAsync<DbDataReader>(ArmorNameRows);
+                database.AnswerAsync<DbDataReader>(CommandText, ArmorNameRows);
 
-            public override Task<int> ExecuteNonQueryAsync(CancellationToken cancellationToken) => database.AnswerAsync(() => 1);
+            public override Task<int> ExecuteNonQueryAsync(CancellationToken cancellationToken) => database.AnswerAsync(CommandText, () => 1);
 
             public override void Cancel() { }
             public override void Prepare() { }

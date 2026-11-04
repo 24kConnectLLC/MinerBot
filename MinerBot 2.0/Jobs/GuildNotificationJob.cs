@@ -4,6 +4,7 @@ using MinerBot_2._0.Services;
 using MinerBot_2._0.Attributes;
 using SteamWebAPIAccess.Models;
 using DataAccessLibrary.Armor.Models;
+using DataAccessLibrary.Discord.Models;
 
 namespace MinerBot_2._0.Jobs
 {
@@ -32,54 +33,29 @@ namespace MinerBot_2._0.Jobs
         [Job("*/5 * * * *")] // Every 5 Minutes
         public async Task NotifyAllGuilds()
         {
-            if (!_state.GuildEventsHooked)
-            {
-                _discord.JoinedGuild += _discord_JoinedGuild;
-                _discord.LeftGuild += _discord_LeftGuild;
-
-                _state.GuildEventsHooked = true;
-            }
-
             var newArmor = await GetNewArmor();
             var newMaps = await GetNewMaps();
             var newLobbies = await GetNewLobbies();
 
             int armorDelivered = 0, mapsDelivered = 0, lobbiesDelivered = 0;
 
-            foreach (var guild in await _DiscordService.GetAllGuilds())
+            var guilds = (await _DiscordService.GetAllGuilds()).ToList();
+
+            foreach (var guild in guilds)
             {
-                armorDelivered = Math.Max(armorDelivered, await NotifyNewArmor(guild.armor_channel_id, newArmor));
-                mapsDelivered = Math.Max(mapsDelivered, await NotifyNewMap(guild.map_channel_id, newMaps));
-                lobbiesDelivered = Math.Max(lobbiesDelivered, await NotifyNewLobby(guild.lobby_channel_id, newLobbies));
+                armorDelivered = Math.Max(armorDelivered, await NotifyNewArmor(guild.guild_id, guild.armor_channel_id, newArmor));
+                mapsDelivered = Math.Max(mapsDelivered, await NotifyNewMap(guild.guild_id, guild.map_channel_id, newMaps));
+                lobbiesDelivered = Math.Max(lobbiesDelivered, await NotifyNewLobby(guild.guild_id, guild.lobby_channel_id, newLobbies));
             }
 
-            // Only now, so a failure before this point leaves these new for the next run
-            _state.Armor.Commit(newArmor, armorDelivered);
-            _state.Maps.Commit(newMaps, mapsDelivered);
-            _state.Lobbies.Commit(newLobbies, lobbiesDelivered);
-        }
+            // Only now, so a failure before this point leaves these new for the next run.
+            // A kind that no server has on has nobody to wait for, so its new items are all recorded as seen. Otherwise they'd be
+            // tried again for an hour and then logged as a failure, and the first server to turn that kind on would get them as new.
+            _state.Armor.Commit(newArmor, AnyServerHasItOn(guild => guild.armor_channel_id) ? armorDelivered : newArmor?.Count ?? 0);
+            _state.Maps.Commit(newMaps, AnyServerHasItOn(guild => guild.map_channel_id) ? mapsDelivered : newMaps?.Count ?? 0);
+            _state.Lobbies.Commit(newLobbies, AnyServerHasItOn(guild => guild.lobby_channel_id) ? lobbiesDelivered : newLobbies?.Count ?? 0);
 
-        private async Task _discord_LeftGuild(SocketGuild arg)
-        {
-            await _DiscordService.DeleteGuild(arg.Id);
-        }
-
-        private async Task _discord_JoinedGuild(SocketGuild arg)
-        {
-            try
-            {
-                var bot = arg.GetUser(_discord.CurrentUser.Id);
-                var permissions = bot.GuildPermissions;
-                if (permissions.Administrator)
-                {
-                    var channel = arg.GetTextChannel(arg.PublicUpdatesChannel == null ? arg.SystemChannel.Id : arg.PublicUpdatesChannel.Id);
-                    await channel.SendMessageAsync("Set up your channels for notifications using the /admin set_channels command!\nFirst, make sure that I can access the channels.");
-                }
-            }
-            catch
-            {
-                Console.WriteLine("Couldn't send welcome message!");
-            }
+            bool AnyServerHasItOn(Func<Guild, ulong> channelId) => guilds.Any(guild => channelId(guild) != Guild.ChannelOff);
         }
 
         // A null list means that the source couldn't be read, so these three leave it for the next run.
@@ -102,8 +78,12 @@ namespace MinerBot_2._0.Jobs
             }
         }
 
-        public async Task<int> NotifyNewArmor(ulong channelId, List<ArmorStyle>? newArmor)
+        public async Task<int> NotifyNewArmor(ulong guildId, ulong channelId, List<ArmorStyle>? newArmor)
         {
+            // A kind the server turned off isn't a failure
+            if (channelId == Guild.ChannelOff)
+                return 0;
+
             if (newArmor == null || newArmor.Count == 0)
                 return 0;
 
@@ -121,7 +101,7 @@ namespace MinerBot_2._0.Jobs
             }
             catch (Exception e)
             {
-                Console.WriteLine($"Could Send Map Notification to Discord Channel ID: {channelId}\n{e.Message}");
+                Console.WriteLine($"Couldn't send the armor notification to channel {channelId} of guild {guildId}\n{e.Message}");
             }
 
             return sentArmor;
@@ -150,8 +130,11 @@ namespace MinerBot_2._0.Jobs
             }
         }
 
-        public async Task<int> NotifyNewMap(ulong channelId, List<Steam.Models.PublishedFileDetailsModel>? newMaps)
+        public async Task<int> NotifyNewMap(ulong guildId, ulong channelId, List<Steam.Models.PublishedFileDetailsModel>? newMaps)
         {
+            if (channelId == Guild.ChannelOff)
+                return 0;
+
             if (newMaps == null || newMaps.Count == 0)
                 return 0;
 
@@ -169,7 +152,7 @@ namespace MinerBot_2._0.Jobs
             }
             catch (Exception e)
             {
-                Console.WriteLine($"Could Send Map Notification to Discord Channel ID: {channelId}\n{e.Message}");
+                Console.WriteLine($"Couldn't send the map notification to channel {channelId} of guild {guildId}\n{e.Message}");
             }
 
             return sentMaps;
@@ -198,8 +181,11 @@ namespace MinerBot_2._0.Jobs
             }
         }
 
-        public async Task<int> NotifyNewLobby(ulong channelId, List<LobbyInfo>? newLobbies)
+        public async Task<int> NotifyNewLobby(ulong guildId, ulong channelId, List<LobbyInfo>? newLobbies)
         {
+            if (channelId == Guild.ChannelOff)
+                return 0;
+
             if (newLobbies == null || newLobbies.Count == 0)
                 return 0;
 
@@ -212,7 +198,7 @@ namespace MinerBot_2._0.Jobs
             }
             catch (Exception e)
             {
-                Console.WriteLine($"Could Send Lobby Notification to Discord Channel ID: {channelId}\n{e.Message}");
+                Console.WriteLine($"Couldn't send the lobby notification to channel {channelId} of guild {guildId}\n{e.Message}");
                 return 0;
             }
         }

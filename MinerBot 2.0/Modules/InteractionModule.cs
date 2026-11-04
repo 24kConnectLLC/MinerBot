@@ -182,56 +182,6 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
         }
     }
 
-    [RateLimit(5)]
-    [RequireContext(ContextType.Guild)]
-    [Group("admin", "Admin Only Commands.")]
-    public class AdminGroupModule() : InteractionModuleBase<SocketInteractionContext>
-    {
-        public SteamAPIService _SteamAPIService { get; set; }
-        public DiscordService _DiscordService { get; set; }
-
-        [RequireUserPermission(GuildPermission.Administrator)]
-        [SlashCommand("set_channels", "Sets Channels for Notifications. Scans every 5 minutes (except announce command). Admin Only.")]
-        public async Task SetNotificationChannel(IMessageChannel armorChannel, IMessageChannel mapChannel, IMessageChannel lobbyChannel, IMessageChannel announcementsChannel)
-        {
-            await DeferAsync();
-
-            var guild = new DataAccessLibrary.Discord.Models.Guild()
-            {
-                guild_id = Context.Guild.Id,
-                armor_channel_id = armorChannel.Id,
-                map_channel_id = mapChannel.Id,
-                lobby_channel_id = lobbyChannel.Id,
-                announcements_channel_id = announcementsChannel.Id
-            };
-
-            try
-            {
-                await _DiscordService.UpdateGuild(guild);
-            }
-            // A save the database didn't answer in time can still go through later, so this asks for a wait, not a retry
-            catch (TimeoutException e)
-            {
-                Console.WriteLine($"[Interaction/Warning] set_channels timed out for {Context.User}: {e.Message}");
-                await FollowupAsync("The database didn't answer in time, so the channels may or may not be saved. Please wait a few minutes before setting them again.");
-                return;
-            }
-
-            await FollowupAsync("Thanks for setting the channels!");
-        }
-
-        [RequireUserPermission(GuildPermission.Administrator)]
-        [SlashCommand("announce", "Creates an announcement. Admin Only.")]
-        public async Task Announce(string message)
-        {
-            await DeferAsync();
-
-            //await AnnounceService.Announce("Announcement", message);
-            await _DiscordService.SendAnnouncement(message, Context.Guild.Id);
-            await FollowupAsync("Announcement Sent!");
-        }
-    }
-
     // With the Attribute DoUserCheck you can make sure that only the user this button targets can click it. This is defined by the first wildcard: *.
     // See Attributes/DoUserCheckAttribute.cs for elaboration.
 
@@ -301,13 +251,15 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
     //}
 
     // This command will greet target user in the channel this was executed in.
+    [CommandContextType(InteractionContextType.Guild)]
     [RequireUserPermission(GuildPermission.ModerateMembers)]
     [UserCommand("greet")]
     public async Task GreetUserAsync(IUser user)
         => await RespondAsync(text: $":wave: {Context.User} said hi to you, <@{user.Id}>!");
 
     // Pins a message in the channel it is in. The bot pins with its own permission, so the member needs Pin Messages in that channel.
-    // Discord offers it in DMs too, where there's no such permission to check, so a DM is refused first.
+    // Discord is asked to offer it in servers only, and a DM that comes in anyway is refused first, as there's no such permission to check there.
+    [CommandContextType(InteractionContextType.Guild)]
     [RequireContext(ContextType.Guild)]
     [RequireUserPermission(ChannelPermission.PinMessages)]
     [RateLimit(4)]
@@ -318,11 +270,11 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
 
         // make a safety cast to check if the message is ISystem- or IUserMessage
         if (message is not IUserMessage userMessage)
-            await FollowupAsync(text: ":x: You cant pin system messages!");
+            await FollowupAsync(text: ":x: You can't pin system messages!");
 
         // if the pins in this channel are equal to or above 50, no more messages can be pinned.
         else if ((await Context.Channel.GetPinnedMessagesAsync()).Count >= 50)
-            await FollowupAsync(text: ":x: You cant pin any more messages, the max has already been reached in this channel!");
+            await FollowupAsync(text: ":x: You can't pin any more messages, the max has already been reached in this channel!");
 
         else
         {
@@ -350,4 +302,90 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
     //}
 
 
+}
+
+// Top level, because Discord.Net drops the default member permissions of a group nested in a module that has none.
+// A server can still let other roles use /admin, so each command checks for Administrator too.
+[RateLimit(5)]
+[RequireContext(ContextType.Guild)]
+[DefaultMemberPermissions(GuildPermission.Administrator)]
+[CommandContextType(InteractionContextType.Guild)]
+[Group("admin", "Admin Only Commands.")]
+public class AdminGroupModule() : InteractionModuleBase<SocketInteractionContext>
+{
+    public SteamAPIService _SteamAPIService { get; set; }
+    public DiscordService _DiscordService { get; set; }
+
+    // A channel option can't be set to none, so leaving one out is how a kind is turned off
+    [RequireUserPermission(GuildPermission.Administrator)]
+    [SlashCommand("set_channels", "Sets where I post each kind of notification. Any kind you leave out is turned off. Admin Only.")]
+    public async Task SetNotificationChannel(
+        [Summary(description: "Channel for new armor styles. Leave out to turn these off.")] [ChannelTypes(ChannelType.Text, ChannelType.News)] IMessageChannel? armorChannel = null,
+        [Summary(description: "Channel for new and updated workshop maps. Leave out to turn these off.")] [ChannelTypes(ChannelType.Text, ChannelType.News)] IMessageChannel? mapChannel = null,
+        [Summary(description: "Channel for newly opened public lobbies. Leave out to turn these off.")] [ChannelTypes(ChannelType.Text, ChannelType.News)] IMessageChannel? lobbyChannel = null,
+        [Summary(description: "Channel for /admin announce. Leave out to turn announcements off.")] [ChannelTypes(ChannelType.Text, ChannelType.News)] IMessageChannel? announcementsChannel = null)
+    {
+        // Private from the start, because after a public defer Discord keeps the first followup public
+        await DeferAsync(ephemeral: true);
+
+        // Checked before anything is saved, so a server isn't left with a channel the job can't post in
+        var bot = Context.Guild.CurrentUser ?? throw new InvalidOperationException("The bot's own member isn't in the guild cache");
+
+        var refused = new[] { armorChannel, mapChannel, lobbyChannel, announcementsChannel }
+            .OfType<IGuildChannel>()
+            .DistinctBy(channel => channel.Id)
+            .Select(channel => (channel.Id, Missing: DiscordService.MissingPermissions(bot, channel, ChannelPermission.ViewChannel, ChannelPermission.SendMessages, ChannelPermission.EmbedLinks)))
+            .Where(check => check.Missing.Count > 0)
+            .Select(check => $"- {MentionUtils.MentionChannel(check.Id)}: {string.Join(", ", check.Missing)}")
+            .ToList();
+
+        if (refused.Count > 0)
+        {
+            await FollowupAsync($"Nothing was saved, because I'm missing permissions in these channels:\n{string.Join("\n", refused)}\nGive me these permissions there (or pick other channels), then run /admin set_channels again.", ephemeral: true);
+            return;
+        }
+
+        var guild = new DataAccessLibrary.Discord.Models.Guild()
+        {
+            guild_id = Context.Guild.Id,
+            armor_channel_id = armorChannel?.Id ?? DataAccessLibrary.Discord.Models.Guild.ChannelOff,
+            map_channel_id = mapChannel?.Id ?? DataAccessLibrary.Discord.Models.Guild.ChannelOff,
+            lobby_channel_id = lobbyChannel?.Id ?? DataAccessLibrary.Discord.Models.Guild.ChannelOff,
+            announcements_channel_id = announcementsChannel?.Id ?? DataAccessLibrary.Discord.Models.Guild.ChannelOff
+        };
+
+        try
+        {
+            await _DiscordService.SaveGuild(guild);
+        }
+        // A save the database didn't answer in time can still go through later, so this asks for a wait, not a retry
+        catch (TimeoutException e)
+        {
+            Console.WriteLine($"[Interaction/Warning] set_channels timed out for {Context.User}: {e.Message}");
+            await FollowupAsync("The database didn't answer in time, so the channels may or may not be saved. Please wait a few minutes before setting them again.", ephemeral: true);
+            return;
+        }
+
+        await FollowupAsync($"Saved. This is where I'll post in this server:\n{DiscordService.ChannelList(guild)}\nAny kind you leave out of /admin set_channels is turned off. See these again with /admin show_channels.", ephemeral: true);
+    }
+
+    [RequireUserPermission(GuildPermission.Administrator)]
+    [SlashCommand("show_channels", "Shows where I post each kind of notification. Admin Only.")]
+    public async Task ShowNotificationChannels()
+    {
+        await DeferAsync(ephemeral: true);
+
+        var guild = await _DiscordService.GetGuild(Context.Guild.Id);
+
+        await FollowupAsync($"This is where I post in this server:\n{DiscordService.ChannelList(guild)}\nChange these with /admin set_channels. Any kind you leave out there is turned off.", ephemeral: true);
+    }
+
+    [RequireUserPermission(GuildPermission.Administrator)]
+    [SlashCommand("announce", "Creates an announcement. Admin Only.")]
+    public async Task Announce([Summary(description: "The message to post, up to 2,000 characters.")] [MaxLength(DiscordConfig.MaxMessageSize)] string message)
+    {
+        await DeferAsync(ephemeral: true);
+
+        await FollowupAsync(await _DiscordService.SendAnnouncement(message, Context.Guild), ephemeral: true);
+    }
 }

@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using DataAccessLibrary.Armor;
 using DataAccessLibrary.Discord;
 using Discord;
@@ -22,9 +23,12 @@ namespace MinerBot.Tests
     [CollectionDefinition("Discord", DisableParallelization = true)]
     public class DiscordCollection { }
 
-    // One thing the bot did, in order. Body is the JSON it sent to Discord, and File the upload that came with it.
-    internal sealed record Step(string Name, string Body = "", string? File = null)
+    // One thing the bot did, in order. Body is the JSON it sent to Discord, File the upload that came with it, and Endpoint where it went.
+    internal sealed record Step(string Name, string Body = "", string? File = null, string Endpoint = "")
     {
+        // The channel of a message the bot sent
+        public ulong SentTo => ulong.Parse(Regex.Match(Endpoint, @"^channels/(\d+)/messages$").Groups[1].Value);
+
         // The first response to an interaction nests the message under data, a followup doesn't
         public JsonElement Message
         {
@@ -84,6 +88,13 @@ namespace MinerBot.Tests
 
         // Roles of the first guild, which a member only has when a test sets MemberRoles. The last one is denied Pin Messages in ChannelId.
         public const ulong PinnerRoleId = 2001, ChannelManagerRoleId = 2002, DeniedPinnerRoleId = 2003;
+
+        // The bot's role in the first guild gives it View Channel, Send Messages and Embed Links, and these channels there take one away.
+        // HiddenChannelId is hidden from @everyone, the way Discord sends a channel the bot can't view.
+        public const ulong PosterRoleId = 2004, NoSendChannelId = 3003, HiddenChannelId = 3004, NoEmbedChannelId = 3005, AnnouncementChannelId = 3006;
+
+        // A role of the joined guild without Administrator, with only View Channel and Send Messages
+        public const ulong JoinedPosterRoleId = 2102;
 
         static readonly TimeSpan WaitLimit = TimeSpan.FromSeconds(15);
 
@@ -184,6 +195,7 @@ namespace MinerBot.Tests
                 .AddSingleton(client)
                 .AddSingleton(interactions)
                 .AddSingleton<InteractionHandler>()
+                .AddSingleton<GuildEventHandler>()
                 .AddWebClient()
                 .AddSingleton<AnnounceService>()
                 .AddSingleton<OwnerAlertService>()
@@ -218,6 +230,7 @@ namespace MinerBot.Tests
             Console.SetOut(console);
 
             await services.GetRequiredService<InteractionHandler>().InitializeAsync();
+            services.GetRequiredService<GuildEventHandler>().Initialize();
 
             // InitializeAsync looks in the entry assembly, which is the test runner here
             await interactions.AddModulesAsync(typeof(InteractionHandler).Assembly, services);
@@ -286,6 +299,19 @@ namespace MinerBot.Tests
         {
             var data = $$"""{"id":"1","name":"{{group}}","type":1,"options":[{"name":"{{subcommand}}","type":1,"options":[{{options}}]}],"resolved":{{resolved}}}""";
             return SendInteractionAsync(type: 2, data, userId ?? UserId, age, direct: direct);
+        }
+
+        // /admin set_channels with these options. The channels have to be in the first guild's cache, which is where Discord.Net
+        // takes them from, as for an unknown one it asks Discord over REST, and that fails the interaction here.
+        public Task SendSetChannelsAsync(params (string Option, ulong ChannelId)[] channels)
+        {
+            var options = channels.Select(channel => $$"""{"name":"{{channel.Option}}","type":7,"value":"{{channel.ChannelId}}"}""");
+            var resolved = channels.Select(channel => channel.ChannelId).Distinct().Select(id => $$"""
+                "{{id}}":{"id":"{{id}}","type":{{(id == AnnouncementChannelId ? 5 : 0)}},"name":"channel","permissions":"0"}
+                """);
+
+            return SendSlashCommandAsync("admin", "set_channels", string.Join(",", options),
+                channels.Length == 0 ? "{}" : $$"""{"channels":{ {{string.Join(",", resolved)}} } }""");
         }
 
         // /name, with no group
@@ -369,22 +395,44 @@ namespace MinerBot.Tests
 
         public Task LeaveGuildAsync() => gateway.DeliverAsync("GUILD_DELETE", $$"""{"id":"{{GuildId}}"}""");
 
-        // The bot's member the way a join event lists it, BotRoleId gives it Administrator
+        // The bot's member the way Discord lists it with a guild. In the joined guild BotRoleId gives it Administrator,
+        // and JoinedPosterRoleId only View Channel and Send Messages.
         public static string BotMemberJson(params ulong[] roles) => $$"""
             {"user":{{UserJson(BotId, bot: true)}},"roles":[{{string.Join(",", roles.Select(role => $"\"{role}\""))}}],"joined_at":"2026-01-01T00:00:00+00:00","deaf":false,"mute":false}
             """;
 
-        // Being added to a server. An "unavailable":false here would make it an existing guild coming back, and JoinedGuild wouldn't fire.
-        public Task JoinGuildAsync(string members) => gateway.DeliverAsync("GUILD_CREATE", $$"""
+        // Being added to a server, which has only its general channel unless a test gives it a JSON list of channels.
+        // An "unavailable":false here would make it an existing guild coming back, and JoinedGuild wouldn't fire.
+        public Task JoinGuildAsync(string members, string? channels = null, ulong? systemChannelId = JoinedChannelId, ulong? publicUpdatesChannelId = null) =>
+            gateway.DeliverAsync("GUILD_CREATE", $$"""
             {"id":"{{JoinedGuildId}}","name":"New guild","owner_id":"{{OtherUserId}}","verification_level":0,"default_message_notifications":0,
              "explicit_content_filter":0,"mfa_level":0,"premium_tier":0,"nsfw_level":0,"features":[],"emojis":[],"stickers":[],
-             "system_channel_id":"{{JoinedChannelId}}","public_updates_channel_id":null,
+             "system_channel_id":{{IdJson(systemChannelId)}},"public_updates_channel_id":{{IdJson(publicUpdatesChannelId)}},
              "roles":[{"id":"{{JoinedGuildId}}","name":"@everyone","permissions":"0","position":0,"color":0,"hoist":false,"managed":false,"mentionable":false},
-                      {"id":"{{BotRoleId}}","name":"MinerBot","permissions":"8","position":1,"color":0,"hoist":false,"managed":true,"mentionable":false,"tags":{"bot_id":"{{BotId}}"} }],
-             "channels":[{"id":"{{JoinedChannelId}}","type":0,"name":"general","position":0,"permission_overwrites":[]}],
+                      {"id":"{{BotRoleId}}","name":"MinerBot","permissions":"8","position":1,"color":0,"hoist":false,"managed":true,"mentionable":false,"tags":{"bot_id":"{{BotId}}"} },
+                      {{RoleJson(JoinedPosterRoleId, "MinerBot poster", GuildPermission.ViewChannel | GuildPermission.SendMessages)}}],
+             "channels":{{channels ?? $"[{ChannelJson(JoinedChannelId, 0, name: "general")}]"}},
              "member_count":2,"large":false,"members":{{members}},"presences":[],"threads":[],"voice_states":[],"guild_scheduled_events":[],
              "joined_at":"2026-01-01T00:00:00+00:00"}
             """);
+
+        // A guild channel, 0 is a text channel. Discord.Net reads the name of every channel.
+        public static string ChannelJson(ulong id, int position, string overwrites = "", int type = 0, string? name = null) => $$"""
+            {"id":"{{id}}","type":{{type}},"name":"{{name ?? $"channel-{id}"}}","position":{{position}},"permission_overwrites":[{{overwrites}}]}
+            """;
+
+        // An overwrite that takes a permission away from a role in a channel. The id of @everyone is the guild's own.
+        public static string DenyJson(ulong roleId, ChannelPermission permission) =>
+            $$"""{"id":"{{roleId}}","type":0,"allow":"0","deny":"{{(ulong)permission}}"}""";
+
+        static string IdJson(ulong? id) => id == null ? "null" : $"\"{id}\"";
+
+        // A GUILD_CREATE during an outage, which has nothing but the guild's id. Discord.Net takes it as a join, even for a guild it has.
+        public Task SendUnavailableGuildAsync(ulong guildId) => gateway.DeliverAsync("GUILD_CREATE", $$"""{"id":"{{guildId}}","unavailable":true}""");
+
+        // An outage in the first guild, and then its end, when Discord sends all of the guild again the way it does after a start
+        public Task MakeGuildUnavailableAsync() => gateway.DeliverAsync("GUILD_DELETE", $$"""{"id":"{{GuildId}}","unavailable":true}""");
+        public Task MakeGuildAvailableAsync() => gateway.DeliverAsync("GUILD_CREATE", GuildJson());
 
         public Task SendOwnerAlertAsync(string message) => services.GetRequiredService<OwnerAlertService>().SendAsync(message);
 
@@ -421,19 +469,29 @@ namespace MinerBot.Tests
              "attachments":[],"embeds":[],"pinned":false,"type":{{type}}}
             """;
 
+        // Discord sends only each guild's id here and the rest in a GUILD_CREATE right after, which leaves Discord.Net with the same guild
         string ReadyJson() => $$"""
             {"v":10,"user":{{UserJson(BotId, bot: true)}},"session_id":"session","resume_gateway_url":"wss://gateway.invalid",
-             "private_channels":[],"application":{"id":"{{BotId}}","flags":0},
-             "guilds":[{"id":"{{GuildId}}","name":"Guild","owner_id":"{{UserId}}","verification_level":0,"default_message_notifications":0,
-                        "explicit_content_filter":0,"mfa_level":0,"premium_tier":0,"nsfw_level":0,"features":[],"emojis":[],"stickers":[],
-                        "roles":[{"id":"{{GuildId}}","name":"@everyone","permissions":"0","position":0,"color":0,"hoist":false,"managed":false,"mentionable":false},
-                                 {{RoleJson(PinnerRoleId, "Pinner", GuildPermission.ViewChannel | GuildPermission.PinMessages)}},
-                                 {{RoleJson(ChannelManagerRoleId, "Channel manager", GuildPermission.ViewChannel | GuildPermission.ManageChannels)}},
-                                 {{RoleJson(DeniedPinnerRoleId, "Pinner denied in general", GuildPermission.ViewChannel | GuildPermission.PinMessages)}}],
-                        "channels":[{"id":"{{ChannelId}}","type":0,"name":"general","position":0,
-                                     "permission_overwrites":[{"id":"{{DeniedPinnerRoleId}}","type":0,"allow":"0","deny":"{{(ulong)ChannelPermission.PinMessages}}"}]}],
-                        "unavailable":false,"member_count":1,"large":false,"members":[],"presences":[],"threads":[],
-                        "voice_states":[],"guild_scheduled_events":[],"joined_at":"2020-01-01T00:00:00+00:00"}]}
+             "private_channels":[],"application":{"id":"{{BotId}}","flags":0},"guilds":[{{GuildJson()}}]}
+            """;
+
+        // The first guild. Discord lists the bot's own member with every guild, even with only the Guilds intent. The owner makes it 2 members.
+        string GuildJson() => $$"""
+            {"id":"{{GuildId}}","name":"Guild","owner_id":"{{UserId}}","verification_level":0,"default_message_notifications":0,
+             "explicit_content_filter":0,"mfa_level":0,"premium_tier":0,"nsfw_level":0,"features":[],"emojis":[],"stickers":[],
+             "roles":[{"id":"{{GuildId}}","name":"@everyone","permissions":"0","position":0,"color":0,"hoist":false,"managed":false,"mentionable":false},
+                      {{RoleJson(PinnerRoleId, "Pinner", GuildPermission.ViewChannel | GuildPermission.PinMessages)}},
+                      {{RoleJson(ChannelManagerRoleId, "Channel manager", GuildPermission.ViewChannel | GuildPermission.ManageChannels)}},
+                      {{RoleJson(DeniedPinnerRoleId, "Pinner denied in general", GuildPermission.ViewChannel | GuildPermission.PinMessages)}},
+                      {{RoleJson(PosterRoleId, "MinerBot", GuildPermission.ViewChannel | GuildPermission.SendMessages | GuildPermission.EmbedLinks)}}],
+             "channels":[{"id":"{{ChannelId}}","type":0,"name":"general","position":0,
+                          "permission_overwrites":[{"id":"{{DeniedPinnerRoleId}}","type":0,"allow":"0","deny":"{{(ulong)ChannelPermission.PinMessages}}"}]},
+                         {{ChannelJson(NoSendChannelId, 1, DenyJson(PosterRoleId, ChannelPermission.SendMessages))}},
+                         {{ChannelJson(HiddenChannelId, 2, DenyJson(GuildId, ChannelPermission.ViewChannel), name: "___hidden___")}},
+                         {{ChannelJson(NoEmbedChannelId, 3, DenyJson(PosterRoleId, ChannelPermission.EmbedLinks))}},
+                         {{ChannelJson(AnnouncementChannelId, 4, type: 5)}}],
+             "unavailable":false,"member_count":2,"large":false,"members":[{{BotMemberJson(PosterRoleId)}}],"presences":[],"threads":[],
+             "voice_states":[],"guild_scheduled_events":[],"joined_at":"2020-01-01T00:00:00+00:00"}
             """;
 
         // The bot logs from many threads while tests read the text
@@ -515,7 +573,7 @@ namespace MinerBot.Tests
                 var name = StepName(method, endpoint, body);
 
                 if (name != null)
-                    discord.AddStep(new Step(name, body, file));
+                    discord.AddStep(new Step(name, body, file, endpoint));
 
                 if (name != null && name == discord.FailStep && Interlocked.Decrement(ref discord.FailStepAfter) < 0)
                     return Response(HttpStatusCode.Forbidden, """{"code":50013,"message":"Missing Permissions"}""");
@@ -572,6 +630,9 @@ namespace MinerBot.Tests
 
                 if (endpoint == "users/@me/channels")
                     return "open direct message";
+
+                if (method == "GET" && Regex.IsMatch(endpoint, @"^channels/\d+$"))
+                    return "get channel";
 
                 if (endpoint.EndsWith("/messages"))
                     return "send message";

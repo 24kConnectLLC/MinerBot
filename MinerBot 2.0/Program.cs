@@ -15,6 +15,7 @@ builder.Services.AddSingleton<DiscordSocketClient>();
 //builder.Services.AddSingleton<InteractionService>();
 builder.Services.AddSingleton<InteractionService>(p => new InteractionService(p.GetRequiredService<DiscordSocketClient>()));
 builder.Services.AddSingleton<InteractionHandler>();
+builder.Services.AddSingleton<GuildEventHandler>();
 builder.Services.AddWebClient();
 builder.Services.AddSingleton<AnnounceService>();
 builder.Services.AddSingleton<OwnerAlertService>();
@@ -54,6 +55,9 @@ await client.SetGameAsync("Murder Miners on my PC", type:ActivityType.Playing);
 
 // Before connecting, because a Ready event during this would register an empty list and delete every command
 await host.Services.GetRequiredService<InteractionHandler>().InitializeAsync();
+
+// Also before connecting, so a server that adds or removes the bot right after a start isn't missed
+host.Services.GetRequiredService<GuildEventHandler>().Initialize();
 
 await client.LoginAsync(TokenType.Bot, Environment.GetEnvironmentVariable("BOTTOKEN"));
 await client.StartAsync();

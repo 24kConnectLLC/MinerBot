@@ -122,9 +122,13 @@ namespace MinerBot.Tests
         public List<Guild> AllGuilds { get; set; } = [CreateGuild(FakeDiscord.ChannelId)];
         public Exception? Failure { get; set; }
 
-        // For InsertGuild and UpdateGuild only, so the read before them still answers
+        // For SaveGuild only, so the reads still answer
         public Exception? SaveFailure { get; set; }
 
+        // What SaveGuild was last given
+        public Guild? Saved { get; private set; }
+
+        // Announcements are 0, which means turned off
         public static Guild CreateGuild(ulong channelId) => new()
         {
             guild_id = FakeDiscord.GuildId,
@@ -145,19 +149,18 @@ namespace MinerBot.Tests
             return Task.FromResult(Guild!);
         }
 
-        public Task InsertGuild(Guild guild)
+        public Task SaveGuild(Guild guild)
         {
-            addStep(nameof(InsertGuild));
+            addStep(nameof(SaveGuild));
+            Saved = guild;
             return SaveFailure != null ? Task.FromException(SaveFailure) : Task.CompletedTask;
         }
 
-        public Task UpdateGuild(Guild guild)
+        public Task DeleteGuild(ulong guildId)
         {
-            addStep(nameof(UpdateGuild));
-            return SaveFailure != null ? Task.FromException(SaveFailure) : Task.CompletedTask;
+            addStep(nameof(DeleteGuild));
+            return Task.CompletedTask;
         }
-
-        public Task DeleteGuild(ulong guildId) => throw new NotImplementedException();
     }
 
     internal sealed class FakeClock : ISystemClock

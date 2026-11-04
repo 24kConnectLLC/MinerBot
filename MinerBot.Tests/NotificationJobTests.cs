@@ -1,3 +1,4 @@
+using DataAccessLibrary.Discord.Models;
 using Discord;
 using MinerBot_2._0.Jobs;
 using Steam.Models;
@@ -696,66 +697,65 @@ namespace MinerBot.Tests
             Assert.Equal(["Map 6"], SentTitles(discord));
         }
 
-        // Guild events
+        // Each guild's channels
 
-        [Fact]
-        public async Task GuildEventsAreHookedOnlyOnce()
+        // For as many runs as it takes to give up on items that reached no guild. Items that no guild wants aren't a failure.
+        [Theory]
+        [InlineData("armor", ArmorTitle)]
+        [InlineData("map", NewMapTitle)]
+        [InlineData("lobby", LobbyTitle)]
+        public async Task KindThatIsTurnedOffIsSkippedWithoutAnError(string kind, string title)
         {
             await using var discord = await StartWithBaselineAsync();
-            await discord.RunNotificationJobAsync();
+            discord.Guilds.AllGuilds = [new Guild
+            {
+                guild_id = FakeDiscord.GuildId,
+                armor_channel_id = kind == "armor" ? Guild.ChannelOff : FakeDiscord.ChannelId,
+                map_channel_id = kind == "map" ? Guild.ChannelOff : FakeDiscord.ChannelId,
+                lobby_channel_id = kind == "lobby" ? Guild.ChannelOff : FakeDiscord.ChannelId
+            }];
+            AddNewItems(discord);
+
+            for (int run = 0; run < NotificationState.MaxFailedRuns; run++)
+                await discord.RunNotificationJobAsync();
+
+            Assert.Equal(new[] { ArmorTitle, NewMapTitle, LobbyTitle }.Where(sent => sent != title), SentTitles(discord));
+            Assert.DoesNotContain($"{kind} notification", discord.ConsoleText, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("Gave up", discord.ConsoleText);
+        }
+
+        // Otherwise the first server to turn lobbies on would get the ones that opened while no server had them on, as new
+        [Fact]
+        public async Task KindThatIsTurnedOnGetsOnlyWhatIsNewFromThen()
+        {
+            await using var discord = await StartWithBaselineAsync();
+            var guild = FakeGuildData.CreateGuild(FakeDiscord.ChannelId);
+            guild.lobby_channel_id = Guild.ChannelOff;
+            discord.Guilds.AllGuilds = [guild];
+            discord.Steam.Lobbies.Add(Lobby(1));
             await discord.RunNotificationJobAsync();
 
-            await discord.LeaveGuildAsync();
+            guild.lobby_channel_id = FakeDiscord.ChannelId;
+            discord.Steam.Lobbies.Add(Lobby(NewId));
+            await discord.RunNotificationJobAsync();
 
-            Assert.Single(discord.Steps, step => step.Name == nameof(FakeGuildData.GetGuild));
+            var announced = Assert.Single(discord.Steps, step => step.Name == SendStep).EmbedDescriptions.Single();
+            Assert.Contains($"Host {NewId}", announced);
+            Assert.DoesNotContain("Host 1`", announced);
         }
 
         [Fact]
-        public async Task GuildEventsAreHookedWhenTheFirstRunFails()
+        public async Task NotificationThatCanNotBeSentIsLoggedWithItsKindAndGuild()
         {
-            await using var discord = await FakeDiscord.StartAsync();
-            discord.Guilds.Failure = new TimeoutException("Database timed out");
+            await using var discord = await StartWithBaselineAsync();
+            AddNewItems(discord);
+            discord.FailStep = SendStep;
 
-            await Assert.ThrowsAsync<TimeoutException>(discord.RunNotificationJobAsync);
-            await discord.LeaveGuildAsync();
-
-            Assert.Single(discord.Steps, step => step.Name == nameof(FakeGuildData.GetGuild));
-        }
-
-        // These show what the bot does with a join event. Whether a real one lists the bot and its role can only be seen on live Discord.
-        [Fact]
-        public async Task JoiningAServerAsAdministratorSendsTheWelcomeMessage()
-        {
-            await using var discord = await FakeDiscord.StartAsync();
             await discord.RunNotificationJobAsync();
 
-            await discord.JoinGuildAsync($"[{FakeDiscord.BotMemberJson(FakeDiscord.BotRoleId)}]");
-
-            Assert.Contains("/admin set_channels", discord.Single(SendStep).Content);
-        }
-
-        [Fact]
-        public async Task JoiningAServerWithoutAdministratorSendsNothing()
-        {
-            await using var discord = await FakeDiscord.StartAsync();
-            await discord.RunNotificationJobAsync();
-
-            await discord.JoinGuildAsync($"[{FakeDiscord.BotMemberJson()}]");
-
-            Assert.DoesNotContain(SendStep, discord.StepNames);
-            Assert.DoesNotContain("Couldn't send welcome message!", discord.ConsoleText);
-        }
-
-        [Fact]
-        public async Task JoinEventWithoutTheBotIsLoggedAndSendsNothing()
-        {
-            await using var discord = await FakeDiscord.StartAsync();
-            await discord.RunNotificationJobAsync();
-
-            await discord.JoinGuildAsync("[]");
-
-            Assert.DoesNotContain(SendStep, discord.StepNames);
-            Assert.Contains("Couldn't send welcome message!", discord.ConsoleText);
+            Assert.Contains($"Couldn't send the armor notification to channel {FakeDiscord.ChannelId} of guild {FakeDiscord.GuildId}", discord.ConsoleText);
+            Assert.Contains($"Couldn't send the map notification to channel {FakeDiscord.ChannelId} of guild {FakeDiscord.GuildId}", discord.ConsoleText);
+            Assert.Contains($"Couldn't send the lobby notification to channel {FakeDiscord.ChannelId} of guild {FakeDiscord.GuildId}", discord.ConsoleText);
         }
     }
 }

@@ -208,16 +208,9 @@ namespace MinerBot.Tests
             Assert.Equal(["respond"], discord.StepNames);
         }
 
-        // Every channel of the command is the guild's one channel
-        static Task SetChannelsAsync(FakeDiscord discord)
-        {
-            var channel = FakeDiscord.ChannelId;
-            var options = string.Join(",", new[] { "armor-channel", "map-channel", "lobby-channel", "announcements-channel" }
-                .Select(name => $$"""{"name":"{{name}}","type":7,"value":"{{channel}}"}"""));
-            var resolved = $$"""{"channels":{"{{channel}}":{"id":"{{channel}}","type":0,"name":"general","permissions":"0"} } }""";
-
-            return discord.SendSlashCommandAsync("admin", "set_channels", options, resolved);
-        }
+        // Every channel of the command is the guild's general channel
+        static Task SetChannelsAsync(FakeDiscord discord) => discord.SendSetChannelsAsync(
+            ("armor-channel", FakeDiscord.ChannelId), ("map-channel", FakeDiscord.ChannelId), ("lobby-channel", FakeDiscord.ChannelId), ("announcements-channel", FakeDiscord.ChannelId));
 
         [Fact]
         public async Task SetChannelsDefersBeforeAskingTheDatabase()
@@ -226,25 +219,26 @@ namespace MinerBot.Tests
 
             await SetChannelsAsync(discord);
 
-            Assert.Equal(["defer", "GetGuild", "InsertGuild", "followup"], discord.StepNames);
-            Assert.Equal("Thanks for setting the channels!", discord.Single("followup").Content);
+            Assert.Equal(["defer", "SaveGuild", "followup"], discord.StepNames);
+            Assert.True(discord.Single("defer").IsEphemeral);
+            Assert.StartsWith("Saved.", discord.Single("followup").Content);
         }
 
-        // A save that timed out can still go through, so the usual "try again later" could store the server twice
-        [Theory]
-        [InlineData(false, nameof(FakeGuildData.InsertGuild))]
-        [InlineData(true, nameof(FakeGuildData.UpdateGuild))]
-        public async Task SetChannelsThatTimesOutSaysToWaitBeforeTryingAgain(bool alreadySet, string save)
+        // A retry can't store the server twice any more, but a save that timed out can still go through after a newer one
+        // and bring back the older channels
+        [Fact]
+        public async Task SetChannelsThatTimesOutSaysToWaitBeforeTryingAgain()
         {
             await using var discord = await FakeDiscord.StartAsync();
-            discord.Guilds.Guild = alreadySet ? FakeGuildData.CreateGuild(FakeDiscord.ChannelId) : null;
             discord.Guilds.SaveFailure = new TimeoutException("The database didn't answer within 15 seconds");
 
             await SetChannelsAsync(discord);
 
-            Assert.Equal(["defer", "GetGuild", save, "followup"], discord.StepNames);
-            Assert.Equal("The database didn't answer in time, so the channels may or may not be saved. Please wait a few minutes before setting them again.",
-                discord.Single("followup").Content);
+            Assert.Equal(["defer", "SaveGuild", "followup"], discord.StepNames);
+
+            var reply = discord.Single("followup");
+            Assert.Equal("The database didn't answer in time, so the channels may or may not be saved. Please wait a few minutes before setting them again.", reply.Content);
+            Assert.True(reply.IsEphemeral);
             Assert.Contains("set_channels timed out", discord.ConsoleText);
         }
 
@@ -257,8 +251,9 @@ namespace MinerBot.Tests
             await discord.SendSlashCommandAsync("admin", "announce", Option("message", "Hello"));
 
             Assert.Equal(["defer", "GetGuild", "send message", "followup"], discord.StepNames);
+            Assert.True(discord.Single("defer").IsEphemeral);
             Assert.Equal("Hello", discord.Single("send message").Content);
-            Assert.Equal("Announcement Sent!", discord.Single("followup").Content);
+            Assert.Equal($"Sent your announcement to <#{FakeDiscord.ChannelId}>.", discord.Single("followup").Content);
         }
 
         [Fact]
@@ -281,7 +276,7 @@ namespace MinerBot.Tests
             await discord.SendMessageCommandAsync("pin", userJoinedMessage);
 
             Assert.Equal(["defer", "followup"], discord.StepNames);
-            Assert.Equal(":x: You cant pin system messages!", discord.Single("followup").Content);
+            Assert.Equal(":x: You can't pin system messages!", discord.Single("followup").Content);
         }
 
         [Fact]
