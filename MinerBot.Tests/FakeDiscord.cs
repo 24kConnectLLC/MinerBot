@@ -139,6 +139,9 @@ namespace MinerBot.Tests
         // Set to make the bot's application belong to a team with this owner
         public ulong? TeamOwnerId { get; set; }
 
+        // The bot's settings, which start empty, the way environment variables reach it in Program.cs
+        public IConfiguration Settings => services.GetRequiredService<IConfiguration>();
+
         public string ConsoleText => console.ToString();
 
         // Group and name of every slash command the bot loaded, such as "armor list", or "help" for a top-level one
@@ -206,7 +209,7 @@ namespace MinerBot.Tests
                 .AddSingleton<IGetData>(Steam)
                 .AddSingleton<IArmorData>(Armor)
                 .AddSingleton<IGuildData>(Guilds)
-                .AddSingleton<IConfiguration>(new ConfigurationBuilder().Build())
+                .AddSingleton<IConfiguration>(new ConfigurationBuilder().AddInMemoryCollection().Build())
                 .AddLogging()
                 .AddMemoryCache(options => options.Clock = cacheClock)
                 .BuildServiceProvider();

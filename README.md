@@ -166,6 +166,7 @@ STEAMUSER_PASSWORD={Your Steam Password}
 STEAM_QRCODE_AUTH=true
 STEAMUSER_REMEMBERME=true
 STEAMAPP_ID=274900
+ALERT_USER_ID={Discord user ID that gets the bot's alerts (optional, the application's owner by default)}
 ```
 
 ✅ Recommended: Commit a **safe template** called `.env.example`.
@@ -215,7 +216,7 @@ The bot exits when it hits a failure it can't recover from, and `--restart unles
 
 MinerBot signs in to Steam with a saved token in `data/Auth/SteamToken.txt` and renews it every day.
 
-If Steam rejects the token, the bot stops using it and sends a direct message to the owner of the Discord application. Lobbies stay offline until someone signs in again:
+If Steam rejects the token, the bot stops using it and sends a direct message to the user whose ID is in `ALERT_USER_ID`. Without that setting it goes to the owner of the Discord application, which for an application that belongs to a team is the team's owner. Lobbies stay offline until someone signs in again:
 
 - **`STEAM_QRCODE_AUTH=true`:** scan the newest QR code in the bot's log with the Steam Mobile App, restarting the bot first if the log isn't showing one. In Docker, that's `docker restart minerbot`, then `docker logs -f --tail 40 minerbot`. A new code appears about every 20 seconds for 10 minutes.
 - **`STEAM_QRCODE_AUTH=false`:** the bot tries `STEAMUSER_PASSWORD` up to 3 times, and may ask for a Steam Guard code on its console. An unanswered prompt ends the tries. After that it shows QR codes in its log the same way.
@@ -224,7 +225,7 @@ If Steam gives an answer that doesn't say what's wrong with the token, the bot k
 
 To sign in with a different account, rename the token file, restart and scan with that account. In password mode, change `STEAMUSER_NAME` and `STEAMUSER_PASSWORD` too, which in Docker means creating the container again.
 
-The direct message reaches the owner only if they share a server with the bot and accept direct messages from it. To check, rename the token file to `SteamToken.txt.bak` and restart, then rename it back and restart again. In password mode this really signs in, so it can send a Steam Guard code.
+The direct message arrives only if that user shares a server with the bot and accepts direct messages from it. To check, rename the token file to `SteamToken.txt.bak` and restart, then rename it back and restart again. In password mode this really signs in, so it can send a Steam Guard code.
 
 ---
 
