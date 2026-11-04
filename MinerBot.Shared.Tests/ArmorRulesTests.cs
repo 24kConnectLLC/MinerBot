@@ -7,6 +7,7 @@ namespace MinerBot.Shared.Tests
         // A submission as the website saves a good one. Each test changes one thing.
         sealed class Submission : IArmorSubmission
         {
+            public long ID { get; set; } = 3;
             public string? ArmorName { get; set; } = "Test Armor 3";
             public string? ArmorDescription { get; set; } = "A dark set for night raids, with a red visor.";
             public string? ArmorScreenshot { get; set; } = "https://murderminershub.com/wp-content/uploads/ArmorPreviews/Test-Armor-3.png";
@@ -260,6 +261,7 @@ namespace MinerBot.Shared.Tests
         [InlineData("HTTPS://murderminershub.com/x.png")]
         [InlineData("https://murderminershub.com:443/x.png")]
         [InlineData("https://murderminershub.com/x.png?size=large")]
+        [InlineData("https://murderminershub.com/wp-content/uploads/Café-Knight.png")]
         public void ScreenshotOnTheWebsiteIsAllowed(string address)
         {
             Assert.True(ArmorRules.IsAllowedScreenshot(address));
@@ -281,6 +283,14 @@ namespace MinerBot.Shared.Tests
         [InlineData(" https://murderminershub.com/x.png")]
         [InlineData("https://murderminershub.com/x y.png")]
         [InlineData("https://murderminershub.com/x\u200B.png")]
+        // Hosts outside ASCII, some of which .NET's IDN conversion throws on, and look-alikes it would turn into the real host
+        [InlineData("https://\u0301x.com/x.png")]
+        [InlineData("https://murderminershub\uFE52com/x.png")]
+        [InlineData("https://murderminershub.com\u2024/x.png")]
+        [InlineData("https://evil.example\uFF20murderminershub.com/x.png")]
+        [InlineData("https://murderminershub.com\uFF1A8443/x.png")]
+        [InlineData("https://\uFF4Durderminershub.com/x.png")]
+        [InlineData("https://murderminer\u017Fhub.com/x.png")]
         public void ScreenshotAnywhereElseWarns(string address)
         {
             Assert.False(ArmorRules.IsAllowedScreenshot(address));
@@ -382,6 +392,7 @@ namespace MinerBot.Shared.Tests
         {
             var check = Check(new Submission
             {
+                ID = 3000000000,
                 ArmorName = string.Concat(Enumerable.Repeat("`", 30)) + "\n" + string.Concat(Enumerable.Repeat(Emoji, 40)),
                 Author = new string('a', 61),
                 ArmorDescription = new string('a', 4100),
@@ -389,10 +400,22 @@ namespace MinerBot.Shared.Tests
             }, nameTaken: true);
 
             Assert.Equal(
-                [ArmorProblemKind.NameTaken, ArmorProblemKind.NameHasBacktick, ArmorProblemKind.NameHasLineBreak, ArmorProblemKind.NameTooLongForDiscord,
-                 ArmorProblemKind.NameTooLong, ArmorProblemKind.AuthorTooLong, ArmorProblemKind.DescriptionTooLong, ArmorProblemKind.LookupTooLongForDiscord,
-                 ArmorProblemKind.ColorOutOfRange],
+                [ArmorProblemKind.IdTooBigForTheBot, ArmorProblemKind.NameTaken, ArmorProblemKind.NameHasBacktick, ArmorProblemKind.NameHasLineBreak,
+                 ArmorProblemKind.NameTooLongForDiscord, ArmorProblemKind.NameTooLong, ArmorProblemKind.AuthorTooLong, ArmorProblemKind.DescriptionTooLong,
+                 ArmorProblemKind.LookupTooLongForDiscord, ArmorProblemKind.ColorOutOfRange],
                 Kinds(check.Blocking));
+        }
+
+        // The bot reads an armor's ID as an int, so one past that would stop its armor posts in every server once approved
+        [Fact]
+        public void IdTheBotCantReadBlocks()
+        {
+            Assert.True(Check(new Submission { ID = int.MaxValue }).CanApprove);
+
+            var check = Check(new Submission { ID = (long)int.MaxValue + 1 });
+
+            Assert.Equal([ArmorProblemKind.IdTooBigForTheBot], Kinds(check.Blocking));
+            Assert.Equal(ArmorField.Id, check.Blocking[0].Field);
         }
     }
 }

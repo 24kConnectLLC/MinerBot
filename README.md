@@ -152,6 +152,8 @@ Create an `appsettings.json` file and fill in your credentials:
 
 `DefaultConnection` is the website's database, which holds the armor, the blacklist and each server's channels. `BotConnection` is MinerBot's own database, for the coming web dashboard. The bot doesn't use it yet, so it can be left out. Both end in `CharSet=utf8mb4`, the tables' own character set: without it, MySql.Data sends text in the server's default character set, which can turn an emoji into a question mark.
 
+The dashboard writes its audit and review rows in the same transaction as the website change they record, on the website's connection. So the login in `DefaultConnection` also needs `INSERT` on MinerBot's `audit_log` and `armor_reviews` tables, or both strings can use one login with rights on both databases.
+
 ✅ Recommended: Commit a **safe template** called `appsettings.example.json` with placeholders only.
 
 ### 2) Environment Variables (`.env`)

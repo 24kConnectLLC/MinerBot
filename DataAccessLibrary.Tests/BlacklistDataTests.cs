@@ -33,6 +33,37 @@ namespace DataAccessLibrary.Tests
 
         async Task<long> RowsAsync() => (await fixture.RootQueryAsync<long>($"SELECT COUNT(*) FROM {MariaDbFixture.BlacklistTable}")).Single();
 
+        // Two new bans at the same moment, each checking first that its player isn't banned yet, lock the same gap between
+        // two rows and then deadlock adding their rows into it. The one that loses runs again, so both are saved.
+        [Fact]
+        public async Task TwoNewBansAtOnceAreBothSaved()
+        {
+            var db = await StartAsync(Player(10, "Test Player"), Player(900000, "Another Player"));
+            var blacklist = db.Blacklist();
+            var firstChecked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var secondChecked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            // Both check before either adds, the order in which they deadlock
+            Task<bool> Ban(uint accountNumber, TaskCompletionSource done, TaskCompletionSource other) => blacklist.RunInTransaction(async transaction =>
+            {
+                if (await blacklist.GetBannedPlayer(accountNumber, transaction) != null)
+                    return false;
+
+                done.TrySetResult();
+                await other.Task.WaitAsync(WaitLimit, TestContext.Current.CancellationToken);
+
+                await blacklist.InsertPlayerBan(Player(accountNumber, "New Player"), transaction);
+                return true;
+            });
+
+            var results = await Task.WhenAll(Ban(1000, firstChecked, secondChecked), Ban(2000, secondChecked, firstChecked))
+                .WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+
+            Assert.Equal([true, true], results);
+            Assert.NotNull(await blacklist.GetBannedPlayer(1000));
+            Assert.NotNull(await blacklist.GetBannedPlayer(2000));
+        }
+
         // Before the fix this failed with MySql.Data's "Parameter '@steam_id' must be defined"
         [Fact]
         public async Task RemovePlayerBanRemovesTheRow()

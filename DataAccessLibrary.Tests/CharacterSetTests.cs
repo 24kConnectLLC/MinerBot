@@ -12,8 +12,8 @@ using MinerBot.Shared.Armor;
 
 namespace DataAccessLibrary.Tests
 {
-    // MySql.Data uses the server's default character set when the connection string names none, and MariaDB 11.4's is
-    // latin1. Reading is unaffected, because MySql.Data asks for results as they're stored, but text sent to the server
+    // MySql.Data uses the server's default character set when the connection string names none, and the live server's is
+    // latin1, MariaDB's own default. Reading is unaffected, because MySql.Data asks for results as they're stored, but text sent to the server
     // that latin1 can't hold, such as an emoji or a zero-width space, arrives as a question mark. So every repository the
     // dashboard uses sends utf8mb4 whatever its connection string says, which these tests check over strings that name no
     // character set, while the bot's own queries keep theirs as configured.
@@ -53,6 +53,15 @@ namespace DataAccessLibrary.Tests
             outcome = AuditOutcome.Ok,
             detail = Name
         };
+
+        // Every test here assumes it, so a change in how the test server starts fails here, with the reason
+        [Fact]
+        public async Task ServerDefaultsToLatin1LikeTheLiveServer()
+        {
+            var db = fixture.Require();
+
+            Assert.Equal("latin1", (await db.RootQueryAsync<string>("SELECT @@global.character_set_server")).Single());
+        }
 
         [Fact]
         public async Task ReadingWithoutACharacterSetKeepsEveryCharacter()

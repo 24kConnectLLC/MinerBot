@@ -232,6 +232,85 @@ namespace DataAccessLibrary.Tests
             Assert.Equal(0, await CountAsync(MariaDbFixture.AuditTable));
         }
 
+        // A transaction that keeps losing deadlocks runs three times in all, and then the caller hears of it. InnoDB rolls
+        // back each attempt, so none of them lands.
+        [Fact]
+        public async Task DeadlockedTransactionRunsThreeTimesAtMost()
+        {
+            var db = await StartAsync();
+            var armor = db.Submissions();
+            var runs = 0;
+
+            var deadlock = await Assert.ThrowsAsync<MySqlException>(() => armor.RunInTransaction<bool>(async transaction =>
+            {
+                runs++;
+                await armor.ChangeStatus(ArmorId, ArmorStatus.Pending, ArmorStatus.Approved, transaction);
+                throw MySqlErrors.Deadlock();
+            }));
+
+            Assert.Equal((int)MySqlErrorCode.LockDeadlock, deadlock.Number);
+            Assert.Equal(3, runs);
+            Assert.Equal(ArmorStatus.Pending, await StatusAsync());
+        }
+
+        // Only a deadlock means the whole transaction was undone and can simply start again
+        [Fact]
+        public async Task OtherFailuresDontRunTheTransactionAgain()
+        {
+            var db = await StartAsync();
+            var armor = db.Submissions();
+            var runs = 0;
+
+            await Assert.ThrowsAsync<MySqlException>(() => armor.RunInTransaction(async transaction =>
+            {
+                runs++;
+                await transaction.Execute($"INSERT INTO {MariaDbFixture.ArmorTable} (ID, Author) VALUES ({ArmorId}, 'Test Author')", null);
+                return true;
+            }));
+
+            Assert.Equal(1, runs);
+        }
+
+        // MySql.Data doesn't stop a statement that's running when the caller gives up, so the server limits each statement in
+        // a transaction. One stuck behind a table lock, here a backup's or a migration's on MinerBot's audit table, fails
+        // there and rolls back, letting go of the locks the name check took on the whole armor table. So the website can
+        // still save a new armor while the audit table is still locked.
+        [Fact]
+        public async Task StuckTransactionLetsGoOfItsLocks()
+        {
+            var db = await StartAsync();
+            var armor = db.Submissions();
+            armor.CallLimit = TimeSpan.FromSeconds(2);
+
+            await using var holder = new MySqlConnection(db.RootConnection);
+            await holder.OpenAsync(TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+            await RawAsync(holder, $"LOCK TABLES {MariaDbFixture.AuditTable} WRITE");
+
+            try
+            {
+                await Assert.ThrowsAnyAsync<Exception>(() => armor.RunInTransaction(async transaction =>
+                {
+                    await armor.IsApprovedNameTaken("Test Armor 5", ArmorId, transaction);
+                    await armor.ChangeStatus(ArmorId, ArmorStatus.Pending, ArmorStatus.Approved, transaction);
+                    await db.Audit().AddAudit(Audit(), transaction);
+                    return true;
+                }));
+
+                // An armor after the last one goes in the gap the name check locked
+                await using var website = new MySqlConnection(db.RootConnection);
+                await website.OpenAsync(TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+                await RawAsync(website, "SET SESSION innodb_lock_wait_timeout = 5");
+                await RawAsync(website, $"INSERT INTO {MariaDbFixture.ArmorTable} (ID, Status, Author, ArmorName) VALUES ({ArmorId + 1}, 'Pending Approval', 'Test Author', 'Test Armor 6')");
+            }
+            finally
+            {
+                await RawAsync(holder, "UNLOCK TABLES");
+            }
+
+            Assert.Equal(ArmorStatus.Pending, await StatusAsync());
+            Assert.Equal(0, await CountAsync(MariaDbFixture.AuditTable));
+        }
+
         // A write outside a transaction that timed out keeps going, which is why the dashboard says it may or may not
         // have saved
         [Fact]

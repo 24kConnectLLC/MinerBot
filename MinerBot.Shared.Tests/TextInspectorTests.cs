@@ -90,6 +90,39 @@ namespace MinerBot.Shared.Tests
             Assert.Equal(text, TextInspector.Reveal(text));
         }
 
+        // A zero-width joiner between two emoji makes them one, so it's part of what shows, after a style selector or a skin
+        // tone too
+        [Theory]
+        [InlineData("\U0001F3F4\u200D\u2620\uFE0F Pirate")]
+        [InlineData("\U0001F9DF\u200D\u2642\uFE0F Zombie")]
+        [InlineData("\u2764\uFE0F\u200D\U0001F525 Heart on fire")]
+        [InlineData("\U0001F3F3\uFE0F\u200D\U0001F308 Rainbow")]
+        [InlineData("\U0001F469\u200D\U0001F692 Firefighter")]
+        [InlineData("\U0001F469\U0001F3FD\u200D\U0001F692 Firefighter")]
+        [InlineData("\U0001F468\u200D\U0001F469\u200D\U0001F467 Family")]
+        public void JoinerInsideAnEmojiIsNotHidden(string text)
+        {
+            Assert.Empty(TextInspector.Inspect(text).Hidden);
+            Assert.Equal(text, TextInspector.Reveal(text));
+        }
+
+        // Anywhere else it joins nothing and shows nothing
+        [Theory]
+        [InlineData("a\u200Db", 1)]
+        [InlineData("<\u200D@1>", 1)]
+        [InlineData("<\u200D=", 1)]
+        [InlineData("\U0001F600\u200Da", 2)]
+        [InlineData("a\u200D\U0001F600", 1)]
+        [InlineData("\U0001F600\u200D", 2)]
+        [InlineData("\u200D\U0001F600", 0)]
+        public void JoinerOutsideAnEmojiIsHidden(string text, int index)
+        {
+            var hidden = OnlyHidden(text);
+
+            Assert.Equal(index, hidden.Index);
+            Assert.Equal("zero-width joiner", hidden.Name);
+        }
+
         // Anywhere else it changes nothing and shows nothing
         [Theory]
         [InlineData("\uFE0F", 0)]

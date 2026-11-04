@@ -310,6 +310,20 @@ namespace DataAccessLibrary.Tests
             Assert.Equal(ArmorStatus.Pending, await StatusAsync(602));
         }
 
+        // The bot reads IDs as an int, so approving an armor past one would stop its armor posts in every server. Rejecting
+        // it is fine.
+        [Fact]
+        public async Task ArmorTheBotCantReadIsNeverApproved()
+        {
+            var db = await StartAsync(Armor(3000000000, ArmorStatus.Pending, "Test Armor 90", Day(1)));
+            var armor = db.Submissions();
+
+            await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => armor.ChangeStatus(3000000000, ArmorStatus.Pending, ArmorStatus.Approved));
+            Assert.Equal(ArmorStatus.Pending, await StatusAsync(3000000000));
+
+            Assert.True(await armor.ChangeStatus(3000000000, ArmorStatus.Pending, ArmorStatus.NotApproved));
+        }
+
         // In a transaction the check runs on its connection, so it sees the transaction's own approval
         [Fact]
         public async Task NameCheckInATransactionSeesItsOwnChange()

@@ -4,6 +4,8 @@ namespace MinerBot.Shared.Armor
     // a byte or missing.
     public interface IArmorSubmission
     {
+        // The website's table has a 64-bit ID, and the bot reads it as a 32-bit one
+        long ID { get; }
         string? ArmorName { get; }
         string? ArmorDescription { get; }
         string? ArmorScreenshot { get; }

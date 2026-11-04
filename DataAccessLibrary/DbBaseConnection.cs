@@ -104,9 +104,15 @@ namespace DataAccessLibrary
             return WithLimit((connection, _) => connection.ExecuteAsync(sql, parameters));
         }
 
-        // The work's statements run in one transaction on one connection, inside the same limit as any call, and are never
-        // tried again, like every write. A caller that stopped waiting at the limit is told the outcome is unknown, and
-        // committing after that would land a change nobody is waiting for, so disposing the transaction rolls it back instead.
+        // How many more times a transaction that lost a deadlock runs. InnoDB has rolled all of it back, so nothing of it landed.
+        const int DeadlockRetries = 2;
+
+        // The work's statements run in one transaction on one connection, inside the same limit as any call. A caller that
+        // stopped waiting at the limit is told the outcome is unknown, and committing after that would land a change nobody
+        // is waiting for, so disposing the transaction rolls it back instead.
+        // A transaction that loses a deadlock, such as two sign-ins of one person at the same moment, runs again from the
+        // start. So the work may run more than once, and must change nothing but the database through the transaction it's
+        // given. It also mustn't wait on anything slow, because the transaction keeps its locks until the work returns.
         internal Task<T> InTransaction<T>(Func<DataTransaction, Task<T>> work)
         {
             return WithLimit(async (connection, abandoned) =>
@@ -114,17 +120,36 @@ namespace DataAccessLibrary
                 var dbConnection = (DbConnection)connection;
                 await dbConnection.OpenAsync(abandoned).ConfigureAwait(false);
 
-                // Named, because MySql.Data's own async default is READ COMMITTED, where a locking read lets go of the rows it
-                // passed without matching, and a check such as IsApprovedNameTaken has to hold the whole table until the commit
-                await using var transaction = await dbConnection.BeginTransactionAsync(IsolationLevel.RepeatableRead, abandoned).ConfigureAwait(false);
-                var result = await work(new DataTransaction(dbConnection, transaction, abandoned)).ConfigureAwait(false);
-
-                abandoned.ThrowIfCancellationRequested();
-                await transaction.CommitAsync(CancellationToken.None).ConfigureAwait(false);
-
-                return result;
+                for (var attempt = 0; ; attempt++)
+                {
+                    try
+                    {
+                        return await RunTransaction(dbConnection, work, abandoned).ConfigureAwait(false);
+                    }
+                    catch (MySqlException e) when (e.Number == (int)MySqlErrorCode.LockDeadlock && attempt < DeadlockRetries && !abandoned.IsCancellationRequested)
+                    {
+                    }
+                }
             });
         }
+
+        async Task<T> RunTransaction<T>(DbConnection connection, Func<DataTransaction, Task<T>> work, CancellationToken abandoned)
+        {
+            // Named, because MySql.Data's own async default is READ COMMITTED, where a locking read lets go of the rows it
+            // passed without matching, and a check such as IsApprovedNameTaken has to hold the whole table until the commit
+            await using var transaction = await connection.BeginTransactionAsync(IsolationLevel.RepeatableRead, abandoned).ConfigureAwait(false);
+            var result = await work(new DataTransaction(connection, transaction, TransactionStatementSeconds, abandoned)).ConfigureAwait(false);
+
+            abandoned.ThrowIfCancellationRequested();
+            await transaction.CommitAsync(CancellationToken.None).ConfigureAwait(false);
+
+            return result;
+        }
+
+        // How long a statement in a transaction may run or wait for a lock, on the server, which ends it there. MySql.Data
+        // doesn't stop a statement that's already running when the caller stops waiting, so without this one statement
+        // could keep the transaction and every lock it holds for as long as the server allows, which is a day for a table.
+        internal int TransactionStatementSeconds => Math.Max(1, (int)Math.Ceiling(CallLimit.TotalSeconds) - 1);
 
         // A read that met a passing problem gets one more try. A timeout isn't one, so a silent server costs one limit, not two.
         async Task<T> Read<T>(Func<IDbConnection, Task<T>> query)
@@ -142,8 +167,8 @@ namespace DataAccessLibrary
         // Run on the thread pool, because a driver that blocks before it hands back a task would hold the caller
         // before the limit starts. The connection is closed in there too, so a call that was given up on keeps it
         // until it ends, and closing it can't hold the caller either.
-        // The token is cancelled when the caller stops waiting, so work that checks it, such as a transaction, ends there.
-        // It isn't disposed, because a call that was given up on may still read it.
+        // The token is cancelled when the caller stops waiting, so a transaction starts no more statements. MySql.Data doesn't
+        // act on it while a statement runs. It isn't disposed, because a call that was given up on may still read it.
         async Task<T> WithLimit<T>(Func<IDbConnection, CancellationToken, Task<T>> call)
         {
             var abandoned = new CancellationTokenSource();
@@ -160,7 +185,7 @@ namespace DataAccessLibrary
             }
             catch (TimeoutException e) when (!running.IsCompleted)
             {
-                // Not awaited, so a callback that stops a command on the server can't hold the caller
+                // Not awaited, so nothing registered on the token can hold the caller
                 _ = abandoned.CancelAsync();
                 throw new TimeoutException($"The database didn't answer within {CallLimit.TotalSeconds:0.#} seconds", e);
             }

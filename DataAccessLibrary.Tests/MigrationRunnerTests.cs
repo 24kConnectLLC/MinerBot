@@ -273,6 +273,77 @@ namespace DataAccessLibrary.Tests
             await RawAsync(holder, "COMMIT");
         }
 
+        // The statement limit only ends lock waits. MySql.Data counts an answer that comes after its own timeout as a
+        // timeout and then waits for a reply that never comes, so a statement that runs longer than the limit is still
+        // waited for, applied and recorded.
+        [Fact]
+        public async Task SlowStatementIsWaitedFor()
+        {
+            var db = fixture.Require();
+            var (database, connection) = await db.CreateDatabaseAsync("migrate_slowstatement");
+            var options = new MigrationOptions { StatementLimit = TimeSpan.FromSeconds(1), RunLimit = TimeSpan.FromSeconds(20) };
+
+            var result = await RunAsync(connection, new ListLogger(), [Test(1, "DO SLEEP(2);")], options);
+
+            Assert.Equal(["0001_test"], result.Applied);
+            Assert.Equal([1], (await RecordedAsync(database)).Select(row => row.Version));
+        }
+
+        // A statement keeps running when the run is given up on, so the runner ends its session on the server, which stops
+        // the statement and lets go of the lock now rather than when the statement would have ended
+        [Fact]
+        public async Task GivenUpRunLetsGoOfTheLock()
+        {
+            var db = fixture.Require();
+            var (database, connection) = await db.CreateDatabaseAsync("migrate_givenup");
+
+            await Assert.ThrowsAsync<TimeoutException>(() =>
+                RunAsync(connection, new ListLogger(), [Test(1, "DO SLEEP(30);")], new MigrationOptions { RunLimit = TimeSpan.FromSeconds(1) }));
+
+            // The server ends a killed session a moment after the kill
+            var waiting = Stopwatch.StartNew();
+            while (!await LockIsFreeAsync(database) && waiting.Elapsed < TimeSpan.FromSeconds(5))
+                await Task.Delay(100, TestContext.Current.CancellationToken);
+
+            Assert.True(await LockIsFreeAsync(database), $"The lock was still held {waiting.Elapsed} after the run was given up on");
+            Assert.Empty(await db.RootQueryAsync<long>("SELECT ID FROM information_schema.PROCESSLIST WHERE INFO LIKE 'DO SLEEP(30)%'"));
+            Assert.Empty(await RecordedAsync(database));
+        }
+
+        // A file that breaks the one-statement-per-line rule fails on its first run, here, instead of running as one batch
+        // whose second statement no check looked at
+        [Theory]
+        [InlineData("CREATE TABLE IF NOT EXISTS first_table (id INT NOT NULL); CREATE TABLE IF NOT EXISTS second_table (id INT NOT NULL);")]
+        [InlineData("CREATE TABLE IF NOT EXISTS first_table (id INT NOT NULL); -- the first table\nCREATE TABLE IF NOT EXISTS second_table (id INT NOT NULL);")]
+        public async Task TwoStatementsInOneCommandAreRefused(string sql)
+        {
+            var db = fixture.Require();
+            var (database, connection) = await db.CreateDatabaseAsync("migrate_batch");
+
+            await Assert.ThrowsAsync<MySqlException>(() => RunAsync(connection, new ListLogger(), [Test(1, sql)]));
+
+            Assert.Equal(["schema_version"], await TablesAsync(database));
+            Assert.Empty(await RecordedAsync(database));
+        }
+
+        // The live server's default character set is latin1, so a connection string naming none would send a migration's
+        // emoji as question marks, and the recorded file would never run again to put them right
+        [Fact]
+        public async Task MigrationTextKeepsEveryCharacter()
+        {
+            const string Seed = "Test Miner \U0001F600​";
+
+            var db = fixture.Require();
+            var (database, _) = await db.CreateDatabaseAsync("migrate_charset");
+
+            await RunAsync(db.LoginConnectionWithoutCharacterSet(database), new ListLogger(),
+            [
+                Test(1, $"CREATE TABLE IF NOT EXISTS seeds (name VARCHAR(30) NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_520_ci;\nINSERT IGNORE INTO seeds (name) VALUES ('{Seed}');")
+            ]);
+
+            Assert.Equal([Seed], await db.RootQueryAsync<string>($"SELECT name FROM {DatabaseNames.QuoteIdentifier(database)}.seeds"));
+        }
+
         static async Task RawAsync(MySqlConnection connection, string sql)
         {
             await using var command = new MySqlCommand(sql, connection);

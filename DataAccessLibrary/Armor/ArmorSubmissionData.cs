@@ -74,6 +74,11 @@ namespace DataAccessLibrary.Armor
             if (expectedStatus == newStatus)
                 throw new ArgumentException("The new status is the one the armor already has", nameof(newStatus));
 
+            // The bot reads IDs as an int, so one approved armor past that would stop its armor posts in every server.
+            // ArmorRules tells the reviewer why; this stops a caller that skipped the rules.
+            if (newStatus == ArmorStatus.Approved && id is < int.MinValue or > int.MaxValue)
+                throw new ArgumentOutOfRangeException(nameof(id), id, "The bot can't read an armor with this ID, so it can't be approved");
+
             string sql = @"UPDATE ihvph_armor_styles
                             SET Status = @newStatus
                             WHERE ID = @id AND Status <=> @expectedStatus";

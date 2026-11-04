@@ -13,6 +13,7 @@ namespace MinerBot.Shared.Armor
         DescriptionTooLong,
         LookupTooLongForDiscord,
         ColorOutOfRange,
+        IdTooBigForTheBot,
 
         // Warnings
         NoScreenshot,
@@ -26,6 +27,7 @@ namespace MinerBot.Shared.Armor
 
     public enum ArmorField
     {
+        Id,
         Name,
         Description,
         Author,

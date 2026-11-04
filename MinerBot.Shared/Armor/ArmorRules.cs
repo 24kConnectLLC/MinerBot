@@ -47,6 +47,7 @@ namespace MinerBot.Shared.Armor
             var blocking = new List<ArmorProblem>();
             var warnings = new List<ArmorProblem>();
 
+            CheckId(armor.ID, blocking);
             CheckName(armor.ArmorName, nameTaken, blocking);
             CheckSizes(armor, blocking);
             CheckColors(armor, blocking);
@@ -66,11 +67,22 @@ namespace MinerBot.Shared.Armor
             if (string.IsNullOrEmpty(address) || address.Length > ScreenshotLimit || address.Any(char.IsWhiteSpace) || TextInspector.HasHidden(address))
                 return false;
 
+            // Host keeps the letters as written, only lowercased, so a look-alike from outside ASCII never matches. IdnHost would
+            // turn one such as a fullwidth m into the real host, and its conversion throws on some Unicode hosts.
             return Uri.TryCreate(address, UriKind.Absolute, out var uri)
                 && uri.Scheme == Uri.UriSchemeHttps
                 && uri.IsDefaultPort
                 && uri.UserInfo.Length == 0
-                && ScreenshotHosts.Contains(uri.IdnHost, StringComparer.OrdinalIgnoreCase);
+                && ScreenshotHosts.Contains(uri.Host, StringComparer.OrdinalIgnoreCase);
+        }
+
+        // The bot reads an armor's ID as an int with an overflow check, like its colours, so one approved armor past that
+        // stops the armor posts and the colour job for every server. The website's own IDs are far below it.
+        static void CheckId(long id, List<ArmorProblem> blocking)
+        {
+            if (id is < int.MinValue or > int.MaxValue)
+                blocking.Add(Problem(ArmorProblemKind.IdTooBigForTheBot, ArmorField.Id,
+                    $"The armor's ID is {id}, and the bot can only read IDs up to {int.MaxValue}, so approving it would stop the bot's armor posts and colour job in every server"));
         }
 
         static void CheckName(string? name, bool nameTaken, List<ArmorProblem> blocking)

@@ -48,6 +48,38 @@ namespace DataAccessLibrary.Tests
             Assert.Equal(expected.ticket, actual.ticket);
         }
 
+        // Two sign-ins of one person at the same moment, each adding its session and then capping the rest, deadlock on each
+        // other's new row. The one that loses runs again, so both sign in.
+        [Fact]
+        public async Task TwoSignInsOfOnePersonAtOnceBothSucceed()
+        {
+            var db = await StartAsync();
+            var sessions = db.Sessions();
+            var firstAdded = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var secondAdded = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            // Both add their session before either caps the rest, the order in which they deadlock
+            Task<bool> SignIn(string key, TaskCompletionSource done, TaskCompletionSource other) => sessions.RunInTransaction(async transaction =>
+            {
+                await sessions.CreateSession(key, Session(), transaction);
+
+                done.TrySetResult();
+                await other.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+                await sessions.DeleteOldestSessions(Session().user_id, 5, transaction);
+                return true;
+            });
+
+            var first = NewKey();
+            var second = NewKey();
+            var results = await Task.WhenAll(SignIn(first, firstAdded, secondAdded), SignIn(second, secondAdded, firstAdded))
+                .WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+
+            Assert.Equal([true, true], results);
+            Assert.NotNull(await sessions.GetSession(first, Noon));
+            Assert.NotNull(await sessions.GetSession(second, Noon));
+        }
+
         // Fails if the key itself is stored, which would let anyone who reads the table sign in
         [Fact]
         public async Task KeyIsStoredOnlyAsItsHash()

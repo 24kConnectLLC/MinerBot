@@ -16,8 +16,21 @@ namespace DataAccessLibrary.Migrations
         // How long a run waits for another one to end
         public TimeSpan LockWait { get; init; } = TimeSpan.FromSeconds(30);
 
-        // How long one statement may wait for a table or a row that another session holds, after which the server ends it
+        // How long a statement may wait for each table or row lock that another session holds, after which the server ends
+        // it. It doesn't limit the statement's own work, which only RunLimit does.
         public TimeSpan StatementLimit { get; init; } = TimeSpan.FromSeconds(60);
+    }
+
+    // The server's ID for a run's session, once it's open, so a run that was given up on can be ended there
+    internal sealed class RunSession
+    {
+        int serverThread;
+
+        public int ServerThread
+        {
+            get => Volatile.Read(ref serverThread);
+            set => Volatile.Write(ref serverThread, value);
+        }
     }
 
     // Applies the migrations a database doesn't have yet, in order, and records each one in schema_version once all of its
@@ -29,10 +42,11 @@ namespace DataAccessLibrary.Migrations
         const int MaxLockName = 64;
         const string LockPrefix = "minerbot_migrations.";
 
-        // The server ends its own waits, so each command has that long and this much more. MySql.Data's async calls don't
-        // stop at CommandTimeout, but an answer that arrives after it counts as a timeout, and MySql.Data then tries to kill
-        // a statement that has already ended and waits for an answer that never comes.
-        static readonly TimeSpan ServerMargin = TimeSpan.FromSeconds(15);
+        // GET_LOCK is one wait that the server ends itself, so its command has that long and this much more
+        static readonly TimeSpan LockMargin = TimeSpan.FromSeconds(15);
+
+        // How long ending a given-up run's session may take, since the caller is already late
+        static readonly TimeSpan EndSessionLimit = TimeSpan.FromSeconds(5);
 
         const string SchemaVersionTable = """
             CREATE TABLE IF NOT EXISTS schema_version (
@@ -55,10 +69,19 @@ namespace DataAccessLibrary.Migrations
             // lock left on one would hold up later runs in this process. An unpooled connection's session ends with it.
             settings.Pooling = false;
 
+            // One statement per command, as Split promises, so two statements on one line fail on their first run, in the
+            // tests, instead of running as one batch whose second statement no check looked at
+            settings.AllowBatch = false;
+
+            // As every repository does, because the live server's default is latin1, which would turn a migration's emoji
+            // into question marks without an error, and the file would never run again to put them right
+            settings.CharacterSet = "utf8mb4";
+
             // Cancelled when the caller stops waiting, so the run stops before its next statement. It isn't disposed,
             // because a run that was given up on may still read it.
             var stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            var running = Task.Run(() => Run(settings.ConnectionString, settings.Database, logger, migrations, options, stop.Token), CancellationToken.None);
+            var session = new RunSession();
+            var running = Task.Run(() => Run(settings.ConnectionString, settings.Database, session, logger, migrations, options, stop.Token), CancellationToken.None);
 
             try
             {
@@ -66,9 +89,40 @@ namespace DataAccessLibrary.Migrations
             }
             catch (TimeoutException e) when (!running.IsCompleted)
             {
-                // Not awaited, so a callback that stops a statement on the server can't hold the caller
+                // Not awaited, so nothing registered on the token can hold the caller
                 _ = stop.CancelAsync();
+
+                // MySql.Data doesn't stop a statement that's running, and the run keeps its lock until it ends, so the
+                // session is ended on the server, which stops the statement and lets go of the lock at once
+                await EndSession(settings.ConnectionString, session, logger).ConfigureAwait(false);
                 throw new TimeoutException($"The migrations didn't finish within {options.RunLimit.TotalSeconds:0.#} seconds", e);
+            }
+        }
+
+        // Best effort: a session this can't end lasts until the process exits or the server's wait_timeout ends it
+        static async Task EndSession(string connectionString, RunSession session, ILogger logger)
+        {
+            var thread = session.ServerThread;
+
+            if (thread == 0)
+                return;
+
+            try
+            {
+                using var limit = new CancellationTokenSource(EndSessionLimit);
+                await using var connection = new MySqlConnection(connectionString);
+                await connection.OpenAsync(limit.Token).WaitAsync(EndSessionLimit).ConfigureAwait(false);
+
+                await using var command = new MySqlCommand(string.Create(CultureInfo.InvariantCulture, $"KILL CONNECTION {thread}"), connection)
+                {
+                    CommandTimeout = Seconds(EndSessionLimit)
+                };
+
+                await command.ExecuteNonQueryAsync(limit.Token).WaitAsync(EndSessionLimit).ConfigureAwait(false);
+            }
+            catch (Exception e) when (e is MySqlException or TimeoutException or OperationCanceledException or InvalidOperationException)
+            {
+                logger.LogWarning("Couldn't end the migration run that was given up on, so its lock lasts until its session ends");
             }
         }
 
@@ -85,16 +139,17 @@ namespace DataAccessLibrary.Migrations
         }
 
         // One connection for the whole run, because the lock belongs to it
-        static async Task<MigrationResult> Run(string connectionString, string database, ILogger logger, IReadOnlyList<Migration> migrations, MigrationOptions options, CancellationToken token)
+        static async Task<MigrationResult> Run(string connectionString, string database, RunSession session, ILogger logger, IReadOnlyList<Migration> migrations, MigrationOptions options, CancellationToken token)
         {
             await using var connection = new MySqlConnection(connectionString);
             await connection.OpenAsync(token).ConfigureAwait(false);
+            session.ServerThread = connection.ServerThread;
 
-            // MySql.Data doesn't end an async statement at its CommandTimeout, and giving up on the run doesn't stop one either,
-            // so the server has to. An ALTER behind another session's open transaction would otherwise wait for a day, the
-            // server's default, with every new query on that table queued behind it.
+            // Giving up on the run doesn't stop a statement, so the server ends a statement's lock waits. An ALTER behind
+            // another session's open transaction would otherwise wait for a day, the server's default, with every new query
+            // on that table queued behind it.
             await Execute(connection, "SET SESSION lock_wait_timeout = @seconds, SESSION innodb_lock_wait_timeout = @seconds",
-                [("@seconds", Seconds(options.StatementLimit))], options, token).ConfigureAwait(false);
+                [("@seconds", Seconds(options.StatementLimit))], token).ConfigureAwait(false);
 
             await TakeLock(connection, database, options, token).ConfigureAwait(false);
 
@@ -110,10 +165,9 @@ namespace DataAccessLibrary.Migrations
 
         static async Task TakeLock(MySqlConnection connection, string database, MigrationOptions options, CancellationToken token)
         {
-            // The server waits for the lock itself, so the command has that long and a margin
             await using var command = new MySqlCommand("SELECT GET_LOCK(@name, @wait)", connection)
             {
-                CommandTimeout = Seconds(options.LockWait + ServerMargin)
+                CommandTimeout = Seconds(options.LockWait + LockMargin)
             };
 
             command.Parameters.AddWithValue("@name", LockName(database));
@@ -147,7 +201,7 @@ namespace DataAccessLibrary.Migrations
 
         static async Task<MigrationResult> Migrate(MySqlConnection connection, ILogger logger, IReadOnlyList<Migration> migrations, MigrationOptions options, CancellationToken token)
         {
-            await Execute(connection, SchemaVersionTable, [], options, token).ConfigureAwait(false);
+            await Execute(connection, SchemaVersionTable, [], token).ConfigureAwait(false);
 
             // Read only now that this run holds the lock, so two runs can't both decide a file is new
             var recorded = await ReadChecksums(connection, token).ConfigureAwait(false);
@@ -181,7 +235,7 @@ namespace DataAccessLibrary.Migrations
                     try
                     {
                         token.ThrowIfCancellationRequested();
-                        await Execute(connection, statements[index], [], options, token).ConfigureAwait(false);
+                        await Execute(connection, statements[index], [], token).ConfigureAwait(false);
                     }
                     catch (Exception)
                     {
@@ -192,7 +246,7 @@ namespace DataAccessLibrary.Migrations
 
                 token.ThrowIfCancellationRequested();
                 await Execute(connection, "INSERT INTO schema_version (`version`, `name`, `checksum`, applied_at) VALUES (@version, @name, @checksum, UTC_TIMESTAMP(3))",
-                    [("@version", migration.Version), ("@name", migration.Name), ("@checksum", migration.Checksum)], options, token).ConfigureAwait(false);
+                    [("@version", migration.Version), ("@name", migration.Name), ("@checksum", migration.Checksum)], token).ConfigureAwait(false);
 
                 applied.Add(migration.Name);
                 version = migration.Version;
@@ -222,7 +276,7 @@ namespace DataAccessLibrary.Migrations
         {
             var checksums = new Dictionary<int, string>();
 
-            await using var command = new MySqlCommand("SELECT `version`, `checksum` FROM schema_version", connection);
+            await using var command = new MySqlCommand("SELECT `version`, `checksum` FROM schema_version", connection) { CommandTimeout = 0 };
             await using var reader = await command.ExecuteReaderAsync(token).ConfigureAwait(false);
 
             while (await reader.ReadAsync(token).ConfigureAwait(false))
@@ -231,10 +285,12 @@ namespace DataAccessLibrary.Migrations
             return checksums;
         }
 
-        static async Task Execute(MySqlConnection connection, string sql, (string Name, object Value)[] parameters, MigrationOptions options, CancellationToken token)
+        // No timeout in MySql.Data: an answer that arrives after it counts as a timeout, and MySql.Data then kills a statement
+        // that has already ended and waits for a reply that never comes, keeping the lock. The server ends lock waits at the
+        // statement limit, and the run's own limit ends the rest.
+        static async Task Execute(MySqlConnection connection, string sql, (string Name, object Value)[] parameters, CancellationToken token)
         {
-            // The server ends a wait for a lock at the statement limit, so the command has a margin over it
-            await using var command = new MySqlCommand(sql, connection) { CommandTimeout = Seconds(options.StatementLimit + ServerMargin) };
+            await using var command = new MySqlCommand(sql, connection) { CommandTimeout = 0 };
 
             foreach (var (name, value) in parameters)
                 command.Parameters.AddWithValue(name, value);

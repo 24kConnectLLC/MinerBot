@@ -1,7 +1,6 @@
 using System.Data;
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
-using System.Reflection;
 using DataAccessLibrary.Blacklist;
 using MySql.Data.MySqlClient;
 
@@ -40,11 +39,7 @@ namespace DataAccessLibrary.Tests
             protected override DbCommand CreateDbCommand() => new MySqlCommand();
         }
 
-        // MySqlException is sealed and only has internal constructors
-        static MySqlException Deadlock() =>
-            (MySqlException)typeof(MySqlException)
-                .GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic, [typeof(string), typeof(int), typeof(Exception)])!
-                .Invoke(["Deadlock found when trying to get lock", (int)MySqlErrorCode.LockDeadlock, null]);
+        static MySqlException Deadlock() => MySqlErrors.Deadlock();
 
         // Shows the fake makes a read try again, so the writes below would too if they went through the read's path
         [Fact]
@@ -67,8 +62,10 @@ namespace DataAccessLibrary.Tests
             Assert.Equal(1, database.Created);
         }
 
+        // A transaction that lost a deadlock runs again on its own connection, but one that couldn't open isn't tried on
+        // another, the way a read would be
         [Fact]
-        public async Task TransactionIsNeverTriedAgain()
+        public async Task TransactionThatCantOpenIsntTriedAgain()
         {
             var database = new DeadlockedDatabase();
             var ran = false;
@@ -81,6 +78,19 @@ namespace DataAccessLibrary.Tests
 
             Assert.Equal(1, database.Created);
             Assert.False(ran);
+        }
+
+        // Just under the call's own limit, and never 0, which the server would read as no limit at all
+        [Theory]
+        [InlineData(15000, 14)]
+        [InlineData(15500, 15)]
+        [InlineData(2000, 1)]
+        [InlineData(500, 1)]
+        public void TransactionStatementsStopBeforeTheCallLimit(int callMilliseconds, int seconds)
+        {
+            var blacklist = new BlacklistData(new DeadlockedDatabase()) { CallLimit = TimeSpan.FromMilliseconds(callMilliseconds) };
+
+            Assert.Equal(seconds, blacklist.TransactionStatementSeconds);
         }
 
         [Theory]

@@ -51,6 +51,9 @@ namespace MinerBot.Shared.Text
         const int TextStyle = 0xFE0E;
         const int EmojiStyle = 0xFE0F;
 
+        // Joins emoji into one, such as a pirate flag
+        const int ZeroWidthJoiner = 0x200D;
+
         static readonly HashSet<int> DirectionChanges = [0x061C, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067, 0x2068, 0x2069];
 
         static readonly Dictionary<int, string> Names = new()
@@ -149,18 +152,33 @@ namespace MinerBot.Shared.Text
         static IEnumerable<HiddenCharacter> Hidden(string text)
         {
             var previous = -1;
+            var beforePrevious = -1;
 
             for (var index = 0; index < text.Length; index += char.IsSurrogatePair(text, index) ? 2 : 1)
             {
-                var codePoint = char.IsSurrogatePair(text, index) ? char.ConvertToUtf32(text[index], text[index + 1]) : text[index];
+                var codePoint = CodePointAt(text, index);
                 var styles = (codePoint is TextStyle or EmojiStyle) && previous >= 0 && TakesStyle(previous);
+                var joins = codePoint == ZeroWidthJoiner && index + 1 < text.Length && JoinsEmoji(beforePrevious, previous, CodePointAt(text, index + 1));
 
-                if (IsHidden(codePoint) && !styles)
+                if (IsHidden(codePoint) && !styles && !joins)
                     yield return new HiddenCharacter(index, codePoint, NameOf(codePoint), DirectionChanges.Contains(codePoint));
 
+                beforePrevious = previous;
                 previous = codePoint;
             }
         }
+
+        static int CodePointAt(string text, int index) =>
+            char.IsSurrogatePair(text, index) ? char.ConvertToUtf32(text[index], text[index + 1]) : text[index];
+
+        // Between two emoji the joiner is part of what shows, as in a pirate flag or a zombie man, and so it is after an
+        // emoji's style selector or skin tone. Anywhere else, such as between letters, it shows nothing.
+        static bool JoinsEmoji(int beforePrevious, int previous, int next) =>
+            IsEmojiPart(next) && (IsEmojiPart(previous) || (previous == EmojiStyle && IsEmojiPart(beforePrevious)));
+
+        // A symbol outside ASCII, which every emoji is, or a skin tone
+        static bool IsEmojiPart(int codePoint) =>
+            codePoint > 0x7F && CharUnicodeInfo.GetUnicodeCategory(codePoint) is UnicodeCategory.OtherSymbol or UnicodeCategory.MathSymbol or UnicodeCategory.ModifierSymbol;
 
         // Symbols and punctuation have a text and an emoji look, as a heart does, and so do the digits, # and * that keycaps
         // are made from. The information sign is a letter to Unicode, but has both looks too. After anything else, such as

@@ -175,7 +175,7 @@ namespace DataAccessLibrary.Tests.Database
 
         public string LoginConnection(string database) => Connection(TestLogin, testPassword, database);
 
-        // Without CharSet, MySql.Data uses the server's default character set, which is latin1 on MariaDB 11.4
+        // Without CharSet, MySql.Data uses the server's default character set, which is latin1 here and on the live server
         public string LoginConnectionWithoutCharacterSet(string database) => Connection(TestLogin, testPassword, database, utf8mb4: false);
 
         async Task StartAsync()
@@ -184,7 +184,14 @@ namespace DataAccessLibrary.Tests.Database
             var rootPassword = RandomHex(16);
             testPassword = RandomHex(16);
 
-            container = new MariaDbBuilder(Image).WithUsername("root").WithPassword(rootPassword).Build();
+            // The live server's default character set is latin1, MariaDB's own default. The image's config would make it
+            // utf8mb4, and Testcontainers happens to replace that config, so the server is told outright, and
+            // CharacterSetTests checks it. skip-name-resolve is the image's, so connecting looks up no names.
+            container = new MariaDbBuilder(Image)
+                .WithUsername("root")
+                .WithPassword(rootPassword)
+                .WithCommand("--character-set-server=latin1", "--collation-server=latin1_swedish_ci", "--skip-name-resolve")
+                .Build();
             await container.StartAsync(TestContext.Current.CancellationToken);
 
             // MySql.Data would read the @ in 'minerbot_test'@'%' as a parameter it wasn't given
@@ -222,7 +229,7 @@ namespace DataAccessLibrary.Tests.Database
         }
 
         // utf8mb4, as the example connection strings name it. MySql.Data otherwise sends text in the server's default
-        // character set, and on MariaDB 11.4 that's latin1, which turns anything outside it into a question mark.
+        // character set, latin1 here, which turns anything outside it into a question mark.
         string Connection(string user, string password, string database, bool utf8mb4 = true)
         {
             var connection = new MySqlConnectionStringBuilder
