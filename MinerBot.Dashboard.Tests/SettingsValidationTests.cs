@@ -289,6 +289,125 @@ namespace MinerBot.Dashboard.Tests
             Assert.Null(DashboardSettings.ListenEndpoint(configuration));
         }
 
+        // Made up, as setup-dashboard.sh writes them
+        const string TeamDomain = "made-up-team.cloudflareaccess.com";
+        const string Audience = "4714c1358e65fe4b408ad6d432a5f878f08194bdb4752441fd56faefa9b2b6f2";
+
+        Dictionary<string, string?> WithAccess(string? teamDomain = TeamDomain, string? audience = Audience)
+        {
+            var settings = Valid();
+            settings["CloudflareAccess:TeamDomain"] = teamDomain;
+            settings["CloudflareAccess:Audience"] = audience;
+            return settings;
+        }
+
+        // Both empty or both left out is the check turned off, and both set in their form turns it on
+        [Theory]
+        [InlineData(null, null)]
+        [InlineData("", "")]
+        [InlineData(TeamDomain, Audience)]
+        [InlineData("a.cloudflareaccess.com", Audience)]
+        [InlineData("0-9.cloudflareaccess.com", Audience)]
+        public void AccessSettingsThatPass(string? teamDomain, string? audience)
+        {
+            Assert.Empty(Problems(WithAccess(teamDomain, audience)));
+        }
+
+        // The longest team name DNS allows passes, and one more character doesn't
+        [Fact]
+        public void TeamNameOf63CharactersPasses()
+        {
+            Assert.Empty(Problems(WithAccess(new string('a', 63) + ".cloudflareaccess.com")));
+            Assert.StartsWith("CloudflareAccess:TeamDomain ", Assert.Single(Problems(WithAccess(new string('a', 64) + ".cloudflareaccess.com"))));
+        }
+
+        [Theory]
+        [InlineData(TeamDomain, null)]
+        [InlineData(TeamDomain, "")]
+        [InlineData(null, Audience)]
+        [InlineData("", Audience)]
+        public void OneWithoutTheOtherIsRefused(string? teamDomain, string? audience)
+        {
+            var problem = Assert.Single(Problems(WithAccess(teamDomain, audience)));
+
+            Assert.Equal("CloudflareAccess:TeamDomain and CloudflareAccess:Audience go together: set both to turn the Cloudflare Access check on, or neither to leave it off.", problem);
+        }
+
+        public static TheoryData<string> BadTeamDomains => new()
+        {
+            "https://made-up-team.cloudflareaccess.com",
+            "Made-Up-Team.cloudflareaccess.com",
+            "made-up-team.cloudflareaccess.org",
+            "made-up-team.example.com",
+            "made-up-team.cloudflareaccess.com/",
+            "made-up-team.cloudflareaccess.com\n",
+            "-made-up-team.cloudflareaccess.com",
+            "made-up-team-.cloudflareaccess.com",
+            "made_up_team.cloudflareaccess.com",
+            "made up team.cloudflareaccess.com",
+            "made-up-team",
+            "cloudflareaccess.com",
+            "team.made-up.cloudflareaccess.com"
+        };
+
+        // Each says what's wrong without repeating it
+        [Theory]
+        [MemberData(nameof(BadTeamDomains))]
+        public void BadTeamDomainIsRefused(string teamDomain)
+        {
+            var problem = Assert.Single(Problems(WithAccess(teamDomain)));
+
+            Assert.Equal("CloudflareAccess:TeamDomain must be just the team's host name in small letters, such as yourteam.cloudflareaccess.com.", problem);
+            Assert.DoesNotContain("made", problem);
+        }
+
+        public static TheoryData<string> BadAudiences => new()
+        {
+            Audience[..63],
+            Audience + "0",
+            Audience.ToUpperInvariant(),
+            Audience[..63] + "g",
+            " " + Audience[..63],
+            Audience[..62] + "\n"
+        };
+
+        [Theory]
+        [MemberData(nameof(BadAudiences))]
+        public void BadAudienceIsRefused(string audience)
+        {
+            var problem = Assert.Single(Problems(WithAccess(audience: audience)));
+
+            Assert.Equal("CloudflareAccess:Audience must be the Access application's AUD tag: 64 characters, 0-9 and a-f.", problem);
+            Assert.DoesNotContain(Audience[..16], problem, StringComparison.OrdinalIgnoreCase);
+        }
+
+        // Every problem at once: one without the other, and what's wrong with the one that's there
+        [Fact]
+        public void BadTeamDomainWithoutAudienceReportsBoth()
+        {
+            var problems = Problems(WithAccess("https://" + TeamDomain, null));
+
+            Assert.Equal(2, problems.Count);
+            Assert.Contains(problems, problem => problem.Contains("go together", StringComparison.Ordinal));
+            Assert.Contains(problems, problem => problem.StartsWith("CloudflareAccess:TeamDomain must be", StringComparison.Ordinal));
+            Assert.All(problems, problem => Assert.DoesNotContain(TeamDomain, problem));
+        }
+
+        // The Access section is checked with the other two, so a start, and check-settings, report all three
+        [Fact]
+        public void AllThreeSectionsFailingReportsEach()
+        {
+            var settings = WithAccess(audience: "not-an-aud-tag");
+            settings["Dashboard:ProxyKey"] = "";
+            settings["Discord:ClientSecret"] = "";
+
+            var problems = Problems(settings);
+
+            Assert.Equal(3, problems.Count);
+            Assert.Contains(problems, problem => problem.StartsWith("CloudflareAccess:Audience ", StringComparison.Ordinal));
+            Assert.All(problems, problem => Assert.DoesNotContain("not-an-aud-tag", problem));
+        }
+
         [Fact]
         public void BothSectionsFailingReportsBoth()
         {

@@ -17,7 +17,8 @@ namespace MinerBot.Dashboard.Hosting
         // Data Protection keys made under this name open only for it, wherever the app's files are
         public const string ApplicationName = "MinerBot.Dashboard";
 
-        // The only form is sign-out, and nginx already caps bodies at 2 MB. A later page that needs more can raise it.
+        // The only form is sign-out. nginx caps bodies at 256 KB, four times this, so a body in between gets this app's own
+        // page. A later page that needs more can raise it.
         public const long MaxRequestBodySize = 64 * 1024;
 
         public static IServiceCollection AddDashboardHosting(this IServiceCollection services)

@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# A stand-in for curl, for scripts-test.sh. It answers the four addresses the scripts ask:
+#   http://127.0.0.1:5080/health/ready   Healthy while the dashboard's container runs, Unhealthy when its image is in
+#                                        FAKE_UNREADY (dashboard@<rev>), and no connection when it doesn't run
+#   https://bot.murderminershub.com/     200 while the dashboard runs (502 when its image is in FAKE_PUBLIC_FAIL), and
+#                                        503, nginx's page, when it doesn't. With --resolve to 127.0.0.1, the request
+#                                        comes from this server: 403 while MinerBot's nginx file is in conf.d, or
+#                                        FAKE_LOCAL_ANSWER
+#   https://<team>/cdn-cgi/access/certs  one RSA key, unless the team is in FAKE_ACCESS_DOWN
+# shellcheck source=record.sh
+source /usr/local/lib/mbtest/record.sh
+record curl "$@"
+
+url=''
+write_out=no
+resolve=no
+local_host=no
+for arg in "$@"; do
+    case $arg in
+        http://* | https://*) url=$arg ;;
+        '%{http_code}') write_out=yes ;;
+        bot.murderminershub.com:443:127.0.0.1) resolve=yes ;;
+        "Host: localhost") local_host=yes ;;
+    esac
+done
+
+answer() {   # answer <HTTP status> [<body>]: what curl prints with or without -w '%{http_code}'
+    if [ "$write_out" = yes ]; then
+        printf '%s' "$1"
+    else
+        printf '%s\n' "${2:-}"
+    fi
+}
+
+case $url in
+    http://127.0.0.1:5080/health/ready)
+        running dashboard || { echo "curl: (7) Failed to connect to 127.0.0.1 port 5080: Connection refused" >&2; exit 7; }
+        if [ "$local_host" != yes ]; then
+            # Without Host: localhost, the dashboard wants the proxy key, which the probe never has
+            answer 404 ""
+        elif listed "${FAKE_UNREADY:-}" "$(running_key dashboard)"; then
+            answer 503 Unhealthy
+        else
+            answer 200 Healthy
+        fi
+        ;;
+    https://bot.murderminershub.com/)
+        if [ "$resolve" = yes ]; then
+            if [ -n "${FAKE_LOCAL_ANSWER:-}" ]; then
+                answer "$FAKE_LOCAL_ANSWER"
+            elif [ -f /etc/nginx/conf.d/minerbot-dashboard.conf ]; then
+                answer 403
+            else
+                answer 404
+            fi
+        elif ! running dashboard; then
+            answer 503 "The MinerBot dashboard is restarting or stopped. Try again in a minute."
+        elif listed "${FAKE_PUBLIC_FAIL:-}" "$(running_key dashboard)"; then
+            answer 502
+        else
+            answer 200 "<!DOCTYPE html>"
+        fi
+        ;;
+    https://*/cdn-cgi/access/certs)
+        team=${url#https://}
+        team=${team%%/*}
+        if listed "${FAKE_ACCESS_DOWN:-}" "$team"; then
+            echo "curl: (22) The requested URL returned error: 404" >&2
+            exit 22
+        fi
+        echo '{"keys":[{"kid":"mbtest1","kty":"RSA","alg":"RS256","use":"sig","e":"AQAB","n":"made-up"}],"public_cert":{"kid":"mbtest1"}}'
+        ;;
+    *)
+        echo "curl: (6) Could not resolve host: ${url:-(none)}" >&2
+        exit 6
+        ;;
+esac

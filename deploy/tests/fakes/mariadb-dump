@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# A stand-in for mariadb-dump, for scripts-test.sh: a short dump that ends the way a whole one does. FAKE_DUMP changes it:
+#   fail       an error, part of a dump, and exit code 2
+#   hang       part of a dump, then nothing for 30 seconds
+#   truncated  a dump without its last line
+# shellcheck source=record.sh
+source /usr/local/lib/mbtest/record.sh
+record mariadb-dump "$@"
+
+printf '%s\n' "-- MariaDB dump 10.19-11.4.13-MariaDB, for Linux (x86_64) (made up)" "--" \
+    "-- Host: localhost    Database: ${!#}" "--" "CREATE TABLE \`schema_version\` (\`version\` int NOT NULL, \`name\` varchar(200) NOT NULL);"
+case ${FAKE_DUMP:-} in
+    fail)
+        echo "mariadb-dump: Got error: 2013: \"Lost connection to server during query\" when dumping table \`schema_version\` (made up)" >&2
+        exit 2
+        ;;
+    hang)
+        block 30
+        exit 0
+        ;;
+esac
+printf '%s\n' "INSERT INTO \`schema_version\` VALUES (1,'0001_core');"
+[ "${FAKE_DUMP:-}" = truncated ] || printf '%s\n' "-- Dump completed"

@@ -1,6 +1,13 @@
 using System.Net;
+using System.Text.RegularExpressions;
 using DataAccessLibrary;
 using Microsoft.Extensions.Options;
+
+// The settings rule, also in deploy/README.md: rollback.sh keeps the current dashboard.env, so the previous image must
+// still start with it. A setting is never renamed or removed in the pull request that stops using it: the old name stays
+// accepted and written for one more pull request. A new setting gets an empty-means-off default wherever it can, and
+// setup-dashboard.sh never writes a value in a form the previous image's validator refuses. Every validator here ignores
+// settings it doesn't know, so a setting a newer pull request added never stops an older image.
 
 namespace MinerBot.Dashboard.Settings
 {
@@ -206,5 +213,38 @@ namespace MinerBot.Dashboard.Settings
             if (!Uri.TryCreate(address, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps || uri.UserInfo.Length > 0 || string.IsNullOrEmpty(uri.Host))
                 problems.Add($"{key} must be an https address without a user name, so that the client secret and tokens are never sent unencrypted.");
         }
+    }
+
+    // Both empty leaves the Cloudflare Access check off. With both set, each must have the one form setup-dashboard.sh
+    // writes, so a typo stops the dashboard here instead of refusing every admin page later.
+    internal sealed partial class CloudflareAccessOptionsValidator : IValidateOptions<CloudflareAccessOptions>
+    {
+        public ValidateOptionsResult Validate(string? name, CloudflareAccessOptions options)
+        {
+            if (name != Options.DefaultName)
+                return ValidateOptionsResult.Skip;
+
+            var teamSet = !string.IsNullOrEmpty(options.TeamDomain);
+            var audienceSet = !string.IsNullOrEmpty(options.Audience);
+            var problems = new List<string>();
+
+            if (teamSet != audienceSet)
+                problems.Add("CloudflareAccess:TeamDomain and CloudflareAccess:Audience go together: set both to turn the Cloudflare Access check on, or neither to leave it off.");
+
+            // Cloudflare's own form: the team's name, which DNS allows up to 63 characters, then cloudflareaccess.com
+            if (teamSet && !TeamDomain().IsMatch(options.TeamDomain))
+                problems.Add("CloudflareAccess:TeamDomain must be just the team's host name in small letters, such as yourteam.cloudflareaccess.com.");
+
+            if (audienceSet && !Audience().IsMatch(options.Audience))
+                problems.Add("CloudflareAccess:Audience must be the Access application's AUD tag: 64 characters, 0-9 and a-f.");
+
+            return problems.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(problems);
+        }
+
+        [GeneratedRegex(@"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.cloudflareaccess\.com\z", RegexOptions.CultureInvariant)]
+        private static partial Regex TeamDomain();
+
+        [GeneratedRegex(@"^[0-9a-f]{64}\z", RegexOptions.CultureInvariant)]
+        private static partial Regex Audience();
     }
 }

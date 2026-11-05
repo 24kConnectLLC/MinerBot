@@ -1,0 +1,10 @@
+# MinerBot's nightly jobs. From deploy/minerbot.cron in the MinerBot repository; deploy.sh installs it as
+# /etc/cron.d/minerbot. Both print nothing when all is well, so cron mails root only when something needs attention.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+MAILTO=root
+# A dump of MinerBot's own database, 14 days kept in /srv/backups/minerbot. The echo runs only when the job failed or was
+# stopped at its limit, so cron always mails about it. No % in these lines: cron reads % as a new line.
+17 3 * * * root timeout -k 60 3600 /opt/minerbot/backup.sh nightly || echo "MinerBot's nightly backup failed or was stopped at its time limit. See /srv/backups/minerbot/backup.log."
+# A look at the backups, the certificate, nginx, the containers and the disk. It only reports.
+47 3 * * * root timeout -k 30 600 /opt/minerbot/status.sh --check

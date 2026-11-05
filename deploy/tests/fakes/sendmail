@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# A stand-in for /usr/sbin/sendmail, for scripts-test.sh: each message goes to a file in /fake/mail.
+# FAKE_SENDMAIL=fail makes it refuse the message.
+# shellcheck source=record.sh
+source /usr/local/lib/mbtest/record.sh
+record sendmail "$@"
+
+if [ "${FAKE_SENDMAIL:-}" = fail ]; then
+    echo "sendmail: cannot send the message (made up)" >&2
+    exit 75
+fi
+mkdir -p "$fake/mail"
+cat > "$fake/mail/$(date +%s%N)"

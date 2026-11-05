@@ -3,6 +3,7 @@ using DataAccessLibrary.Tests.Database;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using MinerBot.Dashboard.Auth;
+using MinerBot.Dashboard.Security;
 using MinerBot.Dashboard.Tests.Support;
 using MySql.Data.MySqlClient;
 
@@ -11,15 +12,45 @@ namespace MinerBot.Dashboard.Tests
     // A crawl of every page, as an anonymous visitor, the Owner and an Admin, that fails if any secret the app holds, or
     // any Discord gave it, appears in a status line, a header or a body
     [Collection("Database")]
-    public class SecretLeakTests(MariaDbFixture fixture)
+    public class SecretLeakTests(MariaDbFixture fixture, AccessTestKeys keys) : IClassFixture<AccessTestKeys>
     {
         static CancellationToken Token => TestContext.Current.CancellationToken;
 
         [Fact]
-        public async Task NoPageHeaderOrRedirectHoldsASecret()
+        public Task NoPageHeaderOrRedirectHoldsASecret() => CrawlAsync(null);
+
+        // The same with the Cloudflare Access check on. Every request carries a token, as Cloudflare adds one to the admin
+        // pages, and every token is a secret too.
+        [Fact]
+        public Task NoPageHeaderOrRedirectHoldsASecretWithAccessOn() => CrawlAsync(new FakeCloudflareAccess(keys));
+
+        async Task CrawlAsync(FakeCloudflareAccess? access)
         {
             var db = await fixture.ReadyAsync();
-            await using var factory = new DashboardFactory(db);
+            await using var factory = new DashboardFactory(db, access == null ? null : new DashboardFactoryOptions
+            {
+                Settings = new Dictionary<string, string?>
+                {
+                    ["CloudflareAccess:TeamDomain"] = FakeCloudflareAccess.TeamDomain,
+                    ["CloudflareAccess:Audience"] = access.Audience
+                },
+                Services = services => access.Install(services)
+            });
+
+            if (access != null)
+                access.Clock = factory.Clock;
+
+            // A visitor, with a token of its own when the check is on
+            TestBrowser Visitor(string address)
+            {
+                var browser = factory.Visitor(address);
+
+                if (access != null)
+                    browser.Client.DefaultRequestHeaders.Add(CloudflareAccessCheck.HeaderName, access.Mint());
+
+                return browser;
+            }
+
             var seen = new List<(string What, string Text, HttpResponseMessage Response)>();
 
             // Every GET endpoint without route parameters, so a new page is crawled without changing this test
@@ -40,14 +71,14 @@ namespace MinerBot.Dashboard.Tests
                 }
             }
 
-            await Crawl("anonymous", factory.Visitor("203.0.113.50"));
+            await Crawl("anonymous", Visitor("203.0.113.50"));
 
-            var owner = factory.Visitor("203.0.113.51");
+            var owner = Visitor("203.0.113.51");
             var signIn = await SignInSteps.SignInAsync(factory, owner, TestUsers.Owner);
             var ownerKey = owner.SessionKey!;
             await Crawl("owner", owner);
 
-            var admin = factory.Visitor("203.0.113.52");
+            var admin = Visitor("203.0.113.52");
             await SignInSteps.SignedInAsync(factory, admin, TestUsers.Admin);
             var adminKey = admin.SessionKey!;
             await Crawl("admin", admin);
@@ -77,9 +108,18 @@ namespace MinerBot.Dashboard.Tests
                 admin.Cookie(DashboardAuth.AntiforgeryCookie)!
             };
 
-            // Every code, access and refresh token and PKCE verifier of the sign-ins
+            // Every code, access and refresh token and PKCE verifier of the sign-ins, and every Access token
             secrets.AddRange(factory.Discord.Secrets);
+            secrets.AddRange(access?.Minted ?? []);
             Assert.All(secrets, secret => Assert.False(string.IsNullOrEmpty(secret)));
+
+            if (access != null)
+            {
+                Assert.Equal(3, access.Minted.Count);
+
+                foreach (var token in access.Minted)
+                    Assert.False(factory.Logs.Text.Contains(token, StringComparison.Ordinal), "A log line holds an Access token");
+            }
 
             seen.Add(("owner sign-in", "", signIn));
 

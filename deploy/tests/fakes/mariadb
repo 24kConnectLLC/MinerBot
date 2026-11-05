@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+# A stand-in for the mariadb client, for scripts-test.sh. It answers the statements the scripts send, by -e or on stdin,
+# from files in /fake/db:
+#   version          schema_version's highest version; without it, the table doesn't exist yet
+#   login-<host>     the dashboard's login exists on that host; password holds its password
+#   check-login      the rehearsal's throwaway login exists; check-applied, dashboard-applied: the rights file ran
+# It reads stdin only when the statement comes that way, never with -e, which matters on a terminal, and keeps every
+# statement that came on stdin in /fake/stdin.log, passwords included: the one place a secret may be. Its line in
+# calls.log names the kind of statement that came on stdin, such as {stdin: rehearsal}. These variables change it:
+#   FAKE_DB_SCHEMATA     what the check that both databases exist counts (2 by default)
+#   FAKE_DB_TABLES       none: neither the dashboard's tables nor the website's three exist
+#   FAKE_REHEARSAL       fail: the rehearsal stops at a missing table, as MariaDB does (1146)
+#   FAKE_APPLY           fail: applying the rights to the real login fails
+#   FAKE_RIGHTS_EXTRA    1: the real login has a PROXY grant that REVOKE can't take away
+# shellcheck source=record.sh
+source /usr/local/lib/mbtest/record.sh
+db=$fake/db
+mkdir -p "$db"
+
+sql=''
+from_stdin=no
+password_test=no
+skip_print=no
+prev=''
+for arg in "$@"; do
+    case $arg in
+        --defaults-file=/dev/stdin) password_test=yes ;;
+        --skip-print-query-on-error) skip_print=yes ;;
+    esac
+    if [ "$prev" = -e ]; then
+        sql=$arg
+    fi
+    prev=$arg
+done
+if [ "$password_test" = yes ]; then
+    sql=$(cat)
+    printf '%s\n' "$sql" >> "$fake/stdin.log"
+    note="stdin: option file"
+elif [ -z "$sql" ]; then
+    sql=$(cat)
+    printf '%s\n' "$sql" >> "$fake/stdin.log"
+    from_stdin=yes
+fi
+
+check_login="'minerbot-rights-check'@'localhost'"
+grantees="'minerbot-dashboard'@'localhost', 'minerbot-dashboard'@'127.0.0.1'"
+if [ "$from_stdin" = yes ]; then
+    case $sql in
+        *"REVOKE ALL PRIVILEGES, GRANT OPTION FROM $check_login;"*) note="stdin: rehearsal" ;;
+        *"REVOKE ALL PRIVILEGES, GRANT OPTION FROM $grantees;"*) note="stdin: apply" ;;
+        *CONCAT_WS*) note="stdin: rights of $(printf '%s\n' "$sql" | sed -n "1s/.*GRANTEE = '''\([^']*\)''@''\([^']*\)'''.*/\1@\2/p")" ;;
+        *"IDENTIFIED BY"*) note="stdin: login" ;;
+        *) note="stdin: unknown" ;;
+    esac
+fi
+record mariadb "$@"
+
+the_rights() {   # what the rights file gives, one per line, as deploy/rights-list.sql lists it
+    printf '%s\n' "column SELECT website_db ihvph_discord_servers guild_id" "global USAGE" "limits 15 20.000000 0 0 0" \
+        "table DELETE minerbot_db dashboard_sessions" "table INSERT minerbot_db audit_log" \
+        "table INSERT minerbot_db dashboard_sessions" "table SELECT minerbot_db dashboard_sessions" \
+        "table UPDATE minerbot_db dashboard_sessions"
+}
+
+refuse() {   # refuse <message>
+    printf '%s\n' "$1" >&2
+    exit 1
+}
+
+if [ "$password_test" = yes ]; then
+    user=$(printf '%s\n' "$sql" | sed -n 's/^user=//p')
+    pw=$(printf '%s\n' "$sql" | sed -n 's/^password=//p')
+    if [ "$user" = minerbot-dashboard ] && [ -f "$db/login-127.0.0.1" ] && [ -f "$db/password" ] \
+        && [ "$pw" = "$(cat "$db/password")" ]; then
+        echo 1
+        exit 0
+    fi
+    refuse "ERROR 1045 (28000): Access denied for user '$user'@'localhost' (using password: YES)"
+fi
+
+case $sql in
+    *"FROM information_schema.schemata"*)
+        echo "${FAKE_DB_SCHEMATA:-2}"
+        ;;
+    *"table_name = 'schema_version'"*)
+        if [ -f "$db/version" ]; then echo 1; else echo 0; fi
+        ;;
+    *"MAX(version)"*)
+        [ -f "$db/version" ] || refuse "ERROR 1146 (42S02): Table 'minerbot_db.schema_version' doesn't exist"
+        cat "$db/version"
+        ;;
+    *"table_name = 'dashboard_sessions'"*)
+        if [ -f "$db/version" ] && [ "${FAKE_DB_TABLES:-}" != none ]; then echo 1; else echo 0; fi
+        ;;
+    *"table_name IN ('ihvph_armor_styles'"*)
+        if [ "${FAKE_DB_TABLES:-}" = none ]; then echo 0; else echo 3; fi
+        ;;
+    *"FROM mysql.user WHERE User = 'minerbot-dashboard' AND Host IN ('localhost', '127.0.0.1')"*)
+        n=0
+        for host in localhost 127.0.0.1; do
+            if [ -f "$db/login-$host" ]; then n=$((n + 1)); fi
+        done
+        echo "$n"
+        ;;
+    *"FROM mysql.user WHERE User = 'minerbot-dashboard' AND Host = '"*)
+        host=${sql##*Host = \'}
+        host=${host%%\'*}
+        if [ -f "$db/login-$host" ]; then echo 1; else echo 0; fi
+        ;;
+    *"DROP USER IF EXISTS $check_login; CREATE USER $check_login ACCOUNT LOCK;"*)
+        rm -f "$db/check-applied"
+        touch "$db/check-login"
+        ;;
+    "DROP USER IF EXISTS $check_login")
+        rm -f "$db/check-login" "$db/check-applied"
+        ;;
+    *)
+        case $note in
+            "stdin: rehearsal")
+                [[ $sql != *"{{"* ]] || refuse "ERROR 1064 (42000) at line 1: You have an error in your SQL syntax near '{{'"
+                [ -f "$db/check-login" ] || refuse "ERROR 1133 (28000) at line 22: Can't find any matching row in the user table"
+                if [ "${FAKE_REHEARSAL:-}" = fail ]; then
+                    refuse "ERROR 1146 (42S02) at line 28: Table 'minerbot_db.dashboard_sessions' doesn't exist"
+                fi
+                touch "$db/check-applied"
+                ;;
+            "stdin: apply")
+                if [ ! -f "$db/login-localhost" ] || [ ! -f "$db/login-127.0.0.1" ]; then
+                    refuse "ERROR 1133 (28000) at line 22: Can't find any matching row in the user table"
+                fi
+                [ "${FAKE_APPLY:-}" != fail ] || refuse "ERROR 2013 (HY000) at line 28: Lost connection to server during query"
+                printf '%s\n' "$sql" > "$db/applied.sql"
+                touch "$db/dashboard-applied"
+                ;;
+            "stdin: rights of "*)
+                who=${note#stdin: rights of }
+                if { [ "$who" = minerbot-rights-check@localhost ] && [ -f "$db/check-applied" ]; } \
+                    || { [[ $who == minerbot-dashboard@* ]] && [ -f "$db/dashboard-applied" ] && [ -f "$db/login-${who#*@}" ]; }; then
+                    the_rights
+                else
+                    echo "global USAGE"
+                fi
+                if [[ $who == minerbot-dashboard@* ]] && [ "${FAKE_RIGHTS_EXTRA:-}" = 1 ]; then
+                    echo "proxy someone localhost"
+                fi
+                ;;
+            "stdin: login")
+                if [ "$skip_print" != yes ]; then
+                    echo "NO-SKIP-PRINT mariadb: a statement with a password came without --skip-print-query-on-error" >> "$calls"
+                fi
+                statement="^(CREATE|ALTER) USER 'minerbot-dashboard'@'([^']+)' IDENTIFIED BY '([A-Za-z0-9]+)';$"
+                while IFS= read -r line; do
+                    [ -n "$line" ] || continue
+                    if [[ $line =~ $statement ]]; then
+                        if [ "${BASH_REMATCH[1]}" = CREATE ]; then
+                            [ ! -f "$db/login-${BASH_REMATCH[2]}" ] || refuse "ERROR 1396 (HY000) at line 1: Operation CREATE USER failed"
+                            touch "$db/login-${BASH_REMATCH[2]}"
+                        else
+                            [ -f "$db/login-${BASH_REMATCH[2]}" ] || refuse "ERROR 1396 (HY000) at line 1: Operation ALTER USER failed"
+                        fi
+                        printf '%s\n' "${BASH_REMATCH[3]}" > "$db/password"
+                    else
+                        refuse "ERROR 1064 (42000) at line 1: a statement the stand-in doesn't know"
+                    fi
+                done <<< "$sql"
+                ;;
+            *)
+                refuse "ERROR 1064 (42000): a statement the stand-in mariadb doesn't know"
+                ;;
+        esac
+        ;;
+esac
+exit 0

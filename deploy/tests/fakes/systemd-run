@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# A stand-in for systemd-run, for scripts-test.sh. It starts the command as a "unit": in a session of its own, in the
+# background, with the caller's environment and the --setenv values over it, so FAKE_* and MINERBOT_TEST_* variables
+# reach it, and it refuses a second unit of the same name while one runs. At RuntimeMaxSec it ends every process of the
+# session, as systemd ends a unit's whole cgroup: TERM, then KILL after TimeoutStopSec. FAKE_UNIT_LIMIT replaces every
+# RuntimeMaxSec, and no unit runs longer than FAKE_UNIT_CAP seconds (300 by default). /fake/units/<unit>.pid names the
+# unit's process for the stand-in systemctl, and the unit's own output goes to /fake/units/<unit>.out.
+# shellcheck source=record.sh
+source /usr/local/lib/mbtest/record.sh
+units=$fake/units
+mkdir -p "$units"
+
+alive() {   # alive <pid>: true while that process runs (a zombie has ended)
+    local stat=''
+    { read -r stat < "/proc/$1/stat"; } 2> /dev/null || return 1
+    stat=${stat##*) }
+    [ "${stat:0:1}" != Z ]
+}
+
+session_others() {   # every live process of this session but this shell
+    local stat line pid
+    local -a fields
+    for stat in /proc/[0-9]*/stat; do
+        { read -r line < "$stat"; } 2> /dev/null || continue
+        read -r -a fields <<< "${line##*) }"
+        pid=${stat#/proc/}
+        pid=${pid%/stat}
+        if [ "${fields[3]}" = "$$" ] && [ "$pid" != "$$" ] && [ "$pid" != "$BASHPID" ] && [ "${fields[0]}" != Z ]; then
+            echo "$pid"
+        fi
+    done
+}
+
+signal_session() {   # signal_session TERM|KILL
+    local pid
+    for pid in $(session_others); do
+        kill -s "$1" "$pid" 2> /dev/null || true
+    done
+}
+
+run_unit() {   # run_unit <unit> <limit> <stop seconds> <NAME=value>... -- <command...>
+    local unit=$1 limit=$2 stop=$3 child started
+    local -a values=()
+    shift 3
+    while [ "$1" != -- ]; do
+        values+=("$1")
+        shift
+    done
+    shift
+    env "${values[@]}" "$@" &
+    child=$!
+    started=$SECONDS
+    while alive "$child"; do
+        if [ $((SECONDS - started)) -ge "$limit" ]; then
+            echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $unit reached RuntimeMaxSec=$limit: stopping every process of it" >> "$units/$unit.events"
+            signal_session TERM
+            started=$SECONDS
+            while [ -n "$(session_others)" ] && [ $((SECONDS - started)) -lt "$stop" ]; do
+                sleep 0.2
+            done
+            signal_session KILL
+            break
+        fi
+        sleep 0.2
+    done
+    wait "$child" 2> /dev/null
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $unit ended" >> "$units/$unit.events"
+}
+
+if [ "${1:-}" = --mbtest-runner ]; then
+    shift
+    run_unit "$@"
+    exit 0
+fi
+
+record systemd-run "$@"
+unit=''
+limit=''
+stop=90
+values=()
+while [ $# -gt 0 ]; do
+    case $1 in
+        --quiet | --collect) ;;
+        --unit=*) unit=${1#--unit=} ;;
+        -p)
+            case $2 in
+                RuntimeMaxSec=*) limit=${2#*=} ;;
+                TimeoutStopSec=*) stop=${2#*=} ;;
+                *) echo "The stand-in systemd-run doesn't know -p $2." >&2; exit 1 ;;
+            esac
+            shift
+            ;;
+        --setenv=*) values+=("${1#--setenv=}") ;;
+        -*) echo "The stand-in systemd-run doesn't know $1." >&2; exit 1 ;;
+        *) break ;;
+    esac
+    shift
+done
+if [ -z "$unit" ] || [ $# -eq 0 ]; then
+    echo "The stand-in systemd-run needs --unit and a command." >&2
+    exit 1
+fi
+if [ -f "$units/$unit.pid" ] && alive "$(cat "$units/$unit.pid")" \
+    && grep -q mbtest-runner "/proc/$(cat "$units/$unit.pid")/cmdline" 2> /dev/null; then
+    echo "Failed to start transient service unit: Unit $unit.service was already loaded or has a fragment file." >&2
+    exit 1
+fi
+limit=${FAKE_UNIT_LIMIT:-${limit:-${FAKE_UNIT_CAP:-300}}}
+if [ "$limit" -gt "${FAKE_UNIT_CAP:-300}" ]; then
+    limit=${FAKE_UNIT_CAP:-300}
+fi
+setsid "$0" --mbtest-runner "$unit" "$limit" "$stop" "${values[@]}" -- "$@" < /dev/null > "$units/$unit.out" 2>&1 &
+echo "$!" > "$units/$unit.pid"

@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# A stand-in for nginx, for scripts-test.sh:
+#   nginx -t -q            the test with every site. Like nginx, it fails when MinerBot's file is in conf.d and its
+#                          certificate or key is missing, or the two don't belong together. FAKE_NGINX_T makes it fail
+#                          always (fail), or whenever the four files differ from what /fake/nginx/accepted lists
+#                          (accepted: one line per file, its sha256 or "absent")
+#   nginx -t -q -c <file>  the standalone test. Like nginx, it reads a relative path against /etc/nginx, falls back to a
+#                          user that doesn't exist here without a user line, and fails when the candidate's certificate
+#                          and key are missing or don't belong together. FAKE_NGINX_STANDALONE=fail fails it.
+#   nginx -T               the test, then every file nginx reads after a "# configuration file" line, root-only ones too
+#   nginx -V               the server's build flags
+# shellcheck source=record.sh
+source /usr/local/lib/mbtest/record.sh
+record nginx "$@"
+
+conf=/etc/nginx/conf.d/minerbot-dashboard.conf
+secrets=/etc/nginx/minerbot
+
+refuse() {   # refuse <nginx's message>
+    printf '%s\n' "$1" "nginx: configuration file /etc/nginx/nginx.conf test failed" >&2
+    exit 1
+}
+
+pair_ok() {   # pair_ok <certificate> <key>: true when both exist and belong together
+    [ -f "$1" ] && [ -f "$2" ] || return 1
+    cmp -s <(/usr/bin/openssl x509 -noout -pubkey -in "$1" 2> /dev/null) <(/usr/bin/openssl pkey -pubout -in "$2" 2> /dev/null)
+}
+
+live_state() {   # the four files MinerBot puts into nginx: each one's sha256, or absent
+    local f
+    for f in "$conf" "$secrets/origin-cert.pem" "$secrets/origin-key.pem" "$secrets/proxy-key.conf"; do
+        if [ -f "$f" ]; then
+            sha256sum < "$f" | cut -c1-64
+        else
+            echo absent
+        fi
+    done
+}
+
+full_test() {
+    case ${FAKE_NGINX_T:-} in
+        fail)
+            refuse "nginx: [emerg] unexpected \"}\" in /etc/nginx/conf.d/users/example.conf:41 (a made-up failure)"
+            ;;
+        accepted)
+            [ "$(live_state)" = "$(cat "$fake/nginx/accepted" 2> /dev/null)" ] \
+                || refuse "nginx: [emerg] a made-up failure: MinerBot's files aren't the ones this test accepts"
+            ;;
+    esac
+    if [ -f "$conf" ]; then
+        [ -f "$secrets/origin-cert.pem" ] \
+            || refuse "nginx: [emerg] cannot load certificate \"$secrets/origin-cert.pem\": BIO_new_file() failed (SSL: error:80000002:system library::No such file or directory)"
+        pair_ok "$secrets/origin-cert.pem" "$secrets/origin-key.pem" \
+            || refuse "nginx: [emerg] SSL_CTX_use_PrivateKey(\"$secrets/origin-key.pem\") failed (SSL: error:05800074:x509 certificate routines::key values mismatch)"
+    fi
+}
+
+standalone() {   # standalone <the file given with -c>
+    local file=$1 include cert key
+    [[ $file == /* ]] || refuse "nginx: [emerg] open() \"/etc/nginx/$file\" failed (2: No such file or directory)"
+    [ -f "$file" ] || refuse "nginx: [emerg] open() \"$file\" failed (2: No such file or directory)"
+    grep -q '^[[:space:]]*user[[:space:]]' "$file" || refuse "nginx: [emerg] getpwnam(\"nginx\") failed in $file"
+    [ "${FAKE_NGINX_STANDALONE:-}" != fail ] \
+        || refuse "nginx: [emerg] unknown directive \"mbtest\" in /opt/minerbot/state/nginx-check/candidate.conf:1 (a made-up failure)"
+    include=$(sed -n 's#^[[:space:]]*include[[:space:]]\{1,\}\(/opt/[^;]*\);$#\1#p' "$file" | tail -n 1)
+    [ -f "$include" ] || refuse "nginx: [emerg] open() \"$include\" failed (2: No such file or directory) in $file"
+    cert=$(sed -n 's#^[[:space:]]*ssl_certificate[[:space:]]\{1,\}\([^;]*\);$#\1#p' "$include" | head -n 1)
+    key=$(sed -n 's#^[[:space:]]*ssl_certificate_key[[:space:]]\{1,\}\([^;]*\);$#\1#p' "$include" | head -n 1)
+    pair_ok "$cert" "$key" \
+        || refuse "nginx: [emerg] SSL_CTX_use_PrivateKey(\"$key\") failed: the candidate's certificate and key are missing or don't belong together"
+}
+
+dump() {
+    local f
+    full_test
+    printf '%s\n' "nginx: the configuration file /etc/nginx/nginx.conf syntax is ok" \
+        "nginx: configuration file /etc/nginx/nginx.conf test is successful" >&2
+    for f in /etc/nginx/nginx.conf /etc/nginx/conf.d/modules/*.conf /etc/nginx/conf.d/*.conf \
+        /etc/nginx/conf.d/includes-optional/*.conf "$secrets/proxy-key.conf"; do
+        [ -f "$f" ] || continue
+        printf '# configuration file %s:\n' "$f"
+        cat "$f"
+        echo
+    done
+}
+
+c=''
+form=''
+while [ $# -gt 0 ]; do
+    case $1 in
+        -t) form=${form:-test} ;;
+        -q) ;;
+        -c) c=$2; shift ;;
+        -T) form=dump ;;
+        -V) form=version ;;
+        *) refuse "nginx: invalid option: \"$1\"" ;;
+    esac
+    shift
+done
+case $form in
+    test)
+        if [ -n "$c" ]; then
+            standalone "$c"
+        else
+            full_test
+        fi
+        ;;
+    dump)
+        dump
+        ;;
+    version)
+        printf '%s\n' "nginx version: nginx/1.31.8" "built with OpenSSL 3.5.8 (made up)" "TLS SNI support enabled" \
+            "configure arguments: --prefix=/etc/nginx --sbin-path=/usr/sbin/nginx --user=nobody --group=nobody --with-http_ssl_module --with-http_realip_module --with-http_v2_module --add-dynamic-module=ngx_brotli --add-dynamic-module=ngx_http_pipelog_module" >&2
+        ;;
+    *)
+        refuse "nginx: the stand-in only knows -t, -T and -V"
+        ;;
+esac
+exit 0

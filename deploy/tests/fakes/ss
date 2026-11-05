@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# A stand-in for ss, for scripts-test.sh: the listener on 127.0.0.1:5080 is the dashboard's container process while it
+# runs. FAKE_SS=foreign puts another process there; so does FAKE_SS_FOREIGN while the dashboard runs one of the images
+# it names (dashboard@<rev>).
+# shellcheck source=record.sh
+source /usr/local/lib/mbtest/record.sh
+record ss "$@"
+
+listener() {   # listener <pid>
+    printf 'LISTEN 0      512        127.0.0.1:5080      0.0.0.0:*    users:(("dotnet",pid=%s,fd=213))\n' "$1"
+}
+
+pid=''
+if running dashboard; then
+    read -r _ _ _ _ _ pid _ < "$D/ctr/minerbot-dashboard"
+fi
+if [ "${FAKE_SS:-}" = foreign ] || { [ -n "$pid" ] && listed "${FAKE_SS_FOREIGN:-}" "$(running_key dashboard)"; }; then
+    listener 4242
+elif [ -n "$pid" ]; then
+    listener "$pid"
+fi

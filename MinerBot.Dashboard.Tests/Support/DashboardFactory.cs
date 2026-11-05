@@ -12,6 +12,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using MinerBot.Dashboard.Auth;
+using MinerBot.Dashboard.Security;
 using MinerBot.Dashboard.Services;
 
 namespace MinerBot.Dashboard.Tests.Support
@@ -117,6 +118,11 @@ namespace MinerBot.Dashboard.Tests.Support
                 services.Configure<OAuthOptions>(DashboardAuth.DiscordScheme, oauth => oauth.BackchannelHttpHandler = Discord);
                 services.AddHttpClient<DiscordUserApi>().ConfigurePrimaryHttpMessageHandler(() => new NonDisposingHandler(Discord));
                 services.ConfigureHttpClientDefaults(client => client.ConfigurePrimaryHttpMessageHandler(() => new NonDisposingHandler(Discord)));
+
+                // The Access check's client sets its own handler, which would win over the defaults, so it's sent to the fake
+                // Discord too, which throws for an address it doesn't serve. A test that turns the check on installs
+                // FakeCloudflareAccess below, which comes later and wins, and one that forgot can't reach Cloudflare.
+                services.AddHttpClient(CloudflareAccessKeys.ClientName).ConfigurePrimaryHttpMessageHandler(() => new NonDisposingHandler(Discord));
 
                 // First, so it runs before host filtering and before anything that reads the remote address
                 services.Insert(0, ServiceDescriptor.Singleton<IStartupFilter>(new ClientAddressFilter()));

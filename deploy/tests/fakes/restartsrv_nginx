@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# A stand-in for cPanel's /scripts/restartsrv_nginx, for scripts-test.sh. A reload makes nginx serve the certificate
+# that's in MinerBot's folder at that moment: /fake/nginx/served-cert.pem is what the stand-in openssl s_client shows.
+# FAKE_RELOAD=fail makes the reload fail.
+# shellcheck source=record.sh
+source /usr/local/lib/mbtest/record.sh
+record restartsrv_nginx "$@"
+
+[ "${1:-}" = --reload ] || { echo "The stand-in only knows --reload." >&2; exit 2; }
+if [ "${FAKE_RELOAD:-}" = fail ]; then
+    echo "Waiting for nginx to restart gracefully ...failed (made up)." >&2
+    exit 1
+fi
+mkdir -p "$fake/nginx"
+if [ -f /etc/nginx/conf.d/minerbot-dashboard.conf ] && [ -f /etc/nginx/minerbot/origin-cert.pem ]; then
+    cp /etc/nginx/minerbot/origin-cert.pem "$fake/nginx/served-cert.pem"
+else
+    rm -f "$fake/nginx/served-cert.pem"
+fi
+echo "Waiting for nginx to restart gracefully ...finished."

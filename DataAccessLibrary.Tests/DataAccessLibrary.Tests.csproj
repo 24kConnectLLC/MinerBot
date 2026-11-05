@@ -22,6 +22,12 @@
     <None Include="..\docs\schema\wordpress-tables.sql" Link="schema\wordpress-tables.sql" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!-- The dashboard login's rights and the listing that compares them, which DashboardRightsTests applies as deploy.sh does -->
+  <ItemGroup>
+    <None Include="..\deploy\dashboard-rights.sql" Link="deploy\dashboard-rights.sql" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\deploy\rights-list.sql" Link="deploy\rights-list.sql" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Configuration" Version="10.0.13" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.13" />
