@@ -1,4 +1,5 @@
 using System.Net;
+using DataAccessLibrary;
 using Microsoft.Extensions.Options;
 
 namespace MinerBot.Dashboard.Settings
@@ -32,6 +33,9 @@ namespace MinerBot.Dashboard.Settings
             if (KeysFolderProblem(options.KeysFolder) is { } keysFolder)
                 problems.Add(keysFolder);
 
+            if (TempFolderProblem() is { } tempFolder)
+                problems.Add(tempFolder);
+
             // Empty means the default, as it does for Kestrel and the healthcheck command
             var listenAddress = string.IsNullOrWhiteSpace(options.ListenAddress) ? DashboardOptions.DefaultListenAddress : options.ListenAddress;
 
@@ -42,13 +46,22 @@ namespace MinerBot.Dashboard.Settings
                 problems.Add("Dashboard:Port must be a whole number from 1 to 65535.");
 
             // Read here rather than through options, because DataAccessLibrary reads them as the app starts
-            if (string.IsNullOrWhiteSpace(configuration.GetConnectionString("DefaultConnection")))
-                problems.Add("ConnectionStrings:DefaultConnection isn't set. Give the connection string for the website's database, which holds the armor, the blacklist and each server's channels.");
-
-            if (string.IsNullOrWhiteSpace(configuration.GetConnectionString("BotConnection")))
-                problems.Add("ConnectionStrings:BotConnection isn't set. Give the connection string for MinerBot's own database, which keeps the sessions and the audit log.");
+            ConnectionStringProblem("DefaultConnection", "the website's database, which holds the armor, the blacklist and each server's channels", problems);
+            ConnectionStringProblem("BotConnection", "MinerBot's own database, which keeps the sessions and the audit log", problems);
 
             return problems.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(problems);
+        }
+
+        // Set, readable by the driver and naming its database. A string without one would pass the readiness check, which
+        // needs no database, and then fail every sign-in.
+        void ConnectionStringProblem(string key, string database, List<string> problems)
+        {
+            var value = configuration.GetConnectionString(key);
+
+            if (string.IsNullOrWhiteSpace(value))
+                problems.Add($"ConnectionStrings:{key} isn't set. Give the connection string for {database}.");
+            else if (DatabaseNames.Problem(value) is { } problem)
+                problems.Add($"ConnectionStrings:{key} {problem}. Give the connection string for {database}, as dashboard.env.example shows.");
         }
 
         // Keeps the origin as scheme://host[:port], so it compares with a browser's Origin header as it is. One that
@@ -89,9 +102,10 @@ namespace MinerBot.Dashboard.Settings
             if (string.IsNullOrEmpty(key))
                 return "Dashboard:ProxyKey isn't set. Give the secret that nginx adds to every request it passes on, or the dashboard answers nothing.";
 
-            // Printable ASCII, which a header carries as it is
-            if (!key.All(c => c is > ' ' and < '\x7f'))
-                return "Dashboard:ProxyKey may only hold letters, digits and punctuation, with no spaces, because it travels in a header.";
+            // What hex and base64url keys are made of. nginx's configuration, which has to send the key, reads $ as the start
+            // of a variable and quotes and backslashes as escapes, so a key with them may be sent as something else.
+            if (!key.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_'))
+                return "Dashboard:ProxyKey may only hold letters, digits, - and _, because nginx's configuration reads other characters as variables or escapes. Use 64 random hex characters.";
 
             if (key.Length < MinProxyKeyLength)
                 return $"Dashboard:ProxyKey is shorter than {MinProxyKeyLength} characters. Use 64 random hex characters, so that it can't be guessed.";
@@ -139,6 +153,22 @@ namespace MinerBot.Dashboard.Settings
             catch (Exception e) when (e is IOException or UnauthorizedAccessException)
             {
                 return "Dashboard:KeysFolder can't be written to, so the sign-in keys couldn't be kept. Give the dashboard's user write access to it.";
+            }
+        }
+
+        // Data Protection writes each new key to the system's temporary folder first, off Windows, and then moves it into
+        // the keys folder. A read-only container without a /tmp of its own would start and pass its health check, then
+        // fail every sign-in once it needed a new key, possibly months later.
+        internal static string? TempFolderProblem()
+        {
+            try
+            {
+                File.Delete(Path.GetTempFileName());
+                return null;
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                return "The system's temporary folder can't be written to, and each new sign-in key is written there first. Run the container with --tmpfs /tmp.";
             }
         }
     }

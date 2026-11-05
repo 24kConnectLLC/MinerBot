@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using DataAccessLibrary.Tests.Database;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -154,6 +155,26 @@ namespace MinerBot.Dashboard.Tests
 
             var login = new MySqlConnectionStringBuilder(connection);
             Assert.All(logger.Entries, entry => Assert.DoesNotContain(login.Password, entry.Message));
+        }
+
+        // A server that refuses a login names it in its error, so only the error's type and SQL state are logged. Fails if
+        // the driver's message is.
+        [Fact]
+        public async Task RefusedLoginIsLoggedWithoutTheDriversText()
+        {
+            var db = fixture.Require();
+            var refused = new MySqlConnectionStringBuilder(db.BotConnection) { UserID = "made_up_login", Password = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16)) };
+            var settings = new ConfigurationBuilder().AddInMemoryCollection([KeyValuePair.Create<string, string?>("ConnectionStrings:BotConnection", refused.ConnectionString)]).Build();
+            var logger = new ListLogger();
+
+            Assert.Equal(1, await DashboardCommands.MigrateAsync(settings, logger, Token).WaitAsync(TimeSpan.FromMinutes(2), Token));
+
+            Assert.Contains(logger.Entries, entry => entry.Level == LogLevel.Error && entry.Message.Contains("the database answered with MySqlException", StringComparison.Ordinal));
+            Assert.All(logger.Entries, entry =>
+            {
+                Assert.DoesNotContain("made_up_login", entry.Message);
+                Assert.DoesNotContain(refused.Password, entry.Message);
+            });
         }
     }
 }

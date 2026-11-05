@@ -41,6 +41,15 @@ namespace MinerBot.Dashboard.Tests
             // An origin the browser names must be this one, whatever Sec-Fetch-Site says
             await Refused(HttpStatusCode.Forbidden, token, origin: "https://murderminershub.com", fetchSite: "same-origin");
 
+            // This one exactly: not one that only starts with it, not another port, and not this one beside another
+            await Refused(HttpStatusCode.Forbidden, token, origin: DashboardFactory.PublicOrigin + ".evil.example.test");
+            await Refused(HttpStatusCode.Forbidden, token, origin: DashboardFactory.PublicOrigin + ":8443");
+
+            var twice = new HttpRequestMessage(HttpMethod.Post, "/signout") { Content = new FormUrlEncodedContent([new KeyValuePair<string, string>("__RequestVerificationToken", token)]) };
+            Assert.True(twice.Headers.TryAddWithoutValidation("Origin", [DashboardFactory.PublicOrigin, "https://murderminershub.com"]));
+            Assert.Equal(HttpStatusCode.Forbidden, (await admin.Client.SendAsync(twice, Token)).StatusCode);
+            Assert.NotNull(await db.SessionAsync(key));
+
             // Any method that can change something
             await Refused(HttpStatusCode.Forbidden, null, method: HttpMethod.Delete, path: "/admin");
             await Refused(HttpStatusCode.Forbidden, token, method: HttpMethod.Put, path: "/signout");
@@ -92,7 +101,7 @@ namespace MinerBot.Dashboard.Tests
 
             Assert.Contains("secure", attributes);
             Assert.Contains("httponly", attributes);
-            Assert.Contains("samesite=strict", attributes);
+            Assert.Contains("samesite=lax", attributes);
             Assert.Contains("path=/", attributes);
             Assert.DoesNotContain(attributes, attribute => attribute.StartsWith("domain", StringComparison.Ordinal));
         }

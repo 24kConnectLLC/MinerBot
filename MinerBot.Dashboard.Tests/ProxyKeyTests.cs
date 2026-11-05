@@ -1,5 +1,8 @@
 using System.Net;
 using DataAccessLibrary.Tests.Database;
+using Microsoft.AspNetCore.HostFiltering;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using MinerBot.Dashboard.Security;
 using MinerBot.Dashboard.Tests.Support;
 
@@ -87,6 +90,20 @@ namespace MinerBot.Dashboard.Tests
 
             var own = await factory.Visitor().Client.GetAsync("/", Token);
             Assert.Equal(HttpStatusCode.OK, own.StatusCode);
+        }
+
+        // TestServer always sends a Host, so this pins what a request can't reach: Kestrel takes an HTTP/1.0 request with no
+        // Host at all, and only AllowEmptyHosts being off refuses it
+        [Fact]
+        public async Task HostListIsSetInCode()
+        {
+            await using var factory = new DashboardFactory(await fixture.ReadyAsync());
+
+            var filtering = factory.Services.GetRequiredService<IOptionsMonitor<HostFilteringOptions>>().CurrentValue;
+
+            Assert.Equal(["dashboard.test", "localhost"], filtering.AllowedHosts);
+            Assert.False(filtering.AllowEmptyHosts);
+            Assert.False(filtering.IncludeFailureMessage);
         }
 
         // The key never reaches a page, so no page or log can show it

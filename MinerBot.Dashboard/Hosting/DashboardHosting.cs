@@ -46,6 +46,11 @@ namespace MinerBot.Dashboard.Hosting
             kestrel.AddServerHeader = false;
             kestrel.Limits.MaxRequestBodySize = MaxRequestBodySize;
 
+            // ASP.NET Core also binds any endpoint in the Kestrel section of the configuration, on any address, beside the
+            // ones set here. An empty configuration in its place drops them, so the dashboard listens only where its own
+            // settings say, whatever the environment holds.
+            kestrel.Configure();
+
             // An endpoint set in code wins over ASPNETCORE_HTTP_PORTS and ASPNETCORE_URLS, so the aspnet image's 8080 can
             // never bind every address. nginx talks HTTP/1.1, so there's no reason to offer h2c.
             kestrel.Listen(endpoint, listen => listen.Protocols = HttpProtocols.Http1);

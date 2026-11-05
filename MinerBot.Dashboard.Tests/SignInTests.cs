@@ -11,6 +11,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using MinerBot.Dashboard.Auth;
 using MinerBot.Dashboard.Services;
+using MinerBot.Dashboard.Settings;
 using MinerBot.Dashboard.Tests.Support;
 using static MinerBot.Dashboard.Tests.Support.FakeDiscord;
 
@@ -181,6 +182,23 @@ namespace MinerBot.Dashboard.Tests
             var refused = Assert.Single(await db.AuditAsync());
             Assert.Null(refused.actor_id);
             Assert.Equal(AuditRole.Visitor, refused.actor_role);
+        }
+
+        // A token that isn't a bearer token is used for nothing, like one with a wrong scope
+        [Theory]
+        [InlineData("mac")]
+        [InlineData("")]
+        public async Task TokenThatIsntBearerIsRefused(string tokenType)
+        {
+            var db = await fixture.ReadyAsync();
+            await using var factory = new DashboardFactory(db);
+            factory.Discord.TokenType = tokenType;
+
+            var response = await SignInSteps.SignInAsync(factory, factory.Visitor(), TestUsers.Owner);
+
+            await AssertRefusedAsync(db, response, "scope");
+            Assert.Empty(factory.Discord.CallsTo(Endpoint.User));
+            Assert.Single(factory.Discord.CallsTo(Endpoint.Revoke));
         }
 
         // Fails on an open redirect
@@ -420,6 +438,29 @@ namespace MinerBot.Dashboard.Tests
             Assert.Equal(TimeSpan.FromSeconds(10), discordClient.Timeout);
         }
 
+        // Both of the dashboard's handlers as production builds them, which the factory replaces with the fake everywhere
+        // else. Fails if either follows redirects, which would send the code, the client secret or a token wherever a
+        // redirect pointed.
+        [Fact]
+        public void DiscordHandlersFollowNoRedirects()
+        {
+            var oauth = new OAuthOptions();
+            DiscordSignIn.Configure(oauth, new DiscordSignInOptions { ClientId = DashboardFactory.ClientId, ClientSecret = "made-up" });
+            Assert.False(Assert.IsType<SocketsHttpHandler>(oauth.BackchannelHttpHandler).AllowAutoRedirect);
+
+            var services = new ServiceCollection();
+            services.AddLogging();
+            services.AddDashboardSignIn();
+            using var provider = services.BuildServiceProvider();
+
+            var handler = provider.GetRequiredService<IHttpMessageHandlerFactory>().CreateHandler(nameof(DiscordUserApi));
+
+            while (handler is DelegatingHandler delegating)
+                handler = delegating.InnerHandler!;
+
+            Assert.False(Assert.IsType<SocketsHttpHandler>(handler).AllowAutoRedirect);
+        }
+
         // The handler's own failure text, without the response headers and body that a non-standard token error carries
         [Theory]
         [InlineData("OAuth token endpoint failure: Status: BadGateway;Headers: Set-Cookie: __dcfduid=made-up;Body: {};", "OAuth token endpoint failure: Status: BadGateway")]
@@ -430,6 +471,30 @@ namespace MinerBot.Dashboard.Tests
             Assert.Equal(described, DiscordSignInEvents.Describe(new InvalidOperationException(message)));
             Assert.Equal(300, DiscordSignInEvents.Describe(new InvalidOperationException(new string('x', 1000))).Length);
             Assert.Equal("no reason given", DiscordSignInEvents.Describe(null));
+        }
+
+        // An OAuth error keeps only its code, and only a code OAuth defines, because a visitor can write the callback's
+        // error, its description and its address. The handler's own messages say where the error came from.
+        [Fact]
+        public void OAuthErrorsAreDescribedByTheirCodeAlone()
+        {
+            static Exception Failure(string message, string error)
+            {
+                var failure = new InvalidOperationException(message);
+                failure.Data["error"] = error;
+                return failure;
+            }
+
+            Assert.Equal("Discord's token endpoint answered invalid_grant", DiscordSignInEvents.Describe(Failure("OAuth token endpoint failure: invalid_grant;Description=Invalid \"code\" in request.", "invalid_grant")));
+            Assert.Equal("the callback's address carried invalid_client", DiscordSignInEvents.Describe(Failure("invalid_client;Description=Paste the new secret from https://evil.example.test", "invalid_client")));
+            Assert.Equal("the callback's address carried an error OAuth doesn't define", DiscordSignInEvents.Describe(Failure("Discord revoked the client secret", "Discord revoked the client secret")));
+        }
+
+        // Nothing in a failure's text can start a log line of its own
+        [Fact]
+        public void FailureTextStaysOnOneLine()
+        {
+            Assert.Equal("Correlation failed.?? warn: forged", DiscordSignInEvents.Describe(new InvalidOperationException("Correlation failed.\r\n warn: forged")));
         }
 
         // __Host-, so another site under murderminershub.com can't plant one; Lax, so it comes back with Discord's redirect

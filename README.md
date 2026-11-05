@@ -226,12 +226,12 @@ Sign-in uses a Discord application of its own, MinerBot Dashboard, with the `ide
 
 ### Settings
 
-The dashboard reads environment variables and checks them all as it starts. A missing or wrong one stops it with a plain message that names the setting. `dashboard.env.example` has the same list with comments. The values below are placeholders:
+The dashboard reads environment variables and checks them all as it starts. A missing or wrong one stops it with a plain message that names the setting. It reads them only then, so after changing one, such as the lists, create the container again: `docker restart` keeps the old values. `dashboard.env.example` has the same list with comments. The values below are placeholders:
 
 | Variable | What it is |
 |---|---|
 | `Dashboard__PublicOrigin` | `https://bot.murderminershub.com`, the address people open. Discord's sign-in comes back to `/signin-discord` there. |
-| `Dashboard__ProxyKey` | `{Proxy Key}`: 64 random hex characters that nginx adds to every request as `X-MinerBot-Proxy-Key`. Without it, the dashboard answers 404. |
+| `Dashboard__ProxyKey` | `{Proxy Key}`: 64 random hex characters that nginx adds to every request as `X-MinerBot-Proxy-Key`. Without it, the dashboard answers 404. Only letters, digits, `-` and `_` are allowed, because nginx's configuration reads other characters as variables or escapes. |
 | `Dashboard__Owners` | `{Owner's Discord User ID}` |
 | `Dashboard__Admins` | `{Admins' Discord User IDs, separated by commas}` (optional) |
 | `Dashboard__KeysFolder` | `{Keys Folder}`, where the sign-in keys are kept so a restart signs nobody out. The image sets `/app/keys`. |
@@ -243,7 +243,7 @@ The dashboard reads environment variables and checks them all as it starts. A mi
 | `ConnectionStrings__DefaultConnection` | The website's database, in the format above |
 | `ConnectionStrings__BotConnection` | MinerBot's own database, in the format above |
 
-> ⚠️ Never set `ASPNETCORE_FORWARDEDHEADERS_ENABLED` or `AllowedHosts` for the dashboard. It trusts forwarded headers only from nginx on the same server, and answers only its own host name and `localhost`, and it sets both in code so that neither can be loosened from outside.
+> ⚠️ Never set `ASPNETCORE_FORWARDEDHEADERS_ENABLED`, `AllowedHosts` or `Kestrel__Endpoints__...` for the dashboard. It trusts forwarded headers only from nginx on the same server, answers only its own host name and `localhost`, and listens only where `Dashboard__ListenAddress` and `Dashboard__Port` say. It sets all three in code, so none of them can be loosened from outside.
 
 ### Run it locally
 
@@ -293,7 +293,7 @@ docker build -f MinerBot.Dashboard/Dockerfile -t minerbot-dashboard .
 docker run -d --name minerbot-dashboard --network host --read-only --tmpfs /tmp --env-file dashboard.env -v minerbot-dashboard-keys:/app/keys minerbot-dashboard
 ```
 
-The image runs as its non-root user, listens on nothing but `127.0.0.1:5080`, and writes only to `/app/keys` and `/tmp`. Its log warns "No XML encryptor configured" when it makes its first key, which is expected on Linux: keep the volume readable by the container's user only.
+The image runs as its non-root user, listens on nothing but `127.0.0.1:5080`, and writes only to `/app/keys` and `/tmp`. Keep `--tmpfs /tmp` with `--read-only`: each new sign-in key is written to `/tmp` first, and the dashboard won't start without somewhere to write it. Its log warns "No XML encryptor configured" when it makes its first key, which is expected on Linux: keep the volume readable by the container's user only.
 
 ---
 

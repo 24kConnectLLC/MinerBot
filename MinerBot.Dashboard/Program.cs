@@ -65,36 +65,40 @@ app.UseMiddleware<ProxyKeyMiddleware>();
 //    loopback only, and never X-Forwarded-Host.
 app.UseForwardedHeaders();
 
-// 4. A generic page with a request ID, written directly instead of running the pipeline again, so a database outage can't
+// 4. A cookie named like the session or the sign-in's correlation cookie, but with __Host- in another case, is one
+//    murderminershub.com may have set in Safari, so it's dropped before anything reads the cookies.
+app.UseMiddleware<CookiePrefixGuard>();
+
+// 5. A generic page with a request ID, written directly instead of running the pipeline again, so a database outage can't
 //    break the error page too. The middleware's own log line holds the exception's message, which for the database
 //    driver names its login and host, so it's suppressed, and ErrorResponses logs without the message.
 app.UseExceptionHandler(new ExceptionHandlerOptions { ExceptionHandler = ErrorResponses.WriteAsync, SuppressDiagnosticsCallback = _ => true });
 
-// 5. Limits by the visitor's address. Before sign-in, because Discord's callback is answered inside UseAuthentication,
-//    and every sign-in costs Discord calls from the address the bot also uses.
+// 6. Limits by the visitor's address, and on Discord's callback for everyone together. Before sign-in, because the
+//    callback is answered inside UseAuthentication, and every sign-in costs Discord calls from the address the bot uses.
 app.UseRateLimiter();
 
-// 6. Plain pages for 404, 403, 400 and 405. After the limits, so showing one never counts twice.
+// 7. Plain pages for 404, 403, 400 and 405. After the limits, so showing one never counts twice.
 app.UseStatusCodePagesWithReExecute("/error");
 
-// 7. A change must come from the dashboard's own pages. Browsers treat murderminershub.com as the same site, so SameSite
+// 8. A change must come from the dashboard's own pages. Browsers treat murderminershub.com as the same site, so SameSite
 //    cookies alone can't stop it.
 app.UseMiddleware<OriginCheck>();
 
-// 8. The stylesheet comes before sign-in, so it costs no session lookup and still loads while the database is down.
+// 9. The stylesheet comes before sign-in, so it costs no session lookup and still loads while the database is down.
 app.UseStaticFiles(StaticFiles.Options);
 
-// 9. Which page or endpoint the request is for.
+// 10. Which page or endpoint the request is for.
 app.UseRouting();
 
-// 10. The session comes from the database, which ends it there if it's unused, too old or off the lists. Discord's
+// 11. The session comes from the database, which ends it there if it's unused, too old or off the lists. Discord's
 //     callback at /signin-discord is also handled here.
 app.UseAuthentication();
 
-// 11. Each page's policy, with the role worked out from the lists on this request.
+// 12. Each page's policy, with the role worked out from the lists on this request.
 app.UseAuthorization();
 
-// 12. The pages, and the health endpoints, which answer only on Host localhost.
+// 13. The pages, and the health endpoints, which answer only on Host localhost.
 app.MapRazorPages();
 app.MapDashboardHealthChecks();
 
@@ -107,6 +111,6 @@ app.MapDashboardHealthChecks();
 // - MapStaticAssets: UseStaticFiles serves wwwroot the same way in the tests and in the container, with no build manifest.
 // - A fallback policy: see AddRazorPages above.
 
-// 13. Runs the app until the host stops it.
+// 14. Runs the app until the host stops it.
 await app.RunAsync();
 return 0;

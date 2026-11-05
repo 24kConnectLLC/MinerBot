@@ -7,9 +7,9 @@ using MinerBot.Dashboard.Auth;
 
 namespace MinerBot.Dashboard.Security
 {
-    // Limits per visitor address, which is nginx's X-Forwarded-For once the forwarded headers have been applied. Every
-    // sign-in costs Discord calls from the address the bot also uses, and Discord blocks an address that sends too many
-    // bad ones, so sign-ins have the tightest limit.
+    // Limits per visitor address, which is nginx's X-Forwarded-For once the forwarded headers have been applied, and one
+    // shared limit on Discord's callback. Every sign-in costs Discord calls from the address the bot also uses, and
+    // Discord blocks an address that sends too many bad ones, so sign-ins have the tightest limits.
     internal static class RateLimits
     {
         public const int SignInPerMinute = 10;
@@ -18,16 +18,31 @@ namespace MinerBot.Dashboard.Security
         // can't buy a bigger allowance: anyone can send a made-up one, and each costs a database read.
         public const int VisitorPerMinute = 60;
 
-        internal const string Rejection = "Too many requests from your address. Wait a minute, then try again.";
+        // Discord's callback, for everyone together, on top of each visitor's own limit. Each callback can cost a call to
+        // Discord's token endpoint, and a state from one sign-in can be sent again and again from any number of addresses,
+        // so without this the calls would have no ceiling. Only a handful of people sign in, so the worst an attack can do
+        // is hold sign-in shut a minute at a time, which is better than Discord banning the address the bot shares.
+        public const int CallbacksPerMinute = 20;
+
+        internal const string Rejection = "Too many requests just now. Wait a minute, then try again.";
 
         static readonly TimeSpan Window = TimeSpan.FromMinutes(1);
 
         public static void Configure(RateLimiterOptions options)
         {
-            options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(Partition);
+            // The visitor's own limit first, so one address that's over it never uses up the shared one
+            options.GlobalLimiter = PartitionedRateLimiter.CreateChained(
+                PartitionedRateLimiter.Create<HttpContext, string>(Partition),
+                PartitionedRateLimiter.Create<HttpContext, string>(AllCallbacks));
+
             options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
             options.OnRejected = OnRejectedAsync;
         }
+
+        static RateLimitPartition<string> AllCallbacks(HttpContext context) =>
+            context.Request.Path.StartsWithSegments(DashboardAuth.CallbackPath, StringComparison.OrdinalIgnoreCase)
+                ? Fixed("callbacks", CallbacksPerMinute)
+                : RateLimitPartition.GetNoLimiter("other");
 
         static RateLimitPartition<string> Partition(HttpContext context)
         {

@@ -6,11 +6,12 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS base
 # The dashboard sets its own in code: 127.0.0.1:5080, unless Dashboard__ListenAddress and Dashboard__Port say otherwise.
 ENV ASPNETCORE_HTTP_PORTS=
 ENV Dashboard__KeysFolder=/app/keys
-USER $APP_UID
 WORKDIR /app
-# Made here, so a new volume takes the app user as its owner, as the bot's /app/data does. The sign-in keys live on it, so
-# a restart signs nobody out, and with a read-only filesystem it and /tmp are the only places the app writes.
-RUN mkdir /app/keys
+# /app stays root's, so the app can't change its own files even in a container that isn't read-only. Only the keys folder
+# is the app user's, made here so a new volume takes that owner. The sign-in keys live on it, so a restart signs nobody
+# out, and with a read-only filesystem it and /tmp are the only places the app writes.
+RUN mkdir /app/keys && chown "$APP_UID:$APP_UID" /app/keys
+USER $APP_UID
 VOLUME /app/keys
 
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build

@@ -77,38 +77,72 @@ namespace MinerBot.Dashboard.Tests
 
             try
             {
-                var environment = new Dictionary<string, string>
-                {
-                    ["Dashboard__PublicOrigin"] = DashboardFactory.PublicOrigin,
-                    ["Dashboard__ProxyKey"] = "made-up-proxy-key-for-the-process-test-0123456789abcdef",
-                    ["Dashboard__Owners"] = TestUsers.Owner.IdText,
-                    ["Dashboard__KeysFolder"] = keys,
-                    ["Dashboard__Port"] = DeadDatabase.ClosedPort().ToString(),
-                    ["Discord__ClientId"] = DashboardFactory.ClientId,
-                    ["Discord__ClientSecret"] = "made-up-secret-for-the-process-test",
-                    ["ConnectionStrings__DefaultConnection"] = new DeadDatabase().SiteConnection,
-                    ["ConnectionStrings__BotConnection"] = new DeadDatabase().BotConnection
-                };
+                var environment = GoodSettings(keys);
 
                 if (value == null)
                     environment.Remove(name);
                 else
                     environment[name] = value;
 
-                var run = await RunAsync(environment);
-
-                Assert.Equal(1, run.ExitCode);
-                Assert.StartsWith("The dashboard didn't start, because of its settings:", run.Errors);
-                Assert.Contains(line, run.Errors);
-                Assert.Single(run.Errors.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries), errorLine => errorLine.StartsWith("- ", StringComparison.Ordinal));
-                Assert.DoesNotContain("   at ", run.Errors);
-                Assert.DoesNotContain("made-up-secret-for-the-process-test", run.Errors + run.Output);
-                Assert.DoesNotContain("made-up-proxy-key-for-the-process-test", run.Errors + run.Output);
+                AssertStopped(await RunAsync(environment), line);
             }
             finally
             {
                 DashboardFactory.DeleteFolder(keys);
             }
+        }
+
+        // Off Windows, Data Protection writes each new key to the temporary folder first, so one that can't be written
+        // stops the dashboard as it starts, rather than at the first sign-in once a new key is due. The temporary folder
+        // here is a path under a file, which can't exist anywhere.
+        [Fact]
+        public async Task UnwritableTempFolderStopsTheDashboard()
+        {
+            var keys = DashboardFactory.NewKeysFolder();
+
+            try
+            {
+                Directory.CreateDirectory(keys);
+                var file = Path.Combine(keys, "a-file");
+                File.WriteAllText(file, "");
+                var nowhere = Path.Combine(file, "tmp");
+
+                var environment = GoodSettings(keys);
+                environment["TMPDIR"] = nowhere;
+                environment["TMP"] = nowhere;
+                environment["TEMP"] = nowhere;
+
+                AssertStopped(await RunAsync(environment), "- The system's temporary folder can't be written to");
+            }
+            finally
+            {
+                DashboardFactory.DeleteFolder(keys);
+            }
+        }
+
+        static Dictionary<string, string> GoodSettings(string keys) => new()
+        {
+            ["Dashboard__PublicOrigin"] = DashboardFactory.PublicOrigin,
+            ["Dashboard__ProxyKey"] = "made-up-proxy-key-for-the-process-test-0123456789abcdef",
+            ["Dashboard__Owners"] = TestUsers.Owner.IdText,
+            ["Dashboard__KeysFolder"] = keys,
+            ["Dashboard__Port"] = DeadDatabase.ClosedPort().ToString(),
+            ["Discord__ClientId"] = DashboardFactory.ClientId,
+            ["Discord__ClientSecret"] = "made-up-secret-for-the-process-test",
+            ["ConnectionStrings__DefaultConnection"] = new DeadDatabase().SiteConnection,
+            ["ConnectionStrings__BotConnection"] = new DeadDatabase().BotConnection
+        };
+
+        // Exit code 1 and the plain list with exactly this one problem, no stack trace and no secret
+        static void AssertStopped(Run run, string line)
+        {
+            Assert.Equal(1, run.ExitCode);
+            Assert.StartsWith("The dashboard didn't start, because of its settings:", run.Errors);
+            Assert.Contains(line, run.Errors);
+            Assert.Single(run.Errors.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries), errorLine => errorLine.StartsWith("- ", StringComparison.Ordinal));
+            Assert.DoesNotContain("   at ", run.Errors);
+            Assert.DoesNotContain("made-up-secret-for-the-process-test", run.Errors + run.Output);
+            Assert.DoesNotContain("made-up-proxy-key-for-the-process-test", run.Errors + run.Output);
         }
     }
 

@@ -50,8 +50,9 @@ namespace MinerBot.Dashboard.Tests.Support
         readonly List<string> secrets = [];
         readonly List<string> refusals = [];
 
-        // The scope the token endpoint says it granted
+        // The scope the token endpoint says it granted, and the kind of token
         public string GrantedScope { get; set; } = "identify";
+        public string TokenType { get; set; } = "Bearer";
 
         // An endpoint that answers with this status instead, or never answers until the caller gives up
         public ConcurrentDictionary<Endpoint, HttpStatusCode> Failures { get; } = new();
@@ -180,7 +181,7 @@ namespace MinerBot.Dashboard.Tests.Support
                 return Json(HttpStatusCode.OK, JsonSerializer.Serialize(new
                 {
                     access_token = accessToken,
-                    token_type = "Bearer",
+                    token_type = TokenType,
                     expires_in = 604800,
                     refresh_token = refreshToken,
                     scope = GrantedScope

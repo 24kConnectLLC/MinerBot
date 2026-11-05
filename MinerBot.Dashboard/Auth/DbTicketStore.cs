@@ -152,7 +152,8 @@ namespace MinerBot.Dashboard.Auth
                 await DatabaseCalls.Guard(() => sessions.DeleteSession(key), logger);
         }
 
-        // Sign-out: the session and its audit row go together
+        // Sign-out: the session and its audit row go together. One that finds the session already gone, such as the second
+        // of two at once, writes nothing: its delete waits for the first one's and then finds no row.
         public Task EndAsync(string key, ClaimsPrincipal user, HttpContext httpContext)
         {
             var signedIn = SignedInUser.From(user);
@@ -160,8 +161,9 @@ namespace MinerBot.Dashboard.Auth
 
             return DatabaseCalls.Guard(() => sessions.RunInTransaction(async transaction =>
             {
-                await sessions.DeleteSession(key, transaction);
-                await audit.AddAudit(entry, transaction);
+                if (await sessions.DeleteSession(key, transaction))
+                    await audit.AddAudit(entry, transaction);
+
                 return true;
             }), logger);
         }
@@ -181,14 +183,19 @@ namespace MinerBot.Dashboard.Auth
             var refused = Entry(httpContext, now, session.user_id, session.user_name, AuditRole.Visitor, "auth.refused", AuditOutcome.Refused,
                 "Taken off the dashboard's lists, so their sessions were ended");
 
-            await DatabaseCalls.Guard(() => sessions.RunInTransaction(async transaction =>
+            // Audited only when this request ended something, so two requests at once don't log one ending twice
+            var ended = await DatabaseCalls.Guard(() => sessions.RunInTransaction(async transaction =>
             {
-                await sessions.DeleteOldestSessions(session.user_id, 0, transaction);
-                await audit.AddAudit(refused, transaction);
-                return true;
+                var deleted = await sessions.DeleteOldestSessions(session.user_id, 0, transaction);
+
+                if (deleted > 0)
+                    await audit.AddAudit(refused, transaction);
+
+                return deleted;
             }), logger);
 
-            logger.LogInformation("A session ended because its user is no longer on the dashboard's lists");
+            if (ended > 0)
+                logger.LogInformation("A session ended because its user is no longer on the dashboard's lists");
         }
 
         // The stored ticket is rebuilt from the three claims a session needs, so neither a role nor a token can reach the

@@ -13,6 +13,8 @@ namespace MinerBot.Dashboard.Tests
     [Collection("Database")]
     public class LogTests(MariaDbFixture fixture)
     {
+        static CancellationToken Token => TestContext.Current.CancellationToken;
+
         [Fact]
         public async Task LogsHoldNoSecrets()
         {
@@ -70,6 +72,40 @@ namespace MinerBot.Dashboard.Tests
 
             foreach (var secret in secrets)
                 Assert.False(logs.Contains(secret, StringComparison.Ordinal), "A log line holds a secret");
+        }
+
+        // Anyone who starts a sign-in can send the callback with an error and a description of their own, or with a
+        // correlation cookie of their own. Neither text reaches the log, so nobody can write lines there that look like
+        // Discord's advice. Fails if the description, the address or the cookie's value is logged.
+        [Fact]
+        public async Task TextFromTheCallbackIsNotLogged()
+        {
+            await using var factory = new DashboardFactory(await fixture.ReadyAsync());
+
+            var visitor = factory.Visitor("203.0.113.63");
+            var authorize = await SignInSteps.StartAsync(visitor);
+            var description = Uri.EscapeDataString("Discord revoked the client secret. Paste the new one from https://evil.example.test\r\nwarn: forged line");
+            var withError = await visitor.Client.GetAsync($"{DashboardAuth.CallbackPath}?state={Uri.EscapeDataString(authorize.State)}&error=invalid_client&error_description={description}&error_uri={Uri.EscapeDataString("https://evil.example.test/help")}", Token);
+            Assert.Equal("/denied?reason=failed", SignInSteps.PathOf(withError.Headers.Location));
+
+            const string cookieText = "made-up-correlation-text-1f6c";
+            var other = factory.Visitor("203.0.113.64");
+            var second = await SignInSteps.StartAsync(other);
+            var correlation = Assert.Single(other.Jar.GetCookies(DashboardFactory.PublicAddress), cookie => cookie.Name.StartsWith(DashboardAuth.CorrelationCookiePrefix, StringComparison.Ordinal));
+            other.Jar.Add(DashboardFactory.PublicAddress, new Cookie(correlation.Name, cookieText) { Secure = true });
+            var mismatched = await SignInSteps.CallbackAsync(other, "made-up-code", second.State);
+            Assert.Equal("/denied?reason=failed", SignInSteps.PathOf(mismatched.Headers.Location));
+
+            var logs = factory.Logs.Text;
+
+            // The lines this test means to cover were written
+            Assert.Contains("didn't finish: the callback's address carried invalid_client", logs);
+            Assert.Contains("didn't finish: Correlation failed.", logs);
+
+            Assert.DoesNotContain("evil.example.test", logs);
+            Assert.DoesNotContain("Paste the new one", logs);
+            Assert.DoesNotContain("forged line", logs);
+            Assert.DoesNotContain(cookieText, logs);
         }
     }
 }

@@ -72,7 +72,8 @@ namespace MinerBot.Dashboard.Tests
         }
 
         // The address comes from Dashboard:ListenAddress and Dashboard:Port, through AddDashboardHosting as Program.cs calls
-        // it. Fails if Kestrel binds any other address, such as every one, or ignores either setting.
+        // it. Fails if Kestrel binds any other address, such as every one, ignores either setting, or also binds an endpoint
+        // from the configuration's Kestrel section, which ASP.NET Core would otherwise add beside the dashboard's own.
         [Theory]
         [InlineData(null)]
         [InlineData("127.0.0.2")]
@@ -81,6 +82,7 @@ namespace MinerBot.Dashboard.Tests
             var token = TestContext.Current.CancellationToken;
             var port = DeadDatabase.ClosedPort();
             var imagePort = DeadDatabase.ClosedPort();
+            var configuredPort = DeadDatabase.ClosedPort();
             var keys = DashboardFactory.NewKeysFolder();
 
             try
@@ -88,13 +90,14 @@ namespace MinerBot.Dashboard.Tests
                 var builder = WebApplication.CreateSlimBuilder();
                 builder.WebHost.UseSetting(WebHostDefaults.HttpPortsKey, imagePort.ToString(CultureInfo.InvariantCulture));
 
-                // Only the settings AddDashboardHosting reads, made up
+                // Only the settings AddDashboardHosting reads, made up, and an endpoint such as a guide might suggest
                 builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
                 {
                     ["Dashboard:PublicOrigin"] = DashboardFactory.PublicOrigin,
                     ["Dashboard:KeysFolder"] = keys,
                     ["Dashboard:ListenAddress"] = listenAddress,
-                    ["Dashboard:Port"] = port.ToString(CultureInfo.InvariantCulture)
+                    ["Dashboard:Port"] = port.ToString(CultureInfo.InvariantCulture),
+                    ["Kestrel:Endpoints:Extra:Url"] = $"http://127.0.0.1:{configuredPort}"
                 });
 
                 builder.Services.AddOptions<DashboardOptions>().BindConfiguration(DashboardOptions.Section);
@@ -114,6 +117,9 @@ namespace MinerBot.Dashboard.Tests
 
                     using (var socket = new TcpClient())
                         await Assert.ThrowsAnyAsync<SocketException>(() => socket.ConnectAsync(IPAddress.Loopback, imagePort, token).AsTask().WaitAsync(Limit, token));
+
+                    using (var socket = new TcpClient())
+                        await Assert.ThrowsAnyAsync<SocketException>(() => socket.ConnectAsync(IPAddress.Loopback, configuredPort, token).AsTask().WaitAsync(Limit, token));
 
                     // It answers there, to a Host it allows
                     using var client = new HttpClient { Timeout = Limit };

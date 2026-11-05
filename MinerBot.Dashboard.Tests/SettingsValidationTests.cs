@@ -103,6 +103,16 @@ namespace MinerBot.Dashboard.Tests
             { "Discord:UserInformationEndpoint", "users/@me" },
             { "Dashboard:ProxyKey", "0f1e2d3c4b5a69780f1e2d3c4b5a697" },
             { "Dashboard:ProxyKey", "0f1e2d3c4b5a6978 0f1e2d3c4b5a69780f1e2d3c4b5a6978" },
+            // nginx would read these as a variable, or as escapes, and send something else
+            { "Dashboard:ProxyKey", "0f1e2d3c4b5a6978$host0f1e2d3c4b5a69780f1e2d3c4b5a6978" },
+            { "Dashboard:ProxyKey", "0f1e2d3c4b5a6978\"0f1e2d3c4b5a69780f1e2d3c4b5a6978" },
+            { "Dashboard:ProxyKey", "0f1e2d3c4b5a6978\\0f1e2d3c4b5a69780f1e2d3c4b5a6978" },
+            { "Dashboard:ProxyKey", "0f1e2d3c4b5a6978!0f1e2d3c4b5a69780f1e2d3c4b5a6978" },
+            // One the readiness check would pass, since SELECT 1 needs no database, and then every sign-in would fail
+            { "ConnectionStrings:BotConnection", "Server=127.0.0.1;Uid=bot_login;Pwd=made-up-bot-password-8e27" },
+            { "ConnectionStrings:DefaultConnection", "Server=127.0.0.1;Uid=site_login;Pwd=made-up-site-password-41d9" },
+            { "ConnectionStrings:DefaultConnection", "Server=127.0.0.1;Database=site_db;SslMode=Requird;Uid=site_login" },
+            { "ConnectionStrings:BotConnection", "Server=127.0.0.1;Database=bot\\db;Uid=bot_login" },
             { "Dashboard:KeysFolder", "relative-keys" },
             { "Discord:ClientId", "MinerBot Dashboard" },
             { "Discord:ClientId", "123" },
@@ -174,6 +184,16 @@ namespace MinerBot.Dashboard.Tests
             Assert.Empty(Directory.EnumerateFileSystemEntries(nested));
         }
 
+        // A folder the dashboard can't write to stops it at start-up rather than at the first sign-in. A folder where the
+        // probe file would go makes the write fail on any system, without changing anyone's permissions.
+        [Fact]
+        public void KeysFolderThatCantBeWrittenIsRefused()
+        {
+            Directory.CreateDirectory(Path.Combine(keysFolder, DashboardOptionsValidator.ProbeName));
+
+            Assert.StartsWith("Dashboard:KeysFolder can't be written to", Assert.Single(Problems(Valid())));
+        }
+
         [Theory]
         [InlineData("Dashboard:ListenAddress", "127.0.0.1")]
         [InlineData("Dashboard:ListenAddress", "127.0.0.2")]
@@ -184,6 +204,8 @@ namespace MinerBot.Dashboard.Tests
         [InlineData("Dashboard:Admins", "")]
         [InlineData("Dashboard:Owners", "1000000000000000001 1000000000000000004")]
         [InlineData("Dashboard:PublicOrigin", "http://localhost:5080")]
+        [InlineData("Dashboard:ProxyKey", "base64url-key_0123456789ABCDEFabcdef-_xyz")]
+        [InlineData("ConnectionStrings:BotConnection", "Server=127.0.0.1;Initial Catalog=bot_db;Uid=bot_login")]
         public void OtherGoodValuesPass(string key, string value)
         {
             var settings = Valid();

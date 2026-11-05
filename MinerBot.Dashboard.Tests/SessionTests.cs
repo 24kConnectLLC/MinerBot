@@ -30,19 +30,21 @@ namespace MinerBot.Dashboard.Tests
 
         static async Task<string?> AdminLocationAsync(TestBrowser browser) => SignInSteps.PathOf((await browser.Client.GetAsync("/admin", Token)).Headers.Location);
 
-        // Fails with the cookie handler's own encrypted envelope, or with a persistent cookie
+        // Fails with the cookie handler's own encrypted envelope, with a persistent cookie, or without the __Host- prefix,
+        // which keeps murderminershub.com from setting or replacing it. The name is written out here for that reason.
         [Fact]
         public async Task SessionCookieHoldsOnlyTheKey()
         {
+            const string name = "__Host-mb";
             var db = await fixture.ReadyAsync();
             await using var factory = new DashboardFactory(db);
             var owner = factory.Visitor();
 
             var response = await SignInSteps.SignInAsync(factory, owner, TestUsers.Owner);
 
-            var cookie = Assert.Single(response.Headers.GetValues("Set-Cookie"), header => header.StartsWith(DashboardAuth.SessionCookie + "=", StringComparison.Ordinal));
+            var cookie = Assert.Single(response.Headers.GetValues("Set-Cookie"), header => header.StartsWith(name + "=", StringComparison.Ordinal));
             var parts = cookie.Split(';').Select(part => part.Trim()).ToList();
-            var value = parts[0][(DashboardAuth.SessionCookie.Length + 1)..];
+            var value = parts[0][(name.Length + 1)..];
             var attributes = parts.Skip(1).Select(part => part.ToLowerInvariant()).ToList();
 
             Assert.Matches("^[A-Za-z0-9_-]{43}$", value);
@@ -344,12 +346,51 @@ namespace MinerBot.Dashboard.Tests
             Assert.Single(await db.AuditAsync(), row => row.action == "auth.refused");
         }
 
+        // The second of two sign-outs at once: the first one's delete is made here, between this request finding the
+        // session and ending it, as it is when the two overlap. Fails if this one still writes an audit row.
+        [Fact]
+        public async Task SignOutThatFindsTheSessionGoneWritesNothing()
+        {
+            var db = await fixture.ReadyAsync();
+            var failures = new Failures();
+            await using var factory = Failing(db, failures);
+            var owner = factory.Visitor();
+            await SignInSteps.SignedInAsync(factory, owner, TestUsers.Owner);
+            var token = await SignInSteps.FormTokenAsync(owner);
+
+            failures.BeforeEnding = () => db.RootExecuteAsync($"DELETE FROM {MariaDbFixture.SessionTable}");
+            var response = await SignInSteps.PostAsync(owner, "/signout", token, origin: DashboardFactory.PublicOrigin);
+
+            Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
+            Assert.DoesNotContain(await db.AuditAsync(), row => row.action == "auth.signout");
+        }
+
+        // Two requests at once from someone just taken off the lists: the other one's delete is made here. Fails if this
+        // one writes a second auth.refused row for the same ending.
+        [Fact]
+        public async Task RemovalThatFindsTheSessionsGoneWritesNothing()
+        {
+            var db = await fixture.ReadyAsync();
+            var failures = new Failures();
+            await using var factory = Failing(db, failures);
+            var admin = factory.Visitor();
+            await SignInSteps.SignedInAsync(factory, admin, TestUsers.Admin);
+
+            factory.Settings.Change(("Dashboard:Admins", TestUsers.SecondAdmin.IdText));
+            failures.BeforeEnding = () => db.RootExecuteAsync($"DELETE FROM {MariaDbFixture.SessionTable}");
+
+            Assert.Equal("/signin?returnUrl=%2Fadmin", await AdminLocationAsync(admin));
+            Assert.DoesNotContain(await db.AuditAsync(), row => row.action == "auth.refused");
+        }
+
         // What the next database call should fail at, as a database would that dropped the connection just after the
         // statement ran. A row written inside a transaction is rolled back with it, and one written on its own stays.
+        // BeforeEnding runs inside a sign-out's or a removal's transaction, just before its delete.
         sealed class Failures
         {
             public string? AuditAction { get; set; }
             public bool SessionCap { get; set; }
+            public Func<Task>? BeforeEnding { get; set; }
         }
 
         static DashboardFactory Failing(MariaDbFixture db, Failures failures) => new(db, new DashboardFactoryOptions
@@ -382,14 +423,24 @@ namespace MinerBot.Dashboard.Tests
         {
             public async Task<int> DeleteOldestSessions(ulong userId, int keep, DataTransaction? transaction = null)
             {
+                if (keep == 0 && failures.BeforeEnding is { } before)
+                    await before();
+
                 var deleted = await real.DeleteOldestSessions(userId, keep, transaction);
                 return failures.SessionCap && keep > 0 ? throw Dropped() : deleted;
+            }
+
+            public async Task<bool> DeleteSession(string key, DataTransaction? transaction = null)
+            {
+                if (transaction != null && failures.BeforeEnding is { } before)
+                    await before();
+
+                return await real.DeleteSession(key, transaction);
             }
 
             public Task CreateSession(string key, DashboardSession session, DataTransaction? transaction = null) => real.CreateSession(key, session, transaction);
             public Task<int> DeleteExpiredSessions(DateTime expiredBefore, DateTime unusedBefore) => real.DeleteExpiredSessions(expiredBefore, unusedBefore);
             public Task<int> DeleteOtherSessions(ulong userId, string keepKey, DataTransaction? transaction = null) => real.DeleteOtherSessions(userId, keepKey, transaction);
-            public Task<bool> DeleteSession(string key, DataTransaction? transaction = null) => real.DeleteSession(key, transaction);
             public Task<DashboardSession?> GetSession(string key, DateTime now) => real.GetSession(key, now);
             public Task<bool> RenewSession(string key, byte[] ticket) => real.RenewSession(key, ticket);
             public Task<T> RunInTransaction<T>(Func<DataTransaction, Task<T>> work) => real.RunInTransaction(work);

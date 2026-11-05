@@ -58,7 +58,11 @@ namespace MinerBot.Dashboard.Auth
                 options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
                 options.Cookie.Path = "/";
                 options.Cookie.HttpOnly = true;
-                options.Cookie.SameSite = SameSiteMode.Strict;
+
+                // Lax, not Strict: Strict would leave it off every arrival from another site, Discord's return from a
+                // sign-in included, and the new one written then would expire every form already open in another tab.
+                // Neither is sent with a cross-site POST, and OriginCheck and the token stop the rest either way.
+                options.Cookie.SameSite = SameSiteMode.Lax;
 
                 // Antiforgery would add X-Frame-Options: SAMEORIGIN to every page with a form, and SecurityHeaders sends DENY
                 options.SuppressXFrameOptionsHeader = true;

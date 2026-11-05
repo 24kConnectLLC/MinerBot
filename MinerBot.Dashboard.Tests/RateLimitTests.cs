@@ -6,8 +6,8 @@ using MinerBot.Dashboard.Tests.Support;
 
 namespace MinerBot.Dashboard.Tests
 {
-    // Limits per visitor address, taken after the forwarded headers. The limiter runs on real time, and each test's
-    // requests take well under its one-minute window.
+    // Limits per visitor address, taken after the forwarded headers, and one for Discord's callback for everyone together.
+    // The limiter runs on real time, and each test's requests take well under its one-minute window.
     [Collection("Database")]
     public class RateLimitTests(MariaDbFixture fixture)
     {
@@ -55,6 +55,34 @@ namespace MinerBot.Dashboard.Tests
 
             Assert.Equal(HttpStatusCode.TooManyRequests, eleventh.StatusCode);
             Assert.Empty(factory.Discord.Calls);
+        }
+
+        // One sign-in's state and correlation cookie can be sent again from any number of addresses, each with an allowance
+        // of its own, so the callback also has one limit for everyone together. Fails if the dashboard could be made to call
+        // Discord's token endpoint without a ceiling, which could get the address the bot shares banned from Discord's API.
+        [Fact]
+        public async Task CallbacksAreCappedForEveryoneTogether()
+        {
+            await using var factory = new DashboardFactory(await fixture.ReadyAsync());
+            var starter = factory.Visitor("198.51.100.200");
+            var authorize = await SignInSteps.StartAsync(starter);
+            var correlation = Assert.Single(starter.Jar.GetCookies(DashboardFactory.PublicAddress), cookie => cookie.Name.StartsWith(DashboardAuth.CorrelationCookiePrefix, StringComparison.Ordinal));
+
+            async Task<HttpResponseMessage> FromAnotherAddress(int i)
+            {
+                var visitor = factory.Visitor($"198.51.100.{i + 1}");
+                visitor.Jar.Add(DashboardFactory.PublicAddress, new Cookie(correlation.Name, correlation.Value) { Secure = true });
+                return await SignInSteps.CallbackAsync(visitor, "made-up-code-" + i, authorize.State);
+            }
+
+            for (var i = 0; i < RateLimits.CallbacksPerMinute; i++)
+                Assert.Equal("/denied?reason=failed", SignInSteps.PathOf((await FromAnotherAddress(i)).Headers.Location));
+
+            Assert.Equal(HttpStatusCode.TooManyRequests, (await FromAnotherAddress(RateLimits.CallbacksPerMinute)).StatusCode);
+            Assert.Equal(RateLimits.CallbacksPerMinute, factory.Discord.CallsTo(FakeDiscord.Endpoint.Token).Count);
+
+            // Only the callback has it: the rest of the dashboard still answers
+            Assert.Equal(HttpStatusCode.OK, (await factory.Visitor("198.51.100.250").Client.GetAsync("/", Token)).StatusCode);
         }
 
         // A made-up session cookie costs a session lookup, so it never buys more than the visitor's own limit. Fails if a

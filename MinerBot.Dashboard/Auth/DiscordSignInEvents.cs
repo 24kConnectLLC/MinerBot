@@ -18,10 +18,21 @@ namespace MinerBot.Dashboard.Auth
         const string RefusalItem = "mb:refusal";
         const string UserItem = "mb:user";
 
-        // The handler's failure messages are its own and Discord's error words, but a token endpoint failure that isn't one
-        // of OAuth's standard errors carries Discord's response headers and body, cookies included, so that part is dropped
+        // A token endpoint failure that isn't one of OAuth's standard errors carries Discord's response headers and body,
+        // cookies included, so that part is dropped
         const string HeadersMarker = ";Headers:";
         const int FailureTextLimit = 300;
+
+        // How the OAuth handler starts the message of a standard error that Discord's token endpoint answered with
+        const string TokenEndpointFailure = "OAuth token endpoint failure: ";
+
+        // OAuth 2.0's error codes (RFC 6749, sections 4.1.2.1 and 5.2), the only error words worth logging. An error in
+        // the callback's address can be written by anyone who started a sign-in, so its description and address never are.
+        static readonly HashSet<string> StandardErrors = new(StringComparer.Ordinal)
+        {
+            "invalid_request", "unauthorized_client", "access_denied", "unsupported_response_type", "invalid_scope",
+            "server_error", "temporarily_unavailable", "invalid_client", "invalid_grant", "unsupported_grant_type"
+        };
 
         public override async Task CreatingTicket(OAuthCreatingTicketContext context)
         {
@@ -113,13 +124,31 @@ namespace MinerBot.Dashboard.Auth
             if (failure == null)
                 return "no reason given";
 
+            // An OAuth error, from Discord's token endpoint or from the callback's address: its code alone
+            if (failure.Data["error"] is string error)
+            {
+                var code = StandardErrors.Contains(error) ? error : "an error OAuth doesn't define";
+
+                return failure.Message.StartsWith(TokenEndpointFailure, StringComparison.Ordinal)
+                    ? "Discord's token endpoint answered " + code
+                    : "the callback's address carried " + code;
+            }
+
             var text = failure.Message;
             var headers = text.IndexOf(HeadersMarker, StringComparison.Ordinal);
 
             if (headers >= 0)
                 text = text[..headers];
 
-            return text.Length > FailureTextLimit ? text[..FailureTextLimit] : text;
+            if (text.Length > FailureTextLimit)
+                text = text[..FailureTextLimit];
+
+            // On one line, so nothing in it can start a log line of its own
+            return string.Create(text.Length, text, (chars, source) =>
+            {
+                for (var i = 0; i < source.Length; i++)
+                    chars[i] = char.IsControl(source[i]) ? '?' : source[i];
+            });
         }
 
         Task AuditRefusalAsync(HttpContext httpContext, SignInRefusal refusal, DiscordUser? user)
