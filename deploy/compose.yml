@@ -1,0 +1,76 @@
+# MinerBot on the VPS: the bot and the web dashboard. deploy.sh builds the images and swaps them in; this file says how
+# they run. It comes from deploy/compose.yml in the repository, and deploy.sh installs it as /opt/minerbot/compose.yml,
+# so change it there. Each image has the tags current (running, or last ready), previous (the one before, for
+# rollback.sh), new (the last one built) and failed (the last one a deploy took back out). Start or recreate a service
+# with --no-build and name it, as in: docker compose up -d --no-build --no-deps dashboard
+name: minerbot
+
+services:
+  bot:
+    image: minerbot-bot:current
+    # Built by deploy.sh, never by compose, and never pulled from a registry
+    pull_policy: never
+    container_name: minerbot-bot
+    # The server's own network, so the CSF firewall doesn't need Docker rules and the
+    # database is reached on 127.0.0.1 without leaving the server
+    network_mode: host
+    restart: unless-stopped
+    env_file: ./bot.env
+    volumes:
+      # The Steam sign-in token lives here and survives rebuilds
+      - minerbot-data:/app/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 1g
+    pids_limit: 512
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+  dashboard:
+    image: minerbot-dashboard:current
+    pull_policy: never
+    container_name: minerbot-dashboard
+    # Host networking like the bot. The dashboard listens on 127.0.0.1:5080 only, set in its code, where nginx reaches it.
+    network_mode: host
+    restart: unless-stopped
+    # The image's own user, set here too, so an image that lost its USER line still never runs as root
+    user: "1654:1654"
+    # setup-dashboard.sh writes it. Until then the bot's commands still work, and deploy.sh won't start the dashboard.
+    env_file:
+      - path: ./dashboard.env
+        required: false
+    read_only: true
+    tmpfs:
+      # Each new sign-in key is written here before it moves to /app/keys, and the dashboard won't start without it
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    volumes:
+      # The sign-in keys, so a restart signs nobody out
+      - minerbot-dashboard-keys:/app/keys
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 1
+    pids_limit: 256
+    stop_grace_period: 30s
+    # The health check is the image's own: "dotnet MinerBot.Dashboard.dll healthcheck", every 2 seconds while it starts
+    # and every 30 after. deploy.sh also asks /health/ready, which checks both databases.
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+volumes:
+  minerbot-data:
+    name: minerbot-data
+  minerbot-dashboard-keys:
+    name: minerbot-dashboard-keys

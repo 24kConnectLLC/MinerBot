@@ -33,3 +33,27 @@ jobs:
         env:
           MINERBOT_DB_TESTS: required
         run: dotnet test --solution "MinerBot 2.0.sln" --no-build
+
+      - name: Check the deploy scripts
+        run: shellcheck -x -P SCRIPTDIR deploy/*.sh deploy/tests/*.sh deploy/tests/fakes/*
+
+      - name: Check the compose file
+        run: |
+          touch deploy/bot.env
+          docker compose -f deploy/compose.yml config --quiet
+
+      - name: Check the nginx file in nginx's own image
+        timeout-minutes: 5
+        run: bash deploy/tests/nginx-test.sh
+
+      - name: Check the nginx procedure with a real nginx
+        timeout-minutes: 5
+        run: bash deploy/tests/nginx-procedure-test.sh
+
+      - name: Check the database rights procedure against MariaDB 11.4
+        timeout-minutes: 5
+        run: bash deploy/tests/rights-test.sh
+
+      - name: Check the scripts' logic with stand-in commands
+        timeout-minutes: 10
+        run: bash deploy/tests/scripts-test.sh

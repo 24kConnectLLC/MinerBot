@@ -13,10 +13,12 @@ namespace MinerBot.Dashboard.Settings
         {
             services.AddOptions<DashboardOptions>().BindConfiguration(DashboardOptions.Section).ValidateOnStart();
             services.AddOptions<DiscordSignInOptions>().BindConfiguration(DiscordSignInOptions.Section).ValidateOnStart();
+            services.AddOptions<CloudflareAccessOptions>().BindConfiguration(CloudflareAccessOptions.Section).ValidateOnStart();
             services.PostConfigure<DashboardOptions>(DashboardOptionsValidator.Normalize);
 
             services.TryAddEnumerable(ServiceDescriptor.Singleton<IValidateOptions<DashboardOptions>, DashboardOptionsValidator>());
             services.TryAddEnumerable(ServiceDescriptor.Singleton<IValidateOptions<DiscordSignInOptions>, DiscordSignInOptionsValidator>());
+            services.TryAddEnumerable(ServiceDescriptor.Singleton<IValidateOptions<CloudflareAccessOptions>, CloudflareAccessOptionsValidator>());
 
             services.TryAddSingleton(TimeProvider.System);
             return services;

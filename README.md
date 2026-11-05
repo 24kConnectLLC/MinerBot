@@ -240,6 +240,8 @@ The dashboard reads environment variables and checks them all as it starts. A mi
 | `Discord__ClientId` | `{MinerBot Dashboard Client ID}` |
 | `Discord__ClientSecret` | `{MinerBot Dashboard Client Secret}` |
 | `Discord__AuthorizationEndpoint`, `Discord__TokenEndpoint`, `Discord__RevocationEndpoint`, `Discord__UserInformationEndpoint` | Optional: Discord's own unless set, and https only |
+| `CloudflareAccess__TeamDomain` | Optional: `{Team Name}.cloudflareaccess.com`, the Cloudflare Access team's host name and nothing else. With it and the AUD tag, `/admin` also needs the signed token Access adds to each request it let through, checked against the team's keys. |
+| `CloudflareAccess__Audience` | Optional: the Access application's AUD tag, 64 characters of `0-9` and `a-f`. Set both or neither: with both empty the check is off. |
 | `ConnectionStrings__DefaultConnection` | The website's database, in the format above |
 | `ConnectionStrings__BotConnection` | MinerBot's own database, in the format above |
 
@@ -279,10 +281,11 @@ The tests cover sign-in with a fake Discord instead.
 
 ### Commands
 
-The same program runs the deploy's two jobs, without starting the web app:
+The same program runs the deploy's three jobs, without starting the web app:
 
 - `dotnet MinerBot.Dashboard.dll migrate` brings MinerBot's own database up to date, using only `ConnectionStrings__BotConnection`, and exits 0 or 1.
 - `dotnet MinerBot.Dashboard.dll healthcheck` asks the running dashboard's `/health/live` on its own address and exits 0 or 1. The image uses it as its health check, because it has no curl.
+- `dotnet MinerBot.Dashboard.dll check-settings` checks the settings the way a start would, then exits: 0 with "The dashboard's settings are fine.", or 1 with one line for each problem, naming the setting but never its value. Nothing listens and nothing connects, so the deploy and the setup run it before they change anything.
 
 ### In Docker
 
@@ -294,6 +297,10 @@ docker run -d --name minerbot-dashboard --network host --read-only --tmpfs /tmp 
 ```
 
 The image runs as its non-root user, listens on nothing but `127.0.0.1:5080`, and writes only to `/app/keys` and `/tmp`. Keep `--tmpfs /tmp` with `--read-only`: each new sign-in key is written to `/tmp` first, and the dashboard won't start without somewhere to write it. Its log warns "No XML encryptor configured" when it makes its first key, which is expected on Linux: keep the volume readable by the container's user only.
+
+### Hosting
+
+On the server, the bot and the dashboard run with Docker Compose, behind nginx and Cloudflare, and scripts build, deploy, roll back and back them up. [`deploy/README.md`](deploy/README.md) has the files and where each one goes, every script's use, the first setup, the rules for settings and database rights, backups, and the tests.
 
 ---
 
@@ -358,7 +365,7 @@ dotnet test --solution "MinerBot 2.0.sln"
 
 The database tests start MariaDB 11.4 in Docker, so the first run downloads it. Without Docker they're skipped, with the reason. Set `MINERBOT_DB_TESTS=required`, as CI does, to make that a failure.
 
-The dashboard's tests start their own MariaDB the same way, and run the whole app in process with a fake Discord, so nothing they do reaches discord.com.
+The dashboard's tests start their own MariaDB the same way, and run the whole app in process with a fake Discord and a fake Cloudflare Access, so nothing they do reaches discord.com or Cloudflare. `DataAccessLibrary.Tests` also applies `deploy/dashboard-rights.sql` to a login of its own, and checks that the dashboard can do everything it does today and nothing else.
 
 ---
 

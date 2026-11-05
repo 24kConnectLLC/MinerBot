@@ -11,10 +11,14 @@ namespace MinerBot.Dashboard.Hosting
     // The two jobs the deploy and the container run with the same program: "migrate" brings MinerBot's own database up to
     // date, and "healthcheck" asks the running dashboard whether it answers, because the runtime image has no curl. Neither
     // starts the web host, so neither needs the web settings or tries to take the port the dashboard holds.
+    // "check-settings" is the third command, but Program.cs runs it, because it needs the web host's registrations.
     internal static class DashboardCommands
     {
         public const string Migrate = "migrate";
         public const string HealthCheck = "healthcheck";
+
+        // Builds the web host and checks its settings as a start would, then exits without starting it
+        public const string CheckSettings = "check-settings";
 
         static readonly TimeSpan ConnectLimit = TimeSpan.FromSeconds(2);
         static readonly TimeSpan HealthLimit = TimeSpan.FromSeconds(5);

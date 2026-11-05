@@ -1,0 +1,11 @@
+# This server's own names, which never go into the repository. bootstrap.sh writes /opt/minerbot/server.conf (600) from
+# the two connection strings in bot.env. The scripts read it line by line as text and never run it, so only NAME=value
+# lines count, and a value needs no quotes.
+
+# The website's database, which holds the armor, blacklist and Discord server tables: 1 to 64 letters, digits and _
+SITE_DB={The website's database, which holds the armor, blacklist and Discord server tables}
+# MinerBot's own database, which the migrations create tables in
+BOT_DB={MinerBot's own database}
+# The line in the bot's log that says it reached Discord, as grep -E takes it. After a bot swap, deploy.sh waits for it,
+# until the bot's image has a health check of its own.
+BOT_READY_PATTERN=Gateway +Ready

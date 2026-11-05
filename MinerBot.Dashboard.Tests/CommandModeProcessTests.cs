@@ -5,12 +5,13 @@ using MinerBot.Dashboard.Tests.Support;
 namespace MinerBot.Dashboard.Tests
 {
     // The built program, run as the container runs it, with only the settings each test gives it. The inherited
-    // dashboard, Discord, connection string and ASP.NET Core settings are removed, so nothing of the test's machine counts.
+    // dashboard, Discord, Cloudflare Access, connection string and ASP.NET Core settings are removed, so nothing of the
+    // test's machine counts.
     public class CommandModeProcessTests
     {
         static readonly TimeSpan Limit = TimeSpan.FromSeconds(30);
 
-        static readonly string[] Inherited = ["Dashboard__", "Discord__", "ConnectionStrings__", "ASPNETCORE_"];
+        static readonly string[] Inherited = ["Dashboard__", "Discord__", "CloudflareAccess__", "ConnectionStrings__", "ASPNETCORE_"];
 
         internal sealed record Run(int ExitCode, string Output, string Errors);
 
@@ -120,7 +121,8 @@ namespace MinerBot.Dashboard.Tests
             }
         }
 
-        static Dictionary<string, string> GoodSettings(string keys) => new()
+        // Every setting the dashboard needs, made up, with a port and databases nothing listens on
+        internal static Dictionary<string, string> GoodSettings(string keys) => new()
         {
             ["Dashboard__PublicOrigin"] = DashboardFactory.PublicOrigin,
             ["Dashboard__ProxyKey"] = "made-up-proxy-key-for-the-process-test-0123456789abcdef",

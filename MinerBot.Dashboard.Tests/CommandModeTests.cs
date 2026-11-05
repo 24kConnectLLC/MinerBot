@@ -28,6 +28,8 @@ namespace MinerBot.Dashboard.Tests
         [InlineData(new[] { "--contentRoot=x", "healthcheck" }, null)]
         [InlineData(new[] { "migrate-now" }, null)]
         [InlineData(new string[0], null)]
+        // Program.cs runs this one itself, with the web host's registrations
+        [InlineData(new[] { "check-settings" }, null)]
         public void FindTakesOnlyTheFirstWord(string[] args, string? command)
         {
             Assert.Equal(command, DashboardCommands.Find(args));

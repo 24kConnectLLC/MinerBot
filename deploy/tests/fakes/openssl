@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# A thin wrapper around the real openssl, for scripts-test.sh: it records the call and passes it on. Only s_client is
+# answered here: nginx on this server "serves" the certificate it had at its last reload, /fake/nginx/served-cert.pem,
+# which the stand-in restartsrv_nginx writes.
+# shellcheck source=record.sh
+source /usr/local/lib/mbtest/record.sh
+record openssl "$@"
+
+if [ "${1:-}" = s_client ]; then
+    if [ ! -f "$fake/nginx/served-cert.pem" ]; then
+        echo "connect:errno=111 (made up: nginx serves no certificate for that name)" >&2
+        exit 1
+    fi
+    echo "CONNECTED(00000003)"
+    cat "$fake/nginx/served-cert.pem"
+    echo "DONE"
+    exit 0
+fi
+exec /usr/bin/openssl "$@"

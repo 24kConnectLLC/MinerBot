@@ -1,0 +1,36 @@
+# MinerBot on the VPS. deploy.sh builds the image from GitHub; this file says how it runs.
+name: minerbot
+
+services:
+  bot:
+    image: minerbot-bot:${BOT_TAG:-current}
+    build:
+      context: ./src
+      dockerfile: MinerBot 2.0/Dockerfile
+      # The server lists only IPv6 DNS servers, which Docker's build network can't reach
+      network: host
+    container_name: minerbot-bot
+    # The server's own network, so the CSF firewall doesn't need Docker rules and the
+    # database is reached on 127.0.0.1 without leaving the server
+    network_mode: host
+    restart: unless-stopped
+    env_file: ./bot.env
+    volumes:
+      # The Steam sign-in token lives here and survives rebuilds
+      - minerbot-data:/app/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 1g
+    pids_limit: 512
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+volumes:
+  minerbot-data:
+    name: minerbot-data

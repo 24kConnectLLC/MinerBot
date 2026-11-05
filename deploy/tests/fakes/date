@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# A stand-in for date, for scripts-test.sh: time can pass faster than it does. Once /fake/clock/offset holds a number of
+# seconds, date +%s, the form time_left uses, is that much later. Every other form is the real date. The stand-in docker
+# writes the offset when FAKE_CLOCK_JUMP_AT_BOT_UP asks it to. It records nothing.
+
+if [ $# -eq 1 ] && [ "$1" = +%s ] && [ -f /fake/clock/offset ]; then
+    offset=0
+    read -r offset < /fake/clock/offset || true
+    echo $(($(/usr/bin/date +%s) + offset))
+    exit 0
+fi
+exec /usr/bin/date "$@"

@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# A stand-in for df, for scripts-test.sh, so the checks of free space don't depend on the machine's disk. It answers the
+# form the scripts use, df --output=avail -k <path>: 100 GiB, or what FAKE_DF says for /srv or /, as in "/srv=1048576",
+# in KiB. Anything else goes to the real df. It isn't one of the calls that need a time limit, so it records nothing.
+
+if [ $# -eq 3 ] && [ "$1" = --output=avail ] && [ "$2" = -k ]; then
+    mount=/
+    case $3 in
+        /srv | /srv/*) mount=/srv ;;
+    esac
+    kib=104857600
+    for pair in ${FAKE_DF:-}; do
+        if [ "${pair%%=*}" = "$mount" ]; then
+            kib=${pair#*=}
+        fi
+    done
+    printf '%s\n' "  Avail" "$kib"
+    exit 0
+fi
+exec /usr/bin/df "$@"
