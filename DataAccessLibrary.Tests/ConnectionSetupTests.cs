@@ -6,6 +6,7 @@ using DataAccessLibrary.Blacklist;
 using DataAccessLibrary.Dashboard;
 using DataAccessLibrary.Dashboard.Models;
 using DataAccessLibrary.Discord;
+using DataAccessLibrary.Health;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -34,7 +35,8 @@ namespace DataAccessLibrary.Tests
                 .AddArmorSubmissionAccess()
                 .AddArmorReviewAccess()
                 .AddAuditLogAccess()
-                .AddDashboardSessionAccess();
+                .AddDashboardSessionAccess()
+                .AddDatabaseHealthAccess();
 
             if (factory != null)
                 services.AddSingleton(factory);
@@ -73,6 +75,7 @@ namespace DataAccessLibrary.Tests
             var reviews = provider.GetRequiredService<IArmorReviewData>();
             var audit = provider.GetRequiredService<IAuditLogData>();
             var sessions = provider.GetRequiredService<IDashboardSessionData>();
+            Assert.IsType<DatabaseHealthData>(provider.GetRequiredService<IDatabaseHealthData>());
 
             var calls = new Func<Task>[]
             {

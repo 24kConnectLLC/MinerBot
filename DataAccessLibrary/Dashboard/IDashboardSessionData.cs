@@ -5,7 +5,7 @@ namespace DataAccessLibrary.Dashboard
     public interface IDashboardSessionData
     {
         Task CreateSession(string key, DashboardSession session, DataTransaction? transaction = null);
-        Task<int> DeleteExpiredSessions(DateTime expiredBefore);
+        Task<int> DeleteExpiredSessions(DateTime expiredBefore, DateTime unusedBefore);
         Task<int> DeleteOldestSessions(ulong userId, int keep, DataTransaction? transaction = null);
         Task<int> DeleteOtherSessions(ulong userId, string keepKey, DataTransaction? transaction = null);
         Task<bool> DeleteSession(string key, DataTransaction? transaction = null);

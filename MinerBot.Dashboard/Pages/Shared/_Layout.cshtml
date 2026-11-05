@@ -1,0 +1,49 @@
+@*
+    One layout for every page. No scripts and no inline styles, because the Content-Security-Policy allows only the
+    dashboard's own files, and the stylesheet follows the device's light or dark setting.
+*@
+@{
+    var user = SignedInUser.From(User);
+    var role = RoleClaims.RoleOf(User);
+}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>@ViewData["Title"] - MinerBot dashboard</title>
+    <link rel="stylesheet" href="~/css/site.css" asp-append-version="true" />
+</head>
+<body>
+    <a class="skip-link" href="#main">Skip to the content</a>
+    <header class="site-header">
+        <div class="column header-row">
+            <a class="site-name" href="/">MinerBot dashboard</a>
+            @if (user != null && role != DashboardRole.None)
+            {
+                <nav aria-label="Dashboard">
+                    <a href="/admin">Overview</a>
+                </nav>
+                <p class="signed-in">Signed in as @user.Name (@role.Name())</p>
+                <form method="post" asp-page="/SignOut" class="sign-out">
+                    <button type="submit" class="button">Sign out</button>
+                </form>
+            }
+            else
+            {
+                @* A link, not a form: browsers apply the form-action policy to the redirect after a form, and Discord isn't 'self' *@
+                <a class="button" href="/signin?returnUrl=%2Fadmin">Sign in with Discord</a>
+            }
+        </div>
+    </header>
+    <main id="main" class="column">
+        @RenderBody()
+    </main>
+    <footer class="site-footer">
+        <div class="column">
+            <p><a href="https://murderminershub.com/discord-bot/">About MinerBot on murderminershub.com</a></p>
+        </div>
+    </footer>
+</body>
+</html>

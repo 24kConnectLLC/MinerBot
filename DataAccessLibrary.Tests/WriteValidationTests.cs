@@ -180,7 +180,8 @@ namespace DataAccessLibrary.Tests
 
             await RefusedAsync(() => sessions.CreateSession(SessionKey, new DashboardSession { user_name = "Test User", ticket = [1], expires_at = DateTime.Now }));
             await RefusedAsync(() => sessions.GetSession(SessionKey, DateTime.Now));
-            await RefusedAsync(() => sessions.DeleteExpiredSessions(DateTime.Now));
+            await RefusedAsync(() => sessions.DeleteExpiredSessions(DateTime.Now, DateTime.UtcNow));
+            await RefusedAsync(() => sessions.DeleteExpiredSessions(DateTime.UtcNow, DateTime.Now));
         }
 
         [Fact]
