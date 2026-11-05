@@ -1,0 +1,8 @@
+@page
+@model SignInModel
+@{
+    ViewData["Title"] = "Sign in";
+}
+@* Never shown: a GET always goes on to Discord, or straight back for someone already signed in *@
+<h1>Sign in</h1>
+<p><a class="button" href="/signin?returnUrl=%2Fadmin">Sign in with Discord</a></p>

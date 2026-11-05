@@ -6,6 +6,7 @@ using DataAccessLibrary.Blacklist;
 using DataAccessLibrary.Dashboard;
 using DataAccessLibrary.Dashboard.Models;
 using DataAccessLibrary.Discord;
+using DataAccessLibrary.Health;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -23,6 +24,21 @@ namespace DataAccessLibrary.Tests
         static IConfiguration Settings(params (string Key, string Value)[] settings) =>
             new ConfigurationBuilder().AddInMemoryCollection(settings.Select(setting => KeyValuePair.Create<string, string?>(setting.Key, setting.Value))).Build();
 
+        // What the dashboard's start-up check reports for a connection string, in words that never quote it
+        [Theory]
+        [InlineData(Site, null)]
+        [InlineData("Server=127.0.0.1;Initial Catalog=site_db;Uid=user", null)]
+        [InlineData("Server=127.0.0.1;Uid=user;Pwd=password", "names no database")]
+        [InlineData("", "names no database")]
+        [InlineData("Server=127.0.0.1;Database=site_db;SslMode=Requird", "can't be read")]
+        [InlineData("Server=127.0.0.1;Database=site_db;Port=port", "can't be read")]
+        [InlineData("Server=127.0.0.1;Database=site_db;Colour=blue", "can't be read")]
+        [InlineData("Server=127.0.0.1;Database=site\\db", "names a database that MariaDB or MySql.Data can't use")]
+        public void ProblemSaysWhatStopsAConnectionString(string connectionString, string? problem)
+        {
+            Assert.Equal(problem, DatabaseNames.Problem(connectionString));
+        }
+
         // Every registration, the way the dashboard will make them
         static ServiceProvider Provider(IConfiguration settings, ISQLConnectionFactory? factory = null)
         {
@@ -34,7 +50,8 @@ namespace DataAccessLibrary.Tests
                 .AddArmorSubmissionAccess()
                 .AddArmorReviewAccess()
                 .AddAuditLogAccess()
-                .AddDashboardSessionAccess();
+                .AddDashboardSessionAccess()
+                .AddDatabaseHealthAccess();
 
             if (factory != null)
                 services.AddSingleton(factory);
@@ -73,6 +90,7 @@ namespace DataAccessLibrary.Tests
             var reviews = provider.GetRequiredService<IArmorReviewData>();
             var audit = provider.GetRequiredService<IAuditLogData>();
             var sessions = provider.GetRequiredService<IDashboardSessionData>();
+            Assert.IsType<DatabaseHealthData>(provider.GetRequiredService<IDatabaseHealthData>());
 
             var calls = new Func<Task>[]
             {

@@ -36,6 +36,36 @@ namespace DataAccessLibrary
             return QuoteIdentifier(databaseName);
         }
 
+        // What stops a connection string from being used, for the dashboard's start-up check: null when nothing does,
+        // otherwise the reason in a few words. The reason never quotes the string, which holds a password, and neither
+        // does the driver's own message, which is why that isn't passed on.
+        public static string? Problem(string? connectionString)
+        {
+            string databaseName;
+
+            try
+            {
+                databaseName = new MySqlConnectionStringBuilder(connectionString ?? "").Database;
+            }
+            catch (Exception e) when (e is ArgumentException or FormatException or InvalidCastException or OverflowException)
+            {
+                return "can't be read";
+            }
+
+            if (string.IsNullOrEmpty(databaseName))
+                return "names no database";
+
+            try
+            {
+                QuoteIdentifier(databaseName);
+                return null;
+            }
+            catch (ArgumentException)
+            {
+                return "names a database that MariaDB or MySql.Data can't use";
+            }
+        }
+
         // In backticks, with any backtick inside doubled, so the name can't end the quoting early. MariaDB allows a
         // backslash in a name, but MySql.Data's own reading of the SQL takes it as an escape inside the backticks, runs the
         // name on past them and then misses every parameter after it, so a name with one is refused too.

@@ -23,12 +23,12 @@ namespace DataAccessLibrary.Tests
         // Like the dashboard's: 256 random bits written as base64url
         static string NewKey() => Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
-        static DashboardSession Session(ulong userId = 1000000000000000001, DateTime? expiresAt = null, byte[]? ticket = null) => new()
+        static DashboardSession Session(ulong userId = 1000000000000000001, DateTime? expiresAt = null, byte[]? ticket = null, DateTime? lastSeenAt = null) => new()
         {
             user_id = userId,
             user_name = "Test Admin",
             created_at = Noon,
-            last_seen_at = Noon,
+            last_seen_at = lastSeenAt ?? Noon,
             expires_at = expiresAt ?? Noon.AddHours(12),
             ip = "203.0.113.7",
             user_agent = "Test Browser/1.0",
@@ -291,10 +291,30 @@ namespace DataAccessLibrary.Tests
             await sessions.CreateSession(at, Session(expiresAt: Noon));
             await sessions.CreateSession(after, Session(expiresAt: Noon.AddMilliseconds(1)));
 
-            Assert.Equal(1, await sessions.DeleteExpiredSessions(Noon));
+            // Every row was last used at noon, so the second cutoff, an hour earlier, takes none of them
+            Assert.Equal(1, await sessions.DeleteExpiredSessions(Noon, Noon.AddHours(-1)));
 
             var left = await db.RootQueryAsync<DateTime>($"SELECT expires_at FROM {MariaDbFixture.SessionTable} ORDER BY expires_at");
             Assert.Equal([Noon, Noon.AddMilliseconds(1)], left);
+        }
+
+        // A session the dashboard would refuse for being unused goes too, whatever its end
+        [Fact]
+        public async Task DeleteExpiredAlsoTakesSessionsUnusedBeforeTheCutoff()
+        {
+            var db = await StartAsync();
+            var sessions = db.Sessions();
+            var cutoff = Noon.AddMinutes(-30);
+            var (before, at, after) = (NewKey(), NewKey(), NewKey());
+
+            await sessions.CreateSession(before, Session(lastSeenAt: cutoff.AddMilliseconds(-1)));
+            await sessions.CreateSession(at, Session(lastSeenAt: cutoff));
+            await sessions.CreateSession(after, Session(lastSeenAt: cutoff.AddMilliseconds(1)));
+
+            Assert.Equal(1, await sessions.DeleteExpiredSessions(Noon, cutoff));
+
+            var left = await db.RootQueryAsync<DateTime>($"SELECT last_seen_at FROM {MariaDbFixture.SessionTable} ORDER BY last_seen_at");
+            Assert.Equal([cutoff, cutoff.AddMilliseconds(1)], left);
         }
 
         // The browser sends the user agent, so it can be any length, and strict mode would fail the sign-in over it

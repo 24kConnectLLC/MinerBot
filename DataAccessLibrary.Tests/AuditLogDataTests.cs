@@ -151,6 +151,33 @@ namespace DataAccessLibrary.Tests
             Assert.All(new[] { first, second, last }, page => Assert.Equal(5, page.Total));
         }
 
+        // A refused sign-in by someone on none of the dashboard's lists is kept with the visitor role. Fails if Visitor is
+        // left out of IsKnown, which would refuse the row and with it the refusal's record.
+        [Fact]
+        public async Task VisitorRefusalIsKept()
+        {
+            var db = await StartAsync();
+            var audit = db.Audit();
+
+            await audit.AddAudit(new AuditEntry
+            {
+                at = Noon,
+                actor_id = 1000000000000000099,
+                actor_name = "Test Visitor",
+                actor_role = AuditRole.Visitor,
+                action = "auth.refused",
+                outcome = AuditOutcome.Refused,
+                target_type = "session",
+                detail = "Not on the dashboard's lists"
+            });
+
+            var entry = Assert.Single((await audit.ListAudit(new AuditQuery { Action = "auth.refused" })).Rows);
+            Assert.Equal(AuditRole.Visitor, entry.actor_role);
+            Assert.Equal(AuditOutcome.Refused, entry.outcome);
+            Assert.Equal(1000000000000000099UL, entry.actor_id);
+            Assert.Contains(AuditRole.Visitor, AuditRole.All);
+        }
+
         // Text that's only for reading is cut to fit rather than failing the change it travels with
         [Fact]
         public async Task LongTextIsClipped()

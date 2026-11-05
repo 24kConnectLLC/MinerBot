@@ -4,6 +4,7 @@ using DataAccessLibrary.Audit;
 using DataAccessLibrary.Blacklist;
 using DataAccessLibrary.Dashboard;
 using DataAccessLibrary.Discord;
+using DataAccessLibrary.Health;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -73,6 +74,12 @@ namespace DataAccessLibrary
         public static IServiceCollection AddDashboardSessionAccess(this IServiceCollection services)
         {
             services.AddTransient<IDashboardSessionData, DashboardSessionData>();
+            return services;
+        }
+
+        public static IServiceCollection AddDatabaseHealthAccess(this IServiceCollection services)
+        {
+            services.AddTransient<IDatabaseHealthData, DatabaseHealthData>();
             return services;
         }
     }

@@ -129,15 +129,17 @@ namespace DataAccessLibrary.Dashboard
             return SaveDataCount(sql, new { userId, keep }, transaction);
         }
 
-        // Sessions that ended strictly before the time given
-        public Task<int> DeleteExpiredSessions(DateTime expiredBefore)
+        // Sessions that ended strictly before the first time given, or that were last used strictly before the second. The
+        // dashboard refuses a session unused for too long, and this takes its row, with its address and browser, soon after.
+        public Task<int> DeleteExpiredSessions(DateTime expiredBefore, DateTime unusedBefore)
         {
             RequireUtc(expiredBefore, nameof(expiredBefore));
+            RequireUtc(unusedBefore, nameof(unusedBefore));
 
             string sql = $@"DELETE FROM {_names.Bot}.dashboard_sessions
-                            WHERE expires_at < @expiredBefore";
+                            WHERE expires_at < @expiredBefore OR last_seen_at < @unusedBefore";
 
-            return SaveDataCount(sql, new { expiredBefore });
+            return SaveDataCount(sql, new { expiredBefore, unusedBefore });
         }
 
         // On MinerBot's own connection, so a session change and its audit row commit together. The database is named

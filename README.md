@@ -218,6 +218,85 @@ The bot exits when it hits a failure it can't recover from, and `--restart unles
 
 ---
 
+## 🖥️ Web dashboard
+
+`MinerBot.Dashboard` is a web app at https://bot.murderminershub.com for the people who run MinerBot. You sign in with Discord, and only the accounts on its lists, with Discord two-factor turned on, get in. For now its overview shows who is signed in; the bot's status, servers and armor review come in later updates.
+
+Sign-in uses a Discord application of its own, MinerBot Dashboard, with the `identify` scope only, and the dashboard revokes the Discord token as soon as it has read who signed in. Sessions are kept in MinerBot's own database and end after 30 minutes unused, or 12 hours at most.
+
+### Settings
+
+The dashboard reads environment variables and checks them all as it starts. A missing or wrong one stops it with a plain message that names the setting. It reads them only then, so after changing one, such as the lists, create the container again: `docker restart` keeps the old values. `dashboard.env.example` has the same list with comments. The values below are placeholders:
+
+| Variable | What it is |
+|---|---|
+| `Dashboard__PublicOrigin` | `https://bot.murderminershub.com`, the address people open. Discord's sign-in comes back to `/signin-discord` there. |
+| `Dashboard__ProxyKey` | `{Proxy Key}`: 64 random hex characters that nginx adds to every request as `X-MinerBot-Proxy-Key`. Without it, the dashboard answers 404. Only letters, digits, `-` and `_` are allowed, because nginx's configuration reads other characters as variables or escapes. |
+| `Dashboard__Owners` | `{Owner's Discord User ID}` |
+| `Dashboard__Admins` | `{Admins' Discord User IDs, separated by commas}` (optional) |
+| `Dashboard__KeysFolder` | `{Keys Folder}`, where the sign-in keys are kept so a restart signs nobody out. The image sets `/app/keys`. |
+| `Dashboard__ListenAddress` | `127.0.0.1` unless set. Only a loopback address is allowed. |
+| `Dashboard__Port` | `5080` unless set |
+| `Discord__ClientId` | `{MinerBot Dashboard Client ID}` |
+| `Discord__ClientSecret` | `{MinerBot Dashboard Client Secret}` |
+| `Discord__AuthorizationEndpoint`, `Discord__TokenEndpoint`, `Discord__RevocationEndpoint`, `Discord__UserInformationEndpoint` | Optional: Discord's own unless set, and https only |
+| `ConnectionStrings__DefaultConnection` | The website's database, in the format above |
+| `ConnectionStrings__BotConnection` | MinerBot's own database, in the format above |
+
+> ⚠️ Never set `ASPNETCORE_FORWARDEDHEADERS_ENABLED`, `AllowedHosts` or `Kestrel__Endpoints__...` for the dashboard. It trusts forwarded headers only from nginx on the same server, answers only its own host name and `localhost`, and listens only where `Dashboard__ListenAddress` and `Dashboard__Port` say. It sets all three in code, so none of them can be loosened from outside.
+
+### Run it locally
+
+With made-up settings, and without a database for anything but signed-in pages:
+
+```bash
+export Dashboard__PublicOrigin=http://localhost:5080
+export Dashboard__ProxyKey=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+export Dashboard__Owners=1000000000000000001
+export Dashboard__KeysFolder="$HOME/minerbot-dashboard-keys"
+export Discord__ClientId=1000000000000000009
+export Discord__ClientSecret=made-up-secret
+export ConnectionStrings__DefaultConnection="SERVER=127.0.0.1;PORT=3306;DATABASE={Website Database Name};UID={User ID};PASSWORD={Password};CharSet=utf8mb4;"
+export ConnectionStrings__BotConnection="SERVER=127.0.0.1;PORT=3306;DATABASE={MinerBot Database Name};UID={User ID};PASSWORD={Password};CharSet=utf8mb4;"
+dotnet run --project MinerBot.Dashboard
+```
+
+Then, from another terminal:
+
+```bash
+curl -H 'Host: localhost' http://127.0.0.1:5080/health/live
+curl -H 'Host: localhost' -H 'X-Forwarded-Proto: https' -H 'X-MinerBot-Proxy-Key: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' http://127.0.0.1:5080/
+curl -i -H 'Host: localhost' http://127.0.0.1:5080/
+```
+
+The first answers `Healthy`, the second shows the home page, and the third, without the key, gets 404. Plain http is enough for those, but not for signing in: the session and form cookies only travel over https, and every signed-in page has a form. To sign in for real on your own machine:
+
+- put a proxy in front that serves https and adds `X-MinerBot-Proxy-Key` and `X-Forwarded-Proto: https` to each request;
+- set `Dashboard__PublicOrigin` to the proxy's https address. The dashboard sends HSTS, so give it a name of its own, such as `https://dashboard.localhost:8443`, rather than plain `localhost`, or your browser will insist on https for every site on localhost for a year;
+- register `<that address>/signin-discord` as the redirect of a Discord application of your own.
+
+The tests cover sign-in with a fake Discord instead.
+
+### Commands
+
+The same program runs the deploy's two jobs, without starting the web app:
+
+- `dotnet MinerBot.Dashboard.dll migrate` brings MinerBot's own database up to date, using only `ConnectionStrings__BotConnection`, and exits 0 or 1.
+- `dotnet MinerBot.Dashboard.dll healthcheck` asks the running dashboard's `/health/live` on its own address and exits 0 or 1. The image uses it as its health check, because it has no curl.
+
+### In Docker
+
+Build from the repository root, and keep the keys on a named volume:
+
+```bash
+docker build -f MinerBot.Dashboard/Dockerfile -t minerbot-dashboard .
+docker run -d --name minerbot-dashboard --network host --read-only --tmpfs /tmp --env-file dashboard.env -v minerbot-dashboard-keys:/app/keys minerbot-dashboard
+```
+
+The image runs as its non-root user, listens on nothing but `127.0.0.1:5080`, and writes only to `/app/keys` and `/tmp`. Keep `--tmpfs /tmp` with `--read-only`: each new sign-in key is written to `/tmp` first, and the dashboard won't start without somewhere to write it. Its log warns "No XML encryptor configured" when it makes its first key, which is expected on Linux: keep the volume readable by the container's user only.
+
+---
+
 ## 🔑 Steam Sign-In
 
 MinerBot signs in to Steam with a saved token in `data/Auth/SteamToken.txt` and renews it every day.
@@ -266,8 +345,9 @@ Contributions are welcome!
 - `MinerBot 2.0`: the bot.
 - `DataAccessLibrary`: all of the SQL, for the website's tables and for MinerBot's own database, with the migrations that create MinerBot's tables.
 - `SteamWebAPIAccess`: Steam sign-in, lobbies and the Steam Web API.
-- `MinerBot.Shared`: rules and formats that the bot and the coming dashboard share, such as the armor approval rules, SteamID formats and Discord's limits. It references nothing outside .NET.
-- `MinerBot.Tests`, `SteamWebAPIAccess.Tests`, `DataAccessLibrary.Tests` and `MinerBot.Shared.Tests`: the tests.
+- `MinerBot.Shared`: rules and formats that the bot and the dashboard share, such as the armor approval rules, SteamID formats and Discord's limits. It references nothing outside .NET.
+- `MinerBot.Dashboard`: the web dashboard. It references `DataAccessLibrary` and `MinerBot.Shared`, and nothing of the bot's or of Steam's.
+- `MinerBot.Tests`, `SteamWebAPIAccess.Tests`, `DataAccessLibrary.Tests`, `MinerBot.Shared.Tests` and `MinerBot.Dashboard.Tests`: the tests.
 - `docs/schema/wordpress-tables.sql`: the structure of the three website tables MinerBot uses.
 
 ### Tests
@@ -277,6 +357,8 @@ dotnet test --solution "MinerBot 2.0.sln"
 ```
 
 The database tests start MariaDB 11.4 in Docker, so the first run downloads it. Without Docker they're skipped, with the reason. Set `MINERBOT_DB_TESTS=required`, as CI does, to make that a failure.
+
+The dashboard's tests start their own MariaDB the same way, and run the whole app in process with a fake Discord, so nothing they do reaches discord.com.
 
 ---
 

@@ -1,0 +1,17 @@
+@page
+@model SignOutModel
+@{
+    ViewData["Title"] = "Sign out";
+}
+<h1>Sign out</h1>
+@if (Model.SignedIn)
+{
+    <p>Signing out ends this session. If you're signed in on another device, that stays signed in.</p>
+    <form method="post" asp-page="/SignOut">
+        <button type="submit" class="button">Sign out</button>
+    </form>
+}
+else
+{
+    <p>You're not signed in.</p>
+}

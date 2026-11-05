@@ -27,6 +27,8 @@
   <ItemGroup>
     <InternalsVisibleTo Include="MinerBot.Tests" />
     <InternalsVisibleTo Include="DataAccessLibrary.Tests" />
+    <!-- For the database fixture the dashboard's tests share with DataAccessLibrary.Tests -->
+    <InternalsVisibleTo Include="MinerBot.Dashboard.Tests" />
   </ItemGroup>
 
 </Project>

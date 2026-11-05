@@ -1,0 +1,17 @@
+@page
+@model IndexModel
+@{
+    ViewData["Title"] = "Home";
+}
+<h1>MinerBot</h1>
+<p>MinerBot is a Discord bot for Murder Miners. It answers armor lookups, and posts new armor, maps and lobbies in the servers that set it up.</p>
+<p>This dashboard is for the people who run MinerBot.</p>
+@if (Model.SignedIn)
+{
+    <p><a class="button" href="/admin">Open the overview</a></p>
+}
+else
+{
+    <p><a class="button" href="/signin?returnUrl=%2Fadmin">Sign in with Discord</a></p>
+    <p>Only accounts on the dashboard's list, with Discord two-factor turned on, can sign in.</p>
+}

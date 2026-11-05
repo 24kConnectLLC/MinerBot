@@ -19,6 +19,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MinerBot.Shared.Tests", "Mi
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DataAccessLibrary.Tests", "DataAccessLibrary.Tests\DataAccessLibrary.Tests.csproj", "{D5DAB4B2-5E1A-4C25-A592-0F2C5AFBEF6C}"
 EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "MinerBot.Dashboard", "MinerBot.Dashboard\MinerBot.Dashboard.csproj", "{EA639359-F51D-4247-B907-EDB8E51C6BDF}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MinerBot.Dashboard.Tests", "MinerBot.Dashboard.Tests\MinerBot.Dashboard.Tests.csproj", "{3D232310-6CAA-4B38-A83A-963149A78751}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -57,6 +61,14 @@ Global
 		{D5DAB4B2-5E1A-4C25-A592-0F2C5AFBEF6C}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{D5DAB4B2-5E1A-4C25-A592-0F2C5AFBEF6C}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{D5DAB4B2-5E1A-4C25-A592-0F2C5AFBEF6C}.Release|Any CPU.Build.0 = Release|Any CPU
+		{EA639359-F51D-4247-B907-EDB8E51C6BDF}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{EA639359-F51D-4247-B907-EDB8E51C6BDF}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{EA639359-F51D-4247-B907-EDB8E51C6BDF}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{EA639359-F51D-4247-B907-EDB8E51C6BDF}.Release|Any CPU.Build.0 = Release|Any CPU
+		{3D232310-6CAA-4B38-A83A-963149A78751}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3D232310-6CAA-4B38-A83A-963149A78751}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3D232310-6CAA-4B38-A83A-963149A78751}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3D232310-6CAA-4B38-A83A-963149A78751}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
