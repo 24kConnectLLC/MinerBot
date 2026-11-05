@@ -6,7 +6,8 @@ namespace DataAccessLibrary.Discord
     {
         public GuildData(ISQLConnectionFactory connectionFactory) : base(connectionFactory, DBConnectionName.Guild)
         {
-            
+            // The bot's own queries keep the connection string exactly as configured
+            SendsUtf8mb4 = false;
         }
 
         public Task<IEnumerable<Guild>> GetAllGuilds()

@@ -35,21 +35,3 @@ public enum HelmentType
     Tester,
     Zombie
 }
-
-enum ColorChoices
-{
-    Helmet,
-    Visor,
-    Torso,
-    Shoulders,
-    Biceps,
-    Forearms,
-    Hands,
-    Pelvis,
-    Thighs,
-    Legs,
-    Boots,
-    Shields,
-    Other,
-    NUM_CHOICES
-}

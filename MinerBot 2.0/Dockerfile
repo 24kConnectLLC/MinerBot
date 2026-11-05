@@ -13,6 +13,7 @@ ARG BUILD_CONFIGURATION=Release
 WORKDIR /src
 COPY ["MinerBot 2.0/MinerBot 2.0.csproj", "MinerBot 2.0/"]
 COPY ["DataAccessLibrary/DataAccessLibrary.csproj", "DataAccessLibrary/"]
+COPY ["MinerBot.Shared/MinerBot.Shared.csproj", "MinerBot.Shared/"]
 COPY ["SteamWebAPIAccess/SteamWebAPIAccess.csproj", "SteamWebAPIAccess/"]
 RUN dotnet restore "./MinerBot 2.0/MinerBot 2.0.csproj"
 COPY . .

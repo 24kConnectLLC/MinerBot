@@ -8,7 +8,8 @@ namespace DataAccessLibrary.Blacklist.Models
 {
     public class BlacklistModel
     {
-        public ulong steam_id { get; set; }
+        // The account number, the n in [U:1:n], which is what the website's table holds
+        public uint steam_id { get; set; }
         public string username { get; set; }
         public string reason { get; set; }
         public DateTime? expire_date { get; set; }

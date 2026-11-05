@@ -12,7 +12,7 @@ jobs:
   build-and-test:
     name: Build and test
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Check out the code
@@ -29,4 +29,7 @@ jobs:
         run: dotnet build "MinerBot 2.0.sln"
 
       - name: Test
+        # The database tests start MariaDB in Docker, which this runner has, so here they fail instead of skipping
+        env:
+          MINERBOT_DB_TESTS: required
         run: dotnet test --solution "MinerBot 2.0.sln" --no-build

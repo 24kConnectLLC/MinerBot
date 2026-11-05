@@ -1,6 +1,8 @@
-﻿namespace DataAccessLibrary.Armor.Models
+﻿using MinerBot.Shared.Armor;
+
+namespace DataAccessLibrary.Armor.Models
 {
-    public class ArmorStyle
+    public class ArmorStyle : IArmorColors
     {
         public int ID { get; set; }
         public DateTime CreatedAt { get; set; }

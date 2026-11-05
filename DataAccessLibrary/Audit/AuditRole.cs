@@ -1,0 +1,17 @@
+namespace DataAccessLibrary.Audit
+{
+    // Who made a change: someone on the dashboard's lists, a server's own admin, a slash command, or the bot itself
+    public static class AuditRole
+    {
+        public const string Owner = "owner";
+        public const string Admin = "admin";
+        public const string ServerAdmin = "server_admin";
+        public const string SlashCommand = "slash_command";
+        public const string Bot = "bot";
+        public const string System = "system";
+
+        public static IReadOnlyList<string> All { get; } = [Owner, Admin, ServerAdmin, SlashCommand, Bot, System];
+
+        public static bool IsKnown(string? role) => role is Owner or Admin or ServerAdmin or SlashCommand or Bot or System;
+    }
+}

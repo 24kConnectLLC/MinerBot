@@ -9,6 +9,9 @@ namespace DataAccessLibrary.Armor
         public ArmorData(ISQLConnectionFactory connectionFactory, IMemoryCache cache) : base(connectionFactory, DBConnectionName.Armor)
         {
             _memoryCache = cache;
+
+            // The bot's own queries keep the connection string exactly as configured
+            SendsUtf8mb4 = false;
         }
 
         public Task<IEnumerable<ArmorStyle>> GetAllArmor()

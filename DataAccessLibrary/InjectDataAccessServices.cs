@@ -1,6 +1,8 @@
 ﻿using Dapper;
 using DataAccessLibrary.Armor;
+using DataAccessLibrary.Audit;
 using DataAccessLibrary.Blacklist;
+using DataAccessLibrary.Dashboard;
 using DataAccessLibrary.Discord;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -15,10 +17,13 @@ namespace DataAccessLibrary
             {
                 { DBConnectionName.Armor,  configuration.GetConnectionString("DefaultConnection")},
                 { DBConnectionName.Blacklist, configuration.GetConnectionString("DefaultConnection") },
-                { DBConnectionName.Guild, configuration.GetConnectionString("DefaultConnection") }
+                { DBConnectionName.Guild, configuration.GetConnectionString("DefaultConnection") },
+                // MinerBot's own database. Nothing in the bot reads it yet, so it may be missing, and only a call that needs it fails.
+                { DBConnectionName.Bot, configuration.GetConnectionString("BotConnection") ?? "" }
             };
 
             services.AddSingleton<IDictionary<DBConnectionName, string>>(connectionDict);
+            services.AddSingleton<DatabaseNames>();
 
             SqlMapper.Settings.CommandTimeout = 60;
 
@@ -44,6 +49,30 @@ namespace DataAccessLibrary
         public static IServiceCollection AddGuildAccess(this IServiceCollection services)
         {
             services.AddTransient<IGuildData, GuildData>();
+            return services;
+        }
+
+        public static IServiceCollection AddArmorSubmissionAccess(this IServiceCollection services)
+        {
+            services.AddTransient<IArmorSubmissionData, ArmorSubmissionData>();
+            return services;
+        }
+
+        public static IServiceCollection AddArmorReviewAccess(this IServiceCollection services)
+        {
+            services.AddTransient<IArmorReviewData, ArmorReviewData>();
+            return services;
+        }
+
+        public static IServiceCollection AddAuditLogAccess(this IServiceCollection services)
+        {
+            services.AddTransient<IAuditLogData, AuditLogData>();
+            return services;
+        }
+
+        public static IServiceCollection AddDashboardSessionAccess(this IServiceCollection services)
+        {
+            services.AddTransient<IDashboardSessionData, DashboardSessionData>();
             return services;
         }
     }

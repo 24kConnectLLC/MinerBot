@@ -14,7 +14,19 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\MinerBot.Shared\MinerBot.Shared.csproj" />
+  </ItemGroup>
+
+  <!-- The migrations for MinerBot's own database: every file in the folder but the code, so one named the wrong way is
+       refused by name rather than left out. The name is set, so MSBuild can't change one that starts with digits. -->
+  <ItemGroup>
+    <None Remove="Migrations\*" />
+    <EmbeddedResource Include="Migrations\*" Exclude="Migrations\*.cs" LogicalName="Migrations/%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup>
     <InternalsVisibleTo Include="MinerBot.Tests" />
+    <InternalsVisibleTo Include="DataAccessLibrary.Tests" />
   </ItemGroup>
 
 </Project>
