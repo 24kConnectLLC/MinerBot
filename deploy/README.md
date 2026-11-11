@@ -496,9 +496,10 @@ account can make a file in the socket's folder.
   without its query string, the status, the size, the time taken, the dashboard's status and Cloudflare's ray ID: no
   referer, user agent or cookies. `/var/log/nginx/minerbot-dashboard.error.log` (level `warn`) gets a line when nginx
   can't reach the dashboard or a request goes wrong, with the visitor's address, the whole request line, query string
-  included, and the referrer. Discord's callback, whose query string holds the sign-in's code, logs only critical
-  errors. cPanel's logrotate rule for `/var/log/nginx/*.log` rotates both daily and keeps 21, but skips a day without
-  lines, so a quiet log keeps its lines longer than 21 days, the error log for months.
+  included, and the referrer. Discord's callback, whose query string holds the sign-in's code, logs only emergencies,
+  since nginx logs a missing socket, or one it can't open, as critical, with the request line. cPanel's logrotate rule
+  for `/var/log/nginx/*.log` rotates both daily and keeps 21, but skips a day without lines, so a quiet log keeps its
+  lines longer than 21 days, the error log for months.
 
 ## The database rights
 

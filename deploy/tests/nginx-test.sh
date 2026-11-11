@@ -472,7 +472,7 @@ dashboard_down() {
 
 # What a dashboard killed outright leaves: its socket file, with nothing listening on it
 socket_left_behind() {
-    local out answer
+    local out answer errors
     out=$(inside "mv /run/minerbot-dashboard/left-behind.sock $socket" 2>&1) \
         || problem "couldn't put the left-behind socket in the dashboard's place" "$out"
     answer=$(from_cloudflare 'https://bot.murderminershub.com/admin?q=REFUSEDQUERY')
@@ -481,6 +481,19 @@ socket_left_behind() {
     expect "The MinerBot dashboard is restarting or stopped" "$answer" "a socket nothing listens on"
     expect "connect() to unix:$socket failed (111: Connection refused)" "$(error_log)" \
         "the error log, for a socket nothing listens on"
+    from_cloudflare 'https://bot.murderminershub.com/signin-discord?code=REFUSEDCODE&state=REFUSEDSTATE' > /dev/null
+    refuse "REFUSEDCODE" "$(error_log)" "the error log, for Discord's callback to a socket nothing listens on"
+    # A socket nginx's workers can't open, as a wrong mode or group leaves it: nginx logs that as critical, with the
+    # request line, and Discord's callback still leaves nothing
+    out=$(inside "chmod 600 $socket" 2>&1) || problem "couldn't close the socket to nginx's workers" "$out"
+    answer=$(from_cloudflare 'https://bot.murderminershub.com/admin?q=DENIEDQUERY')
+    expect "HTTP/1.1 503" "$answer" "a socket nginx's workers can't open"
+    from_cloudflare 'https://bot.murderminershub.com/signin-discord?code=DENIEDCODE&state=DENIEDSTATE' > /dev/null
+    errors=$(error_log)
+    expect "connect() to unix:$socket failed (13: Permission denied)" "$errors" \
+        "the error log, for a socket nginx's workers can't open"
+    expect "DENIEDQUERY" "$errors" "the error log for another address, with a socket nginx's workers can't open"
+    refuse "DENIEDCODE" "$errors" "the error log, for Discord's callback with a socket nginx's workers can't open"
     out=$(inside "rm -f $socket" 2>&1) || problem "couldn't remove the left-behind socket" "$out"
 }
 
@@ -745,7 +758,7 @@ verdict "a dashboard slower than proxy_read_timeout gets the same plain 503 as a
 dashboard_down || true
 verdict "with the dashboard's socket missing: a plain 503 with Retry-After; Discord's callback, in any letter case, leaves nothing in the error log, which still logs other addresses, near misses included"
 socket_left_behind || true
-verdict "with a socket nothing listens on, as a dashboard killed outright leaves it: the same plain 503"
+verdict "with a socket nothing listens on, as a dashboard killed outright leaves it, or one nginx's workers can't open: the same plain 503, and Discord's callback still leaves nothing in the error log"
 port_5080_left_alone || true
 verdict "with the dashboard down, a process on 127.0.0.1:5080, where it used to listen, gets nothing, and the visitor gets the 503"
 key_file_optional || true
