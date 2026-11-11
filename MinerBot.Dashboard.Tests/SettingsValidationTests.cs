@@ -440,6 +440,7 @@ namespace MinerBot.Dashboard.Tests
             var extended = @"\\?\" + path;
 
             Assert.True(UnixSockets.IsSocket(extended), "A socket on an extended path didn't count as one");
+            Assert.True(UnixSockets.IsSocket(@"\\?\GLOBALROOT\??\" + path), @"A socket named through \\?\GLOBALROOT\??\ didn't count as one");
             Assert.False(UnixSockets.IsSocket(sockets.PathOf("dashboard.so?k")), "A ? in the file's name found the socket");
             Assert.False(UnixSockets.IsSocket(@"\\?\" + sockets.PathOf("dashboard.so?k")), "A ? in the file's name found the socket");
             Assert.False(UnixSockets.IsSocket(sockets.PathOf(@"dashboard.so?k\.")), "A ? that Windows moves into the last part found the socket");

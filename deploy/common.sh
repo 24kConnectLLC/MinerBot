@@ -540,7 +540,7 @@ socket_problem() {
 # up to 64 bytes, answers Healthy, which proves both databases with its own login and rights. Then, when the public home
 # page answered 200 before the swap, it must answer 200 again within 30 seconds. A container on another image fails at
 # once: Compose has returned, so nothing changes it any more.
-ready_dashboard() {   # ready_dashboard [<public status before the swap>] [<restart count it starts from, 0 by default>] [<image ID it must run>]
+ready_dashboard() {   # ready_dashboard [<public status before the swap>] [<restart count it starts from, 0 by default, or first: its first look's>] [<image ID it must run>]
     local public_before=${1:-} base=${2:-0} expected=${3:-} limit=90 public_limit=30 poll=2 started=$SECONDS
     local state image running restarts health said why
     if test_fast; then
@@ -553,6 +553,9 @@ ready_dashboard() {   # ready_dashboard [<public status before the swap>] [<rest
             "$dashboard_container" 2> /dev/null) || state=
         image='' running='' restarts='' health=''
         read -r -t 5 image running restarts health <<< "$state" || true
+        if [ "$base" = first ] && [[ $restarts =~ ^[0-9]+$ ]]; then
+            base=$restarts
+        fi
         if [ -z "$state" ]; then
             why="its container doesn't exist"
         elif [ -n "$expected" ] && [ "$image" != "$expected" ]; then

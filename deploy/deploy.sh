@@ -332,7 +332,7 @@ swap() {   # swap bot|dashboard
     echo "Putting the $service back on $(revision "$before")."
     start_service "$service" || true
     # :previous goes back only now: Compose's way back needs only :current, so Docker not answering about :previous
-    # stops the deploy with the service already put back, never on the new image
+    # can't stop the deploy before Compose has tried to put the service back
     if [ -n "$prev" ]; then
         tag_id "$prev" "$image:previous"
     else

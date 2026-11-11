@@ -2992,6 +2992,7 @@ case_54() {
 
     # A rotation whose stop call fails stops, and starts the dashboard again, after 2 restarts from before the run, while
     # Docker doesn't answer the look at its restart count: that's no count of 0, so the earlier restarts never read as new
+    # ones, and the readiness check counts from its own first look
     restore deployed
     awk '{ $3 = 2; print }' /fake/docker/ctr/minerbot-dashboard > /tmp/mbtest-ctr && mv /tmp/mbtest-ctr /fake/docker/ctr/minerbot-dashboard
     trap 'if [ -e /usr/local/bin/docker.mbtest-54 ]; then mv -f /usr/local/bin/docker.mbtest-54 /usr/local/bin/docker; fi' EXIT
@@ -3008,7 +3009,9 @@ EOF
         in_home restarts-unknown 120 env FAKE_STOP=fail ./setup-dashboard.sh --no-questions --yes --rotate-proxy-key
         mv -f /usr/local/bin/docker.mbtest-54 /usr/local/bin/docker
         expect_exit 1 "the stopped rotation while Docker doesn't answer about the dashboard's restarts"
-        expect_said "Docker didn't answer about the dashboard's container (above), so whether it got ready again can't be told." \
+        expect_said "Docker didn't answer about the dashboard's restart count (above), so the readiness check counts restarts from its own first look." \
+            "the stopped rotation while Docker doesn't answer about the dashboard's restarts"
+        expect_said "The dashboard runs again on its old settings." \
             "the stopped rotation while Docker doesn't answer about the dashboard's restarts"
         ! said "its container restarted" \
             || problem "a restart from before the run counted as a new one, after Docker didn't answer about the count" "$(excerpt)"
@@ -3358,8 +3361,8 @@ case_59() {
     expect_exit 0 "the run after both reloads failed"
     expect_said "An nginx change was cut off earlier. Its files are back as they were before it, and nginx reloaded." "the run after both reloads failed"
 
-    # Docker doesn't answer the look at the container before a recreate that Compose would report done while the old
-    # container runs on: with nothing to compare, it isn't recreated or counted, and the run says why
+    # Docker doesn't answer the look at the container before a recreate: the recreate still runs, and counts only for a
+    # container started since. One Compose reports done while the old container runs on still isn't counted...
     restore deployed
     made_with
     cid=$(ctr_id)
@@ -3376,12 +3379,24 @@ exec /usr/local/bin/docker.mbtest-59 "$@"
 EOF
         chmod 755 /usr/local/bin/docker
         in_home kept-unanswered 120 env FAKE_UP_KEEP=dashboard ./setup-dashboard.sh --no-questions --yes --rotate-db-password
+        expect_exit 1 "the kept container, after a look before the recreate Docker didn't answer"
+        expect_said "so the recreate counts only a container started since" \
+            "the kept container, after a look before the recreate Docker didn't answer"
+        expect_said "The dashboard isn't ready: Compose didn't make it a new container" \
+            "the kept container, after a look before the recreate Docker didn't answer"
+        ! said "Done." || problem "the rotation whose old container ran on after a missed look said it was done" "$(excerpt)"
+        # ...while a recreate Compose does make is counted, so the rotation finishes
+        restore deployed
+        made_with
+        cid=$(ctr_id)
+        rm -f /fake/docker/mbtest-59-once
+        in_home recreated-unanswered 120 ./setup-dashboard.sh --no-questions --yes --rotate-db-password
         mv -f /usr/local/bin/docker.mbtest-59 /usr/local/bin/docker
-        expect_exit 1 "the rotation whose look before the recreate Docker didn't answer"
-        expect_said "Docker didn't answer about the dashboard's container (above), so it wasn't recreated" \
-            "the rotation whose look before the recreate Docker didn't answer"
-        ! said "Done." || problem "the rotation whose look before the recreate Docker didn't answer said it was done" "$(excerpt)"
-        [ "$(ctr_id)" = "$cid" ] || problem "the dashboard got a new container, though its recreate couldn't be checked"
+        expect_exit 0 "the recreate after a look before it Docker didn't answer"
+        expect_said "so the recreate counts only a container started since" \
+            "the recreate after a look before it Docker didn't answer"
+        expect_said "Done." "the recreate after a look before it Docker didn't answer"
+        [ "$(ctr_id)" != "$cid" ] || problem "the recreate after a missed look didn't make a new container"
     else
         problem "the test couldn't set the stand-in docker aside"
     fi

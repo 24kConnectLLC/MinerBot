@@ -110,9 +110,9 @@ namespace MinerBot.Dashboard.Hosting
         const uint UnixSocketTag = 0x80000023;     // IO_REPARSE_TAG_AF_UNIX
         const nint NothingFound = -1;              // INVALID_HANDLE_VALUE
 
-        // FindFirstFileW takes these as wildcards in the path's last part, once Windows has taken out . and .., so they
-        // could find another file, and it stops at a NUL anywhere. No file's or folder's name holds any of them, so they're
-        // refused anywhere after the path's root, whose \\?\ holds the only ? a path to a socket can have.
+        // FindFirstFileW takes these as wildcards in the path's last part once Windows has normalized the path, as
+        // Path.GetFullPath does (. and .. taken out, / made \, a \\?\ path left as it is), so they could find another
+        // file, and it stops at a NUL anywhere. No socket's name holds any of them.
         const string Wildcards = "*?<>\"";
 
         [DllImport("kernel32", EntryPoint = "FindFirstFileW", CharSet = CharSet.Unicode, ExactSpelling = true)]
@@ -147,7 +147,21 @@ namespace MinerBot.Dashboard.Hosting
 
             if (OperatingSystem.IsWindows())
             {
-                if (path.Contains('\0') || path.AsSpan(Path.GetPathRoot(path.AsSpan()).Length).IndexOfAny(Wildcards) >= 0)
+                if (path.Length == 0 || path.Contains('\0'))
+                    return false;
+
+                string full;
+
+                try
+                {
+                    full = Path.GetFullPath(path);
+                }
+                catch (Exception e) when (e is ArgumentException or NotSupportedException or PathTooLongException or IOException)
+                {
+                    return false;
+                }
+
+                if (Path.GetFileName(full.AsSpan()).IndexOfAny(Wildcards) >= 0)
                     return false;
 
                 var answer = new byte[FindAnswerBytes];

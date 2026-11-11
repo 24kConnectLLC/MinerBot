@@ -774,8 +774,8 @@ password_to_env() {
 start_again() {
     local base out status=0
     start_service dashboard || return 1
-    # Looked at the way restart_count does in deploy.sh, but returning 1: this runs where set -e is off, in before_stop
-    # and in an if, so a die would only end the $( ). Docker not answering is never a count of 0.
+    # Looked at the way restart_count does in deploy.sh. Docker not answering is never a count of 0, which would make
+    # restarts from before this run look like new ones: the readiness check then counts from its own first look.
     out=$(run_for 30 docker container inspect -f '{{.RestartCount}}' "$dashboard_container" 2>&1) || status=$?
     if [ "$status" = 0 ] && [[ $out =~ ^[0-9]+$ ]]; then
         base=$out
@@ -783,8 +783,8 @@ start_again() {
         base=0
     else
         printf '%s\n' "$out"
-        echo "Docker didn't answer about the dashboard's container (above), so whether it got ready again can't be told."
-        return 1
+        echo "Docker didn't answer about the dashboard's restart count (above), so the readiness check counts restarts from its own first look."
+        base=first
     fi
     ready_dashboard "" "$base" || return 1
     note_ready dashboard
@@ -811,15 +811,25 @@ dashboard_id() {
 # ready all the same. Once the dashboard is ready, the compose.yml it runs under is kept as the one it was last ready
 # under (note_ready), which a failed deploy swap puts back.
 recreate_dashboard() {
-    local before after
+    local before after since started
+    since=$(date -u +%Y-%m-%dT%H:%M:%S)
+    # Without the ID from before, as when Docker didn't answer that look, the recreate still runs, and the container
+    # counts as new only when it started since then
     if ! before=$(dashboard_id); then
-        echo "Docker didn't answer about the dashboard's container (above), so it wasn't recreated: a recreate couldn't be told from none."
-        return 1
+        before=unknown
+        echo "Docker didn't answer about the dashboard's container (above), so the recreate counts only a container started since $since."
     fi
     start_service dashboard --force-recreate || return 1
     if ! after=$(dashboard_id); then
         echo "Docker didn't answer about the dashboard's container (above), so whether Compose recreated it can't be told."
         return 1
+    fi
+    if [ "$before" = unknown ] && [ -n "$after" ]; then
+        started=$(run_for 30 docker container inspect -f '{{.State.StartedAt}}' "$dashboard_container" 2> /dev/null) \
+            || started=
+        if ! [[ ${started:0:19} =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$ ]] || [[ ${started:0:19} < $since ]]; then
+            after=$before
+        fi
     fi
     if [ -z "$after" ] || [ "$after" = "$before" ]; then
         echo "The dashboard isn't ready: Compose didn't make it a new container, so it doesn't run on dashboard.env as it is now."
