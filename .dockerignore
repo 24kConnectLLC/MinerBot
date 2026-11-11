@@ -32,9 +32,11 @@
 **/SteamToken.txt
 **/SteamToken.txt.*
 **/values.dev.yaml
+.github
 LICENSE
 MinerBot 2.0/data
 README.md
+deploy
 !**/.gitignore
 !.git/HEAD
 !.git/config

@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# A thin wrapper around the real git, for scripts-test.sh: it records the call and passes it on. git's own calls to
+# itself aren't recorded.
+# shellcheck source=record.sh
+source /usr/local/lib/mbtest/record.sh
+parent=''
+{ read -r parent < "/proc/$PPID/comm"; } 2> /dev/null || true
+case $parent in
+    git | git-*) ;;
+    *) record git "$@" ;;
+esac
+exec /usr/bin/git "$@"

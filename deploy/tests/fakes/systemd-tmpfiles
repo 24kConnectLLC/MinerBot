@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# A thin wrapper around the real systemd-tmpfiles, for scripts-test.sh: it records the call and passes it on, so the
+# folder deploy/minerbot-dashboard.tmpfiles describes is made for real, with its mode, owner and group.
+# FAKE_TMPFILES=fail makes it fail instead, as when the folder can't be made.
+# shellcheck source=record.sh
+source /usr/local/lib/mbtest/record.sh
+record systemd-tmpfiles "$@"
+if [ "${FAKE_TMPFILES:-}" = fail ]; then
+    echo "Failed to create directory or subvolume \"/run/minerbot-dashboard\": Read-only file system (made up)" >&2
+    exit 1
+fi
+exec /usr/bin/systemd-tmpfiles "$@"

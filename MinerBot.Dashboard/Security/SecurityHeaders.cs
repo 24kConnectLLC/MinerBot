@@ -15,6 +15,8 @@ namespace MinerBot.Dashboard.Security
             $"img-src 'self' https://cdn.discordapp.com {string.Join(' ', ArmorRules.ScreenshotHosts.Select(host => "https://" + host))}; " +
             "connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'";
 
+        internal const string NoTransform = "no-transform";
+
         // Every response gets exactly these
         internal static readonly IReadOnlyDictionary<string, string> Fixed = new Dictionary<string, string>
         {
@@ -47,8 +49,15 @@ namespace MinerBot.Dashboard.Security
 
             // Nothing dynamic is stored anywhere. A Cache-Control that's already set is kept: the exception handler's and the
             // cookie handler's say no-store too, and the stylesheet's may be cached because its links carry a version.
-            if (StringValues.IsNullOrEmpty(headers.CacheControl))
-                headers.CacheControl = "no-store";
+            // Every response also gets no-transform, which Cloudflare's documentation says makes it leave a response
+            // uncompressed. The pages hold secrets next to text visitors control, which is why Program.cs leaves
+            // compression out, and nginx has gzip off for the same reason.
+            var cacheControl = headers.CacheControl;
+
+            if (StringValues.IsNullOrEmpty(cacheControl))
+                headers.CacheControl = "no-store, " + NoTransform;
+            else if (!HasDirective(cacheControl, NoTransform))
+                headers.CacheControl = string.Join(", ", cacheControl.Where(value => !string.IsNullOrWhiteSpace(value))) + ", " + NoTransform;
 
             // Kestrel's own Server header is off at the source, and these are only in case anything else sets them
             headers.Remove(HeaderNames.Server);
@@ -56,5 +65,9 @@ namespace MinerBot.Dashboard.Security
 
             return Task.CompletedTask;
         }
+
+        // Whether a Cache-Control, in one header or several, already has the directive
+        static bool HasDirective(StringValues cacheControl, string directive) =>
+            cacheControl.Any(value => value != null && value.Split(',').Any(part => part.Trim().Equals(directive, StringComparison.OrdinalIgnoreCase)));
     }
 }

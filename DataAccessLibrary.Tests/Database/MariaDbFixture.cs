@@ -178,6 +178,9 @@ namespace DataAccessLibrary.Tests.Database
         // Without CharSet, MySql.Data uses the server's default character set, which is latin1 here and on the live server
         public string LoginConnectionWithoutCharacterSet(string database) => Connection(TestLogin, testPassword, database, utf8mb4: false);
 
+        // Another login's connection, with utf8mb4, such as the dashboard's in DashboardRightsTests
+        public string ConnectionAs(string user, string password, string database) => Connection(user, password, database);
+
         async Task StartAsync()
         {
             // Made up for this run, so no password is written down anywhere

@@ -28,5 +28,11 @@ namespace MinerBot.Dashboard.Settings
         // Text, like the rest, so a value that isn't a number is reported with the other problems instead of failing as
         // the section is read. Empty means the default.
         public string Port { get; set; } = "";
+
+        // A Unix socket to listen on instead of ListenAddress and Port, such as /run/minerbot-dashboard/dashboard.sock. On
+        // the server compose.yml sets it, in a folder only the dashboard can write to and only processes in the group nobody
+        // can open, nginx's workers and cPanel's Apache among them, so no other account can take the dashboard's place while
+        // it restarts, as one could with a TCP port. Empty keeps the TCP address.
+        public string UnixSocket { get; set; } = "";
     }
 }

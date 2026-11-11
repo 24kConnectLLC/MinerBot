@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# A stand-in for systemctl, for scripts-test.sh: is-active answers from the process the stand-in systemd-run started
+# for the unit. "active" while it runs, "inactive" (exit code 3) once it has ended.
+# shellcheck source=record.sh
+source /usr/local/lib/mbtest/record.sh
+record systemctl "$@"
+
+unit_alive() {   # unit_alive <unit>
+    local pid='' stat=''
+    { read -r pid < "$fake/units/$1.pid"; } 2> /dev/null || return 1
+    { read -r stat < "/proc/$pid/stat"; } 2> /dev/null || return 1
+    stat=${stat##*) }
+    [ "${stat:0:1}" != Z ] && grep -q mbtest-runner "/proc/$pid/cmdline" 2> /dev/null
+}
+
+case ${1:-} in
+    is-active | status)
+        if unit_alive "${2%.service}"; then
+            echo active
+            exit 0
+        fi
+        echo inactive
+        exit 3
+        ;;
+    *)
+        echo "The stand-in systemctl only knows is-active and status." >&2
+        exit 1
+        ;;
+esac

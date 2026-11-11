@@ -1,0 +1,562 @@
+#!/usr/bin/env bash
+# A stand-in for docker, for scripts-test.sh. Images, tags and containers are files in /fake/docker:
+#   tags/<name>@<tag>  the image ID the tag points at
+#   ids/<image ID>     every image built or known, holding its revision label. An image stays here after its last tag
+#                      moves, as Docker keeps a dangling image until a prune.
+#   ctr/<name>         a container: image ID, running, restart count, start time, health, PID, container ID, config hash
+#   env/<name>         the environment the dashboard's container was made with, the KEY=VALUE lines of dashboard.env at
+#                      that moment, which docker container inspect's {{range .Config.Env}} prints. A container without
+#                      one, such as the made-up states', prints its env file's lines as they are now.
+# A build of the same commit gives the same image ID, as Docker's cache does. It answers only the calls the scripts make,
+# and anything else fails loudly. These variables change what it does:
+#   FAKE_BUILD           hang (the build hangs until its timeout fires), slow (it blocks for 30 seconds), fail-<service>
+#   FAKE_UNREADY         bot@<rev> or dashboard@<rev>, space-separated, <rev> being 12 characters of the revision label:
+#                        a container on that image never gets ready (no ready line in the bot's log; the dashboard's
+#                        health stays "starting")
+#   FAKE_MIGRATE         fail, or hang (the container is left behind, as a killed run leaves it)
+#   FAKE_CHECK_SETTINGS  fail
+#   FAKE_INFO_HOOK       a script that runs on the FAKE_INFO_HOOK_CALL-th call of docker info (the 2nd by default)
+#   FAKE_DRY_RUN_TODAY, FAKE_DRY_RUN_NEW   recreate or odd: what up --dry-run says about the bot with today's compose
+#                        file (old/compose.yml) or the new one (a bootstrap's staged copy); otherwise the bot stays Running.
+#                        fail: the dry run fails as when Docker doesn't answer; hang: it hangs until its timeout fires
+#   FAKE_DRY_RUN_DELAY   seconds every up --dry-run waits before it answers
+#   FAKE_HASH_NEW        the hash config --hash bot prints for the new compose file (a bootstrap's staged copy); every
+#                        other file, and the new one without it, gives the same hash
+#   FAKE_BOT_RESTARTS_AT n: the bot's container gets a new start time just before the n-th container inspect of it
+#   FAKE_DOCKER_DOWN     1: every call fails as when Docker's daemon doesn't answer; image-inspect or container-inspect:
+#                        only those calls fail so
+#   FAKE_CLOCK_JUMP_AT_BOT_UP   seconds the stand-in date adds to the clock when the bot's container is created
+#   FAKE_COMPOSE_CONFIG  the exit code of compose config --quiet (0 by default)
+#   FAKE_UP_FAIL         bot, dashboard or both: Compose's up of that service fails, as when the daemon refuses to create
+#                        the new container, and leaves the container as it was
+#   FAKE_UP_KEEP         bot, dashboard or both: Compose's up of that service exits 0 but leaves the container as it was
+#   FAKE_STOP            hang: Compose's stop stops the container, then hangs until its timeout fires; fail: it fails
+#                        and leaves the container running
+#   FAKE_RESTARTS        bot@<rev> or dashboard@<rev>: a container on that image reports one restart more than it had
+#   FAKE_UNHEALTHY       dashboard@<rev>: a container on that image reports Docker's health check as unhealthy
+#   FAKE_NO_SOCKET       dashboard@<rev>: the dashboard on that image never makes its socket (record.sh's sync_socket)
+# Compose's up recreates a container, as Compose does, when the image behind :current changed or the service's section
+# of the compose file did: a container it made remembers a hash of its section, as cfg-<hash> (one from before, such as
+# the made-up states', never counts as changed). A container made from a section that has a line with mbtest-never-ready
+# in it never gets ready: its health stays "starting". config --hash <service> gives that hash of the service's section,
+# but for today's compose.yml in old/ and a bootstrap's staged copy, where the bot's hash is FAKE_HASH_NEW's or a fixed one.
+# Compose's rm, with -s or without, removes every container of the service, ctr/<12 hex>_minerbot-<service> included: the
+# replacement a recreate cut off before its rename leaves under a temporary name.
+# shellcheck source=record.sh
+source /usr/local/lib/mbtest/record.sh
+record docker "$@"
+mkdir -p "$D/tags" "$D/ids" "$D/ctr"
+if [ "${FAKE_DOCKER_DOWN:-}" = 1 ]; then
+    printf '%s\n' "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" >&2
+    exit 1
+fi
+sync_socket
+
+fail() {   # fail <message> [<exit code>]: what docker would print, and its exit code (1 by default)
+    printf '%s\n' "$1" >&2
+    exit "${2:-1}"
+}
+
+tag_file() {   # tag_file <name[:tag]>
+    local ref=$1
+    [[ $ref == *:* ]] || ref=$ref:latest
+    printf '%s/tags/%s\n' "$D" "${ref//:/@}"
+}
+
+resolve() {   # resolve <image ID or name:tag>: prints the image's ID, or fails when there's no such image
+    local ref=$1 id='' file
+    if [[ $ref == sha256:* ]]; then
+        [ -f "$D/ids/$ref" ] || return 1
+        printf '%s\n' "$ref"
+        return 0
+    fi
+    file=$(tag_file "$ref")
+    [ -f "$file" ] || return 1
+    read -r id < "$file"
+    [ -f "$D/ids/$id" ] || return 1
+    printf '%s\n' "$id"
+}
+
+label_of() {   # label_of <image ID>
+    local label=''
+    read -r label < "$D/ids/$1" || true
+    printf '%s\n' "$label"
+}
+
+in_use() {   # in_use <image ID>: true when a tag or a container still refers to it
+    local f image rest
+    grep -rqxF -- "$1" "$D/tags" 2> /dev/null && return 0
+    for f in "$D"/ctr/*; do
+        [ -f "$f" ] || continue
+        read -r image rest < "$f"
+        [ "$image" != "$1" ] || return 0
+    done
+    return 1
+}
+
+now() { date -u +%Y-%m-%dT%H:%M:%S.%NZ; }
+new_hex() { head -c 32 /dev/urandom | sha256sum | cut -c1-64; }
+
+# The KEY=VALUE lines of a container's env file, as Compose gives them to the container it makes
+env_of() {   # env_of <container name>
+    local file=/opt/minerbot/bot.env
+    if [ "$1" = minerbot-dashboard ]; then
+        file=/opt/minerbot/dashboard.env
+    fi
+    if [ -f "$file" ]; then
+        grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$file" || true
+    fi
+}
+
+fill() {   # fill <template> <container name>: the templates the scripts use with docker container inspect -f
+    local template=$1 image running restarts started health pid id hash status=exited with_none with_words label='' key
+    if [ "$template" = '{{range .Config.Env}}{{println .}}{{end}}' ]; then
+        if [ -f "$D/env/$2" ]; then
+            cat "$D/env/$2"
+        else
+            env_of "$2"
+        fi
+        return 0
+    fi
+    read -r image running restarts started health pid id hash < "$D/ctr/$2"
+    if [ "$running" = true ]; then
+        status=running
+    fi
+    if [ -f "$D/ids/$image" ]; then
+        read -r label < "$D/ids/$image" || true
+    fi
+    key=${2#minerbot-}@${label:0:12}
+    if listed "${FAKE_RESTARTS:-}" "$key"; then
+        restarts=$((restarts + 1))
+    fi
+    if listed "${FAKE_UNHEALTHY:-}" "$key"; then
+        health=unhealthy
+    fi
+    with_none=$health
+    with_words=$health
+    if [ "$health" = none ]; then
+        with_words="no health check"
+    fi
+    template=${template//'{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}'/$with_none}
+    template=${template//'{{if .State.Health}}{{.State.Health.Status}}{{else}}no health check{{end}}'/$with_words}
+    template=${template//'{{index .Config.Labels "com.docker.compose.config-hash"}}'/$hash}
+    template=${template//'{{.Image}}'/$image}
+    template=${template//'{{.State.Running}}'/$running}
+    template=${template//'{{.State.Status}}'/$status}
+    template=${template//'{{.RestartCount}}'/$restarts}
+    template=${template//'{{.State.StartedAt}}'/$started}
+    template=${template//'{{.State.Pid}}'/$pid}
+    template=${template//'{{.Id}}'/$id}
+    [[ $template != *'{{'* ]] || fail "fake docker: unknown template: $1" 9
+    printf '%s\n' "$template"
+}
+
+build() {
+    local rev='' tag='' file='' context='' service id
+    shift
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --label) rev=${2#org.opencontainers.image.revision=}; shift ;;
+            -t) tag=$2; shift ;;
+            -f) file=$2; shift ;;
+            --network | --cpu-quota | --cpu-period) shift ;;
+            --pull) ;;
+            -*) fail "fake docker build doesn't know $1" 9 ;;
+            *) context=$1 ;;
+        esac
+        shift
+    done
+    [ -f "$file" ] || fail "ERROR: failed to solve: failed to read dockerfile: open $file: no such file or directory"
+    [ -d "$context" ] || fail "ERROR: unable to prepare context: path \"$context\" not found"
+    service=${tag#minerbot-}
+    service=${service%%:*}
+    case ${FAKE_BUILD:-} in
+        hang | "hang-$service")
+            echo "#12 [build 6/9] RUN dotnet publish (a made-up build that never finishes)"
+            # What timeout's own timer does at the limit: the stand-in can't wait 20 minutes
+            if [ "$(cat "/proc/$PPID/comm" 2> /dev/null)" = timeout ]; then
+                kill -ALRM "$PPID"
+            fi
+            block 60
+            exit 1
+            ;;
+        slow | "slow-$service")
+            block 30
+            ;;
+        "fail-$service")
+            fail "ERROR: failed to solve: process \"/bin/sh -c dotnet publish\" did not complete successfully: exit code: 1"
+            ;;
+    esac
+    id=sha256:$(printf '%s %s' "$rev" "${tag%%:*}" | sha256sum | cut -c1-64)
+    printf '%s\n' "$rev" > "$D/ids/$id"
+    printf '%s\n' "$id" > "$(tag_file "$tag")"
+    echo "#15 naming to docker.io/library/$tag done"
+}
+
+run() {
+    local name='' envfile='' image='' id key highest=0 file number listing
+    local -a names=() missing=() command=()
+    shift
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --name) name=$2; shift 2 ;;
+            --env-file) envfile=$2; shift 2 ;;
+            -e) names+=("$2"); shift 2 ;;
+            --network | --tmpfs | --cap-drop | --security-opt | --memory | --pids-limit | --pull) shift 2 ;;
+            --rm | --read-only) shift ;;
+            -*) fail "fake docker run doesn't know $1" 9 ;;
+            *)
+                image=$1
+                shift
+                command=("$@")
+                break
+                ;;
+        esac
+    done
+    if [ -n "$name" ] && [ -f "$D/ctr/$name" ]; then
+        fail "docker: Error response from daemon: Conflict. The container name \"/$name\" is already in use. You have to remove (or rename) that container to be able to reuse that name." 125
+    fi
+    id=$(resolve "$image") || fail "docker: Error response from daemon: No such image: $image" 125
+    if [ -n "$name" ]; then
+        printf '%s true 0 %s none 4321 %s none\n' "$id" "$(now)" "$(new_hex)" > "$D/ctr/$name"
+    fi
+    case ${command[0]:-} in
+        migrate)
+            case ${FAKE_MIGRATE:-} in
+                hang)
+                    block 60
+                    exit 1
+                    ;;
+                fail)
+                    rm -f "$D/ctr/$name"
+                    fail "Migration 0002 didn't apply (a made-up failure). Nothing after it ran."
+                    ;;
+            esac
+            [ -n "${ConnectionStrings__BotConnection:-}" ] || fail "migrate: ConnectionStrings__BotConnection is empty" 3
+            listed "${names[*]}" ConnectionStrings__BotConnection || fail "migrate: the setting wasn't passed with -e" 3
+            for key in "${command[@]}"; do
+                [[ $key != *Pwd=* ]] || fail "migrate: the connection string is on the command line" 4
+            done
+            mkdir -p "$fake/db"
+            printf '%s' "$ConnectionStrings__BotConnection" | sha256sum | cut -c1-64 > "$fake/db/migrate-value.sha256"
+            # The migrations the image carries: those of the commit its revision label names, in GitHub's stand-in, never
+            # src's. The version never goes down, as MigrationRunner only adds.
+            read -r highest 2> /dev/null < "$fake/db/version" || highest=0
+            listing=$(/usr/bin/git -C /work/origin.git ls-tree --name-only "$(label_of "$id")" DataAccessLibrary/Migrations/ 2> /dev/null) \
+                || listing=
+            while IFS= read -r file; do
+                file=${file##*/}
+                [[ $file =~ ^[0-9]{4}_.+\.sql$ ]] || continue
+                number=$((10#${file:0:4}))
+                if [ "$number" -gt "$highest" ]; then
+                    highest=$number
+                fi
+            done <<< "$listing"
+            echo "$highest" > "$fake/db/version"
+            echo "Applied the migrations up to $highest (made up)."
+            ;;
+        check-settings)
+            if [ "${FAKE_CHECK_SETTINGS:-}" = fail ]; then
+                rm -f "$D/ctr/$name"
+                fail "The dashboard's settings aren't right: Dashboard__NewSetting is missing. (A made-up failure.)"
+            fi
+            [ -f "$envfile" ] || fail "docker: open $envfile: no such file or directory" 125
+            for key in Dashboard__PublicOrigin Dashboard__ProxyKey Dashboard__Owners Discord__ClientId Discord__ClientSecret \
+                ConnectionStrings__DefaultConnection ConnectionStrings__BotConnection; do
+                grep -q "^$key=." "$envfile" || missing+=("$key")
+            done
+            if [ ${#missing[@]} -gt 0 ]; then
+                rm -f "$D/ctr/$name"
+                fail "The dashboard's settings aren't right: ${missing[*]} missing or empty."
+            fi
+            echo "The settings are valid."
+            ;;
+        *)
+            fail "fake docker run doesn't know the command ${command[*]}" 9
+            ;;
+    esac
+    if [ -n "$name" ]; then
+        rm -f "$D/ctr/$name"
+    fi
+}
+
+logs() {
+    local name=${!#} key
+    [ -f "$D/ctr/$name" ] || fail "Error response from daemon: No such container: $name"
+    if [ "$name" = minerbot-bot ]; then
+        echo "2026-11-06 03:12:40 Discord     Connecting (made up)"
+        key=$(running_key bot)
+        if ! listed "${FAKE_UNREADY:-}" "$key"; then
+            echo "2026-11-06 03:12:41 Discord     Gateway     Ready"
+        fi
+    else
+        echo "info: Microsoft.Hosting.Lifetime[14] Now listening on: http://unix:/run/minerbot-dashboard/dashboard.sock (made up)"
+    fi
+    if [ "$2" = --tail ]; then
+        # A line the scripts must never print: the bot's log can hold a Steam sign-in code
+        echo "Steam Guard code for this sign-in: MBTEST-STEAM-CODE-7Q2X (made up)"
+    fi
+}
+
+dry_run() {   # dry_run <compose file>: what Compose plans for the bot, without changing anything
+    local mode
+    case $1 in
+        */state/tmp/bootstrap.*) mode=${FAKE_DRY_RUN_NEW:-running} ;;
+        *) mode=${FAKE_DRY_RUN_TODAY:-running} ;;
+    esac
+    [ -f "$D/ctr/minerbot-bot" ] || mode=create
+    if [ -n "${FAKE_DRY_RUN_DELAY:-}" ]; then
+        block "$FAKE_DRY_RUN_DELAY"
+    fi
+    case $mode in
+        fail)
+            echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
+            exit 1
+            ;;
+        hang)
+            # What timeout's own timer does at the limit: the stand-in can't wait a minute
+            if [ "$(cat "/proc/$PPID/comm" 2> /dev/null)" = timeout ]; then
+                kill -ALRM "$PPID"
+            fi
+            block 60
+            exit 1
+            ;;
+        running) printf ' Container minerbot-bot  Running \n' ;;
+        recreate) printf ' Container minerbot-bot  Recreate\n Container minerbot-bot  Recreated\n Container minerbot-bot  Starting\n Container minerbot-bot  Started\n' ;;
+        create) printf ' Container minerbot-bot  Creating\n Container minerbot-bot  Created\n Container minerbot-bot  Starting\n Container minerbot-bot  Started\n' ;;
+        odd) printf ' Container minerbot-bot  Unchanged\n' ;;
+    esac
+}
+
+section_of() {   # section_of <compose file> <service>: the lines of the service's section, without its comment lines
+    awk -v want="  $2:" '
+        $0 == want { on = 1; next }
+        on && (/^  [^ #]/ || /^[^ #]/) { on = 0 }
+        on && !/^[ \t]*#/ { print }' "$1"
+}
+
+section_hash() {   # section_hash <compose file> <service>: 16 hex characters of a hash of that section, or nothing
+    local text
+    text=$(section_of "$1" "$2")
+    [ -n "$text" ] || return 0
+    printf '%s\n' "$text" | sha256sum | cut -c1-16
+}
+
+# up <service> <no|yes> <compose file>: Compose's up -d --no-build --no-deps, recreating when the image behind :current
+# or the service's section changed
+up() {
+    local service=$1 force=$2 file=$3 name=minerbot-$1 id image running restarts started health pid cid hash label section
+    if listed "${FAKE_UP_FAIL:-}" "$service"; then
+        echo " Container $name  Recreate"
+        fail "Error response from daemon: range of CPUs is from 0.01 to 2.00, as there are only 2 CPUs available (made up)"
+    fi
+    section=$(section_hash "$file" "$service")
+    [ -n "$section" ] || fail "no such service: $service"
+    id=$(resolve "$name:current") || fail "Error response from daemon: No such image: $name:current"
+    if listed "${FAKE_UP_KEEP:-}" "$service" && [ -f "$D/ctr/$name" ]; then
+        echo " Container $name  Running"
+        return 0
+    fi
+    if [ -f "$D/ctr/$name" ] && [ "$force" = no ]; then
+        read -r image running restarts started health pid cid hash < "$D/ctr/$name"
+        if [ "$image" = "$id" ] && { [[ $hash != cfg-* ]] || [ "$hash" = "cfg-$section" ]; }; then
+            if [ "$running" != true ]; then
+                # Starting a stopped container sets Docker's restart count back to 0
+                printf '%s true 0 %s %s %s %s %s\n' "$image" "$(now)" "$health" "$((RANDOM + 1000))" "$cid" "$hash" \
+                    > "$D/ctr/$name"
+                echo " Container $name  Started"
+            else
+                echo " Container $name  Running"
+            fi
+            return 0
+        fi
+    fi
+    health=none
+    if [ "$service" = dashboard ]; then
+        health=healthy
+        label=$(label_of "$id")
+        if listed "${FAKE_UNREADY:-}" "dashboard@${label:0:12}"; then
+            health=starting
+        fi
+    fi
+    if section_of "$file" "$service" | grep -q mbtest-never-ready; then
+        health=starting
+    fi
+    printf '%s true 0 %s %s %s %s cfg-%s\n' "$id" "$(now)" "$health" "$((RANDOM + 1000))" "$(new_hex)" "$section" \
+        > "$D/ctr/$name"
+    if [ "$service" = dashboard ]; then
+        mkdir -p "$D/env"
+        env_of "$name" > "$D/env/$name"
+    fi
+    echo " Container $name  Recreated"
+    echo " Container $name  Started"
+    if [ "$service" = bot ] && [ -n "${FAKE_CLOCK_JUMP_AT_BOT_UP:-}" ]; then
+        mkdir -p "$fake/clock"
+        echo "$FAKE_CLOCK_JUMP_AT_BOT_UP" > "$fake/clock/offset"
+    fi
+}
+
+compose() {
+    local file=$3 service image running restarts started health pid cid hash
+    if [ "${2:-}" != -f ] || [ "${4:-}" != --project-directory ] || [ -z "${5:-}" ]; then
+        fail "fake docker compose: the scripts always give -f <file> --project-directory <folder> first" 9
+    fi
+    [ -f "$file" ] || fail "open $file: no such file or directory" 14
+    shift 5
+    service=${!#}
+    case "$*" in
+        "config --quiet")
+            exit "${FAKE_COMPOSE_CONFIG:-0}"
+            ;;
+        "config --hash bot")
+            case $file in
+                */state/tmp/bootstrap.*) echo "bot ${FAKE_HASH_NEW:-478d8a5f0c1d2e3b}" ;;
+                */old/*) echo "bot 478d8a5f0c1d2e3b" ;;
+                *)
+                    if hash=$(section_hash "$file" bot) && [ -n "$hash" ]; then
+                        echo "bot $hash"
+                    else
+                        fail "no such service: bot"
+                    fi
+                    ;;
+            esac
+            ;;
+        "config --hash dashboard")
+            if hash=$(section_hash "$file" dashboard) && [ -n "$hash" ]; then
+                echo "dashboard $hash"
+            else
+                fail "no such service: dashboard"
+            fi
+            ;;
+        "up --dry-run -d --no-build --no-deps bot")
+            dry_run "$file" >&2
+            ;;
+        "up -d --no-build --no-deps --force-recreate "*)
+            up "$service" yes "$file" >&2
+            ;;
+        "up -d --no-build --no-deps "*)
+            up "$service" no "$file" >&2
+            ;;
+        "stop "*)
+            if [ "${FAKE_STOP:-}" = fail ]; then
+                fail "Error response from daemon: cannot stop container: minerbot-$service: a made-up failure"
+            fi
+            if [ -f "$D/ctr/minerbot-$service" ]; then
+                read -r image running restarts started health pid cid hash < "$D/ctr/minerbot-$service"
+                printf '%s false %s %s %s 0 %s %s\n' "$image" "$restarts" "$started" "$health" "$cid" "$hash" \
+                    > "$D/ctr/minerbot-$service"
+            fi
+            echo " Container minerbot-$service  Stopped" >&2
+            if [ "${FAKE_STOP:-}" = hang ]; then
+                # Docker has stopped it, and Compose hangs: what timeout's own timer does at the limit
+                if [ "$(cat "/proc/$PPID/comm" 2> /dev/null)" = timeout ]; then
+                    kill -ALRM "$PPID"
+                fi
+                block 60
+                exit 1
+            fi
+            ;;
+        "rm -f "* | "rm -s -f "*)
+            # Every container of the service, as Compose finds them by their labels: a replacement it made under a
+            # temporary name, <old ID>_<name>, and never renamed, as a cut-off recreate leaves one, included
+            rm -f "$D/ctr/minerbot-$service" "$D/ctr/"*"_minerbot-$service"
+            echo " Container minerbot-$service  Removed" >&2
+            ;;
+        *)
+            fail "fake docker compose doesn't know: $*" 9
+            ;;
+    esac
+}
+
+case "$1 ${2:-}" in
+    "info "*)
+        count=$(($(cat "$D/info-count" 2> /dev/null || echo 0) + 1))
+        echo "$count" > "$D/info-count"
+        if [ -n "${FAKE_INFO_HOOK:-}" ] && [ "$count" = "${FAKE_INFO_HOOK_CALL:-2}" ]; then
+            bash "$FAKE_INFO_HOOK" >> "$fake/hooks.log" 2>&1
+        fi
+        echo "Server Version: 29.9.3 (made up)"
+        ;;
+    "build "*)
+        build "$@"
+        ;;
+    "image inspect")
+        [ "${3:-}" = -f ] || fail "fake docker image inspect: the scripts always give -f" 9
+        if [ "${FAKE_DOCKER_DOWN:-}" = image-inspect ]; then
+            fail "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
+        fi
+        id=$(resolve "${!#}") || fail "Error response from daemon: No such image: ${!#}"
+        case $4 in
+            '{{.Id}}') printf '%s\n' "$id" ;;
+            # Real Docker prints nothing after the ID for an image without the label, with labels or without
+            '{{.Id}} {{with index .Config "Labels"}}{{with index . "org.opencontainers.image.revision"}}{{.}}{{end}}{{end}}')
+                printf '%s %s\n' "$id" "$(label_of "$id")"
+                ;;
+            *) fail "fake docker: unknown template: $4" 9 ;;
+        esac
+        ;;
+    "container inspect")
+        [ "${3:-}" = -f ] || fail "fake docker container inspect: the scripts always give -f" 9
+        if [ "${FAKE_DOCKER_DOWN:-}" = container-inspect ]; then
+            fail "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
+        fi
+        [ -f "$D/ctr/${!#}" ] || fail "Error response from daemon: No such container: ${!#}"
+        if [ -n "${FAKE_BOT_RESTARTS_AT:-}" ] && [ "${!#}" = minerbot-bot ]; then
+            count=$(($(cat "$D/bot-inspect-count" 2> /dev/null || echo 0) + 1))
+            echo "$count" > "$D/bot-inspect-count"
+            if [ "$count" = "$FAKE_BOT_RESTARTS_AT" ]; then
+                read -r image running restarts started health pid cid hash < "$D/ctr/minerbot-bot"
+                printf '%s %s %s %s %s %s %s %s\n' "$image" "$running" "$restarts" "$(now)" "$health" "$((RANDOM + 1000))" \
+                    "$cid" "$hash" > "$D/ctr/minerbot-bot"
+            fi
+        fi
+        fill "$4" "${!#}"
+        ;;
+    "tag "*)
+        id=$(resolve "$2") || fail "Error response from daemon: No such image: $2"
+        printf '%s\n' "$id" > "$(tag_file "$3")"
+        ;;
+    "rmi "*)
+        file=$(tag_file "$2")
+        [ -f "$file" ] || fail "Error response from daemon: No such image: $2"
+        read -r id < "$file"
+        rm -f "$file"
+        echo "Untagged: $2"
+        if ! in_use "$id"; then
+            rm -f "$D/ids/$id"
+            echo "Deleted: $id"
+        fi
+        ;;
+    "rm -f")
+        # docker rm -f -v <name>: -v also removes the container's anonymous volumes, which the stand-in doesn't keep
+        if [ "${3:-}" != -v ] || [ $# != 4 ]; then
+            fail "fake docker: the scripts always give rm -f -v <name>" 9
+        fi
+        if [ -f "$D/ctr/$4" ]; then
+            rm -f "$D/ctr/$4"
+            echo "$4"
+        fi
+        ;;
+    "run "*)
+        run "$@"
+        ;;
+    "logs --since" | "logs --tail")
+        logs "$@"
+        ;;
+    "image prune")
+        for file in "$D"/ids/*; do
+            [ -f "$file" ] || continue
+            in_use "${file##*/}" || rm -f "$file"
+        done
+        echo "Total reclaimed space: 0B"
+        ;;
+    "builder prune")
+        echo "Total: 0B"
+        ;;
+    "compose -f")
+        compose "$@"
+        ;;
+    *)
+        fail "fake docker doesn't know: $*" 9
+        ;;
+esac

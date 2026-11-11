@@ -7,7 +7,8 @@ using MinerBot.Dashboard.Tests.Support;
 namespace MinerBot.Dashboard.Tests
 {
     // Every kind of response the dashboard gives has every header, with exactly these values, including the bare 404 of
-    // the proxy key, the rate limit's 429 and the error page of a database that's down
+    // the proxy key, the rate limit's 429 and the error page of a database that's down. Each also asks Cloudflare not to
+    // transform it, which keeps Cloudflare from compressing it.
     [Collection("Database")]
     public class SecurityHeaderTests(MariaDbFixture fixture)
     {
@@ -30,7 +31,13 @@ namespace MinerBot.Dashboard.Tests
         static IReadOnlyList<string> Values(HttpResponseMessage response, string name) =>
             response.Headers.TryGetValues(name, out var values) || response.Content.Headers.TryGetValues(name, out values) ? values.ToList() : [];
 
-        static void AssertHeaders(string what, HttpResponseMessage response, bool cacheable = false)
+        // Cache-Control's directives, in whatever order HttpClient puts them
+        static IReadOnlyList<string> Directives(HttpResponseMessage response) =>
+            Values(response, "Cache-Control").SelectMany(value => value.Split(',')).Select(directive => directive.Trim()).Where(directive => directive.Length > 0).ToList();
+
+        // Every header with its value, never stored unless it's the stylesheet, and never transformed, so Cloudflare
+        // compresses nothing. CloudflareAccessTests checks its refusals with this too.
+        internal static void AssertHeaders(string what, HttpResponseMessage response, bool cacheable = false)
         {
             foreach (var (name, value) in Expected)
                 Assert.True(Values(response, name) is [var only] && only == value, $"{what}: {name} is [{string.Join(" | ", Values(response, name))}]");
@@ -46,6 +53,8 @@ namespace MinerBot.Dashboard.Tests
             {
                 Assert.True(cacheControl.Contains("no-store", StringComparison.Ordinal), $"{what}: Cache-Control is {cacheControl}");
             }
+
+            Assert.True(Directives(response).Count(directive => directive == "no-transform") == 1, $"{what}: Cache-Control is {cacheControl}");
 
             Assert.Empty(Values(response, "Server"));
             Assert.Empty(Values(response, "X-Powered-By"));
@@ -108,6 +117,10 @@ namespace MinerBot.Dashboard.Tests
             var overview = responses.Single(response => response.What == "overview").Response;
             Assert.Contains("__RequestVerificationToken", await overview.Content.ReadAsStringAsync(Token));
             Assert.Equal(["DENY"], Values(overview, "X-Frame-Options"));
+
+            // no-transform joins a Cache-Control that's already there, and makes one with no-store where there's none
+            Assert.Equal(["no-store", "no-transform"], Directives(responses.Single(response => response.What == "home").Response).Order(StringComparer.Ordinal));
+            Assert.Equal(["max-age=604800", "no-transform", "public"], Directives(responses.Single(response => response.What == "stylesheet").Response).Order(StringComparer.Ordinal));
         }
     }
 }

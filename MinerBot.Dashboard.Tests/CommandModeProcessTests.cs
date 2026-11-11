@@ -5,16 +5,37 @@ using MinerBot.Dashboard.Tests.Support;
 namespace MinerBot.Dashboard.Tests
 {
     // The built program, run as the container runs it, with only the settings each test gives it. The inherited
-    // dashboard, Discord, connection string and ASP.NET Core settings are removed, so nothing of the test's machine counts.
+    // dashboard, Discord, Cloudflare Access, connection string and ASP.NET Core settings are removed, so nothing of the
+    // test's machine counts.
     public class CommandModeProcessTests
     {
         static readonly TimeSpan Limit = TimeSpan.FromSeconds(30);
 
-        static readonly string[] Inherited = ["Dashboard__", "Discord__", "ConnectionStrings__", "ASPNETCORE_"];
+        static readonly string[] Inherited = ["Dashboard__", "Discord__", "CloudflareAccess__", "ConnectionStrings__", "ASPNETCORE_"];
 
         internal sealed record Run(int ExitCode, string Output, string Errors);
 
         internal static async Task<Run> RunAsync(IReadOnlyDictionary<string, string> environment, params string[] args)
+        {
+            using var process = Start(environment, args);
+            var output = process.StandardOutput.ReadToEndAsync();
+            var errors = process.StandardError.ReadToEndAsync();
+
+            try
+            {
+                await process.WaitForExitAsync(TestContext.Current.CancellationToken).WaitAsync(Limit, TestContext.Current.CancellationToken);
+            }
+            finally
+            {
+                if (!process.HasExited)
+                    process.Kill(entireProcessTree: true);
+            }
+
+            return new Run(process.ExitCode, await output.WaitAsync(Limit), await errors.WaitAsync(Limit));
+        }
+
+        // The program started with only these settings, its output and errors redirected
+        internal static Process Start(IReadOnlyDictionary<string, string> environment, params string[] args)
         {
             var start = new ProcessStartInfo(Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") is { Length: > 0 } host ? host : "dotnet")
             {
@@ -36,21 +57,7 @@ namespace MinerBot.Dashboard.Tests
             foreach (var (name, value) in environment)
                 start.Environment[name] = value;
 
-            using var process = Process.Start(start)!;
-            var output = process.StandardOutput.ReadToEndAsync();
-            var errors = process.StandardError.ReadToEndAsync();
-
-            try
-            {
-                await process.WaitForExitAsync(TestContext.Current.CancellationToken).WaitAsync(Limit, TestContext.Current.CancellationToken);
-            }
-            finally
-            {
-                if (!process.HasExited)
-                    process.Kill(entireProcessTree: true);
-            }
-
-            return new Run(process.ExitCode, await output.WaitAsync(Limit), await errors.WaitAsync(Limit));
+            return Process.Start(start)!;
         }
 
         // A web host would have stopped on its settings with its plain message instead, so this shows the command ran
@@ -120,7 +127,8 @@ namespace MinerBot.Dashboard.Tests
             }
         }
 
-        static Dictionary<string, string> GoodSettings(string keys) => new()
+        // Every setting the dashboard needs, made up, with a port and databases nothing listens on
+        internal static Dictionary<string, string> GoodSettings(string keys) => new()
         {
             ["Dashboard__PublicOrigin"] = DashboardFactory.PublicOrigin,
             ["Dashboard__ProxyKey"] = "made-up-proxy-key-for-the-process-test-0123456789abcdef",

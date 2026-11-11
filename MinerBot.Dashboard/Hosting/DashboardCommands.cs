@@ -10,11 +10,15 @@ namespace MinerBot.Dashboard.Hosting
 {
     // The two jobs the deploy and the container run with the same program: "migrate" brings MinerBot's own database up to
     // date, and "healthcheck" asks the running dashboard whether it answers, because the runtime image has no curl. Neither
-    // starts the web host, so neither needs the web settings or tries to take the port the dashboard holds.
+    // starts the web host, so neither needs the web settings or tries to take the port or socket the dashboard holds.
+    // "check-settings" is the third command, but Program.cs runs it, because it needs the web host's registrations.
     internal static class DashboardCommands
     {
         public const string Migrate = "migrate";
         public const string HealthCheck = "healthcheck";
+
+        // Builds the web host and checks its settings as a start would, then exits without starting it
+        public const string CheckSettings = "check-settings";
 
         static readonly TimeSpan ConnectLimit = TimeSpan.FromSeconds(2);
         static readonly TimeSpan HealthLimit = TimeSpan.FromSeconds(5);
@@ -73,11 +77,20 @@ namespace MinerBot.Dashboard.Hosting
             }
         }
 
-        // Asks the dashboard on its own address, as the container's health check. Live, not ready, so a database outage
-        // doesn't mark the container unhealthy.
+        // Asks the dashboard where it listens, as the container's health check: on its Unix socket when Dashboard:UnixSocket
+        // is set, otherwise on its address. Live, not ready, so a database outage doesn't mark the container unhealthy.
         internal static async Task<int> HealthCheckAsync(IConfiguration configuration, TextWriter output, CancellationToken cancellationToken)
         {
-            if (DashboardSettings.ListenEndpoint(configuration) is not { } endpoint)
+            var unixSocket = DashboardSettings.UnixSocket(configuration);
+            var endpoint = DashboardSettings.ListenEndpoint(configuration);
+
+            if (unixSocket != null && !DashboardSettings.IsUnixSocketPath(unixSocket))
+            {
+                await output.WriteLineAsync("Unhealthy: Dashboard:UnixSocket isn't valid");
+                return 1;
+            }
+
+            if (unixSocket == null && endpoint == null)
             {
                 await output.WriteLineAsync("Unhealthy: Dashboard:ListenAddress or Dashboard:Port isn't valid");
                 return 1;
@@ -86,10 +99,22 @@ namespace MinerBot.Dashboard.Hosting
             // No proxy, so an HTTP_PROXY variable can't send the check anywhere else
             using var handler = new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false, ConnectTimeout = ConnectLimit };
             using var client = new HttpClient(handler) { Timeout = HealthLimit };
+            string address;
 
-            // http://127.0.0.1:5080 unless the settings say otherwise, with an IPv6 address in brackets
-            var host = endpoint.AddressFamily == AddressFamily.InterNetworkV6 ? $"[{endpoint.Address}]" : endpoint.Address.ToString();
-            using var request = new HttpRequestMessage(HttpMethod.Get, string.Create(CultureInfo.InvariantCulture, $"http://{host}:{endpoint.Port}{HealthEndpoints.LivePath}"));
+            if (unixSocket != null)
+            {
+                // Every connection goes to the socket, whatever the address says
+                handler.ConnectCallback = (_, token) => ConnectAsync(unixSocket, token);
+                address = "http://localhost" + HealthEndpoints.LivePath;
+            }
+            else
+            {
+                // http://127.0.0.1:5080 unless the settings say otherwise, with an IPv6 address in brackets
+                var host = endpoint!.AddressFamily == AddressFamily.InterNetworkV6 ? $"[{endpoint.Address}]" : endpoint.Address.ToString();
+                address = string.Create(CultureInfo.InvariantCulture, $"http://{host}:{endpoint.Port}{HealthEndpoints.LivePath}");
+            }
+
+            using var request = new HttpRequestMessage(HttpMethod.Get, address);
 
             // The health endpoints and the proxy key's exemption go by the Host header, not by the address
             request.Headers.Host = "localhost";
@@ -112,6 +137,22 @@ namespace MinerBot.Dashboard.Hosting
             {
                 await output.WriteLineAsync($"Unhealthy: {e.GetType().Name}");
                 return 1;
+            }
+        }
+
+        static async ValueTask<Stream> ConnectAsync(string unixSocket, CancellationToken cancellationToken)
+        {
+            var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+
+            try
+            {
+                await socket.ConnectAsync(new UnixDomainSocketEndPoint(unixSocket), cancellationToken);
+                return new NetworkStream(socket, ownsSocket: true);
+            }
+            catch
+            {
+                socket.Dispose();
+                throw;
             }
         }
     }

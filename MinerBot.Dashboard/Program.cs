@@ -6,7 +6,7 @@ using MinerBot.Dashboard.Security;
 using MinerBot.Dashboard.Settings;
 
 // The deploy's migration step and the container's health check need none of the web settings, and must never try to
-// take the port the running dashboard holds
+// take the port or socket the running dashboard holds
 if (DashboardCommands.Find(args) is { } command)
     return await DashboardCommands.RunAsync(command, args);
 
@@ -14,11 +14,23 @@ if (DashboardCommands.Find(args) is { } command)
 // is neither on this list nor under a policy.
 string[] publicPages = ["/Index", "/SignIn", "/SignOut", "/Denied", "/Error"];
 
-var builder = WebApplication.CreateBuilder(args);
+// "check-settings" checks the settings the way a start would, then exits: 0 when the dashboard would start, 1 with the
+// list when it wouldn't. Nothing listens and nothing connects. deploy.sh runs it on the new image after the build and any
+// migrations, before the rights and the swap. setup-dashboard.sh runs it on the dashboard.env it's about to write, after
+// it undoes a cut-off nginx change if one is left, and before it changes the database login, the rights, nginx's files
+// or dashboard.env.
+var checkOnly = args is [DashboardCommands.CheckSettings, ..];
+var builder = WebApplication.CreateBuilder(checkOnly ? args[1..] : args);
+
+// The dashboard listens only where its own settings say, which AddDashboardHosting sets in code. That wins over
+// ASPNETCORE_URLS and ASPNETCORE_HTTP_PORTS only while PreferHostingUrls is off, so it's set off here, over anything the
+// environment or the command line says, and neither can put those addresses in place of the socket or the address.
+builder.WebHost.PreferHostingUrls(false);
 
 builder.Services.AddDashboardSettings();
 builder.Logging.AddDashboardFilters();
 builder.Services.AddDashboardHosting();
+builder.Services.AddCloudflareAccess();
 
 builder.Services.AddDataAccessServices(builder.Configuration)
                 .AddAuditLogAccess()
@@ -37,6 +49,7 @@ builder.Services.AddRazorPages(options =>
         options.Conventions.AllowAnonymousToPage(page);
 });
 
+// Links in small letters, so the admin pages' are /admin..., which is what Cloudflare Access's path rule names
 builder.Services.Configure<RouteOptions>(options => options.LowercaseUrls = true);
 builder.Services.AddDashboardHealthChecks();
 
@@ -47,6 +60,15 @@ var app = builder.Build();
 // listens, with a plain list and exit code 1 instead of a stack trace.
 if (DashboardHosting.StoppedBySettings(app.Services, Console.Error))
     return 1;
+
+if (checkOnly)
+{
+    Console.Out.WriteLine("The dashboard's settings are fine.");
+    return 0;
+}
+
+// One line saying whether admin pages also need Cloudflare Access's token
+CloudflareAccessCheck.LogState(app.Services);
 
 // The pipeline, in the order that matters.
 // 0. ASP.NET Core's own host filtering runs before everything here. It admits only the public host name and localhost,
@@ -62,7 +84,7 @@ app.UseMiddleware<SecurityHeaders>();
 app.UseMiddleware<ProxyKeyMiddleware>();
 
 // 3. The visitor's address and https are trusted only after the key has shown that nginx sent them: one hop, from
-//    loopback only, and never X-Forwarded-Host.
+//    loopback only, and never X-Forwarded-Host. A connection on the Unix socket counts as loopback.
 app.UseForwardedHeaders();
 
 // 4. A cookie named like the session or the sign-in's correlation cookie, but with __Host- in another case, is one
@@ -91,14 +113,19 @@ app.UseStaticFiles(StaticFiles.Options);
 // 10. Which page or endpoint the request is for.
 app.UseRouting();
 
-// 11. The session comes from the database, which ends it there if it's unused, too old or off the lists. Discord's
+// 11. With Cloudflare Access on, a page under /admin, or one that asks for the Admin or Owner policy, needs Access's
+//     signed token, checked against Cloudflare's keys. After routing, so it sees the page's policy, and before sign-in, so
+//     a refusal costs no session lookup. The token is taken off every request, so nothing later can show it.
+app.UseMiddleware<CloudflareAccessCheck>();
+
+// 12. The session comes from the database, which ends it there if it's unused, too old or off the lists. Discord's
 //     callback at /signin-discord is also handled here.
 app.UseAuthentication();
 
-// 12. Each page's policy, with the role worked out from the lists on this request.
+// 13. Each page's policy, with the role worked out from the lists on this request.
 app.UseAuthorization();
 
-// 13. The pages, and the health endpoints, which answer only on Host localhost.
+// 14. The pages, and the health endpoints, which answer only on Host localhost.
 app.MapRazorPages();
 app.MapDashboardHealthChecks();
 
@@ -106,11 +133,12 @@ app.MapDashboardHealthChecks();
 // - UseHttpsRedirection and UseHsts: nginx and Cloudflare handle https, and UseHsts skips localhost, so SecurityHeaders
 //   sends HSTS itself.
 // - CORS: no other site may call the dashboard.
-// - Response compression: pages hold secrets next to text visitors control.
+// - Response compression: pages hold secrets next to text visitors control. nginx has gzip off, and SecurityHeaders asks
+//   Cloudflare not to compress with no-transform.
 // - HTTP logging: it would log cookies and Discord's codes.
 // - MapStaticAssets: UseStaticFiles serves wwwroot the same way in the tests and in the container, with no build manifest.
 // - A fallback policy: see AddRazorPages above.
 
-// 14. Runs the app until the host stops it.
+// 15. Runs the app until the host stops it.
 await app.RunAsync();
 return 0;

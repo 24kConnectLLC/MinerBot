@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Net;
+using System.Text;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 
@@ -13,10 +14,12 @@ namespace MinerBot.Dashboard.Settings
         {
             services.AddOptions<DashboardOptions>().BindConfiguration(DashboardOptions.Section).ValidateOnStart();
             services.AddOptions<DiscordSignInOptions>().BindConfiguration(DiscordSignInOptions.Section).ValidateOnStart();
+            services.AddOptions<CloudflareAccessOptions>().BindConfiguration(CloudflareAccessOptions.Section).ValidateOnStart();
             services.PostConfigure<DashboardOptions>(DashboardOptionsValidator.Normalize);
 
             services.TryAddEnumerable(ServiceDescriptor.Singleton<IValidateOptions<DashboardOptions>, DashboardOptionsValidator>());
             services.TryAddEnumerable(ServiceDescriptor.Singleton<IValidateOptions<DiscordSignInOptions>, DiscordSignInOptionsValidator>());
+            services.TryAddEnumerable(ServiceDescriptor.Singleton<IValidateOptions<CloudflareAccessOptions>, CloudflareAccessOptionsValidator>());
 
             services.TryAddSingleton(TimeProvider.System);
             return services;
@@ -55,5 +58,22 @@ namespace MinerBot.Dashboard.Settings
 
             return int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var port) && port is >= 1 and <= 65535 ? port : null;
         }
+
+        // A socket's address holds 108 bytes on Linux and 104 on some other systems, with a zero at the end, so this fits
+        // everywhere
+        internal const int MaxUnixSocketBytes = 100;
+
+        // Dashboard:UnixSocket, read straight from the configuration for the same reasons as the address. Null when it's
+        // empty, and the dashboard then listens on ListenEndpoint. A path it can't listen on comes back as it is: the check
+        // refuses it, so it never binds.
+        internal static string? UnixSocket(IConfiguration configuration) =>
+            configuration.GetSection(DashboardOptions.Section)[nameof(DashboardOptions.UnixSocket)] is { } path && !string.IsNullOrWhiteSpace(path) ? path : null;
+
+        // The full path of the socket file, with no white space or control characters, in at most MaxUnixSocketBytes
+        internal static bool IsUnixSocketPath(string path) =>
+            Path.IsPathFullyQualified(path)
+            && !Path.EndsInDirectorySeparator(path)
+            && !path.Any(c => char.IsWhiteSpace(c) || char.IsControl(c))
+            && Encoding.UTF8.GetByteCount(path) <= MaxUnixSocketBytes;
     }
 }

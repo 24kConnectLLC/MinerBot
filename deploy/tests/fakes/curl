@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# A stand-in for curl, for scripts-test.sh. It answers the four addresses the scripts ask:
+#   http://localhost/health/ready        through --unix-socket /run/minerbot-dashboard/dashboard.sock: Healthy while the
+#                                        dashboard's container runs and its socket is there; Unhealthy when its image is
+#                                        in FAKE_UNREADY (dashboard@<rev>) or its health is "starting"; no connection
+#                                        without the socket
+#   https://bot.murderminershub.com/     200 while the dashboard runs (502 when its image is in FAKE_PUBLIC_FAIL), and
+#                                        503, nginx's page, when it doesn't. With --resolve to 127.0.0.1, the request
+#                                        comes from this server: 403 while MinerBot's nginx file is in conf.d, or
+#                                        FAKE_LOCAL_ANSWER. FAKE_PUBLIC_ANSWER changes what the running dashboard's page
+#                                        answers: a status such as 404, the same with -once (only the first time, as
+#                                        /fake/nginx/public-once remembers), or challenge (403 with cf-mitigated:
+#                                        challenge, as Cloudflare's Bot Fight Mode answers)
+#   https://<team>/cdn-cgi/access/certs  one RSA key, unless the team is in FAKE_ACCESS_DOWN
+# With -D -, the response's header lines come first, as curl prints them.
+# shellcheck source=record.sh
+source /usr/local/lib/mbtest/record.sh
+record curl "$@"
+sync_socket
+
+url=''
+write_out=no
+resolve=no
+local_host=no
+headers=no
+socket=''
+prev=''
+for arg in "$@"; do
+    case $arg in
+        http://* | https://*) url=$arg ;;
+        '%{http_code}') write_out=yes ;;
+        bot.murderminershub.com:443:127.0.0.1) resolve=yes ;;
+        "Host: localhost") local_host=yes ;;
+    esac
+    if [ "$prev" = --unix-socket ]; then
+        socket=$arg
+    fi
+    if [ "$prev" = -D ] && [ "$arg" = - ]; then
+        headers=yes
+    fi
+    prev=$arg
+done
+
+# answer <HTTP status> [<body>] [<header line>]: what curl prints with or without -w '%{http_code}', after the header
+# lines with -D -, which a status of 000, nothing answering, has none of
+answer() {
+    if [ "$headers" = yes ] && [ "$1" != 000 ]; then
+        printf 'HTTP/2 %s\r\ncontent-type: text/html\r\n' "$1"
+        if [ -n "${3:-}" ]; then
+            printf '%s\r\n' "$3"
+        fi
+        printf '\r\n'
+    fi
+    if [ "$write_out" = yes ]; then
+        printf '%s' "$1"
+    else
+        printf '%s\n' "${2:-}"
+    fi
+}
+
+case $url in
+    http://localhost/health/ready)
+        if [ "$socket" != /run/minerbot-dashboard/dashboard.sock ] || [ ! -S "$socket" ] || ! running dashboard; then
+            echo "curl: (7) Couldn't connect to server" >&2
+            exit 7
+        fi
+        health=''
+        read -r _ _ _ _ health _ < "$D/ctr/minerbot-dashboard" || true
+        if [ "$local_host" != yes ]; then
+            # Without Host: localhost, the dashboard wants the proxy key, which the probe never has
+            answer 404 ""
+        elif [ "$health" = starting ] || listed "${FAKE_UNREADY:-}" "$(running_key dashboard)"; then
+            answer 503 Unhealthy
+        else
+            answer 200 Healthy
+        fi
+        ;;
+    https://bot.murderminershub.com/)
+        if [ "$resolve" = yes ]; then
+            if [ -n "${FAKE_LOCAL_ANSWER:-}" ]; then
+                answer "$FAKE_LOCAL_ANSWER"
+            elif [ -f /etc/nginx/conf.d/minerbot-dashboard.conf ]; then
+                answer 403
+            else
+                answer 404
+            fi
+        elif ! running dashboard; then
+            answer 503 "The MinerBot dashboard is restarting or stopped. Try again in a minute."
+        elif listed "${FAKE_PUBLIC_FAIL:-}" "$(running_key dashboard)"; then
+            answer 502
+        else
+            public=${FAKE_PUBLIC_ANSWER:-200}
+            if [[ $public == *-once ]]; then
+                if [ -e "$fake/nginx/public-once" ]; then
+                    public=200
+                else
+                    mkdir -p "$fake/nginx"
+                    : > "$fake/nginx/public-once"
+                    public=${public%-once}
+                fi
+            fi
+            case $public in
+                200) answer 200 "<!DOCTYPE html>" ;;
+                challenge) answer 403 "<!DOCTYPE html><title>Just a moment...</title>" "cf-mitigated: challenge" ;;
+                *) answer "$public" "" ;;
+            esac
+        fi
+        ;;
+    https://*/cdn-cgi/access/certs)
+        team=${url#https://}
+        team=${team%%/*}
+        if listed "${FAKE_ACCESS_DOWN:-}" "$team"; then
+            echo "curl: (22) The requested URL returned error: 404" >&2
+            exit 22
+        fi
+        echo '{"keys":[{"kid":"mbtest1","kty":"RSA","alg":"RS256","use":"sig","e":"AQAB","n":"made-up"}],"public_cert":{"kid":"mbtest1"}}'
+        ;;
+    *)
+        echo "curl: (6) Could not resolve host: ${url:-(none)}" >&2
+        exit 6
+        ;;
+esac
