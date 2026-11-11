@@ -47,6 +47,18 @@ namespace MinerBot.Dashboard.Tests
             Assert.Null(Check(access.Mint(claims => claims["aud"] = new[] { new string('0', 64), access.Audience })));
         }
 
+        // Any item of the array counts, wherever it is, as RFC 7519 and Cloudflare's own examples read aud: first, in the
+        // middle, or before an item that isn't a string. Fails if only one place, such as the last, is looked at.
+        [Fact]
+        public void AudienceAnywhereInTheArrayPasses()
+        {
+            var other = new string('0', 64);
+
+            Assert.Null(Check(access.Mint(claims => claims["aud"] = new[] { access.Audience, other })));
+            Assert.Null(Check(access.Mint(claims => claims["aud"] = new[] { other, access.Audience, other })));
+            Assert.Null(Check(access.Mint(claims => claims["aud"] = new object[] { access.Audience, 1 })));
+        }
+
         [Fact]
         public void WrongAudienceIsRefused()
         {
@@ -54,7 +66,19 @@ namespace MinerBot.Dashboard.Tests
             Assert.Equal(WrongAudience, Check(access.Mint(claims => claims["aud"] = new string('0', 64))));
             Assert.Equal(WrongAudience, Check(access.Mint(claims => claims["aud"] = access.Audience.ToUpperInvariant())));
             Assert.Equal(WrongAudience, Check(access.Mint(claims => claims["aud"] = new object[] { 1, true })));
+            Assert.Equal(WrongAudience, Check(access.Mint(claims => claims["aud"] = Array.Empty<string>())));
             Assert.Equal(WrongAudience, Check(access.Mint(claims => claims.Remove("aud"))));
+        }
+
+        // An aud that's neither a string nor an array is the wrong audience, even an object holding the AUD tag, and never
+        // an exception, which would end the request with a 500 instead of the refusal and its log line
+        [Fact]
+        public void AudienceOfAnotherKindIsRefused()
+        {
+            Assert.Equal(WrongAudience, Check(access.Mint(claims => claims["aud"] = 5)));
+            Assert.Equal(WrongAudience, Check(access.Mint(claims => claims["aud"] = true)));
+            Assert.Equal(WrongAudience, Check(access.Mint(claims => claims["aud"] = null)));
+            Assert.Equal(WrongAudience, Check(access.Mint(claims => claims["aud"] = new Dictionary<string, string> { ["aud"] = access.Audience })));
         }
 
         [Fact]
@@ -221,6 +245,88 @@ namespace MinerBot.Dashboard.Tests
                 Assert.False(TryReadHeader(token, out var kid, out var problem));
                 Assert.Equal(Unreadable, problem);
                 Assert.Equal("", kid);
+                Assert.Equal(Unreadable, Check(token));
+            }
+        }
+
+        // Anything but base64url's own characters, in any part of a good token, is refused as the header is read, before any
+        // key is looked up: standard base64's + and /, its = padding and white space, which Base64Url itself accepts or
+        // skips, and letters or digits from outside ASCII. The middle character is replaced, so the length stays a good one.
+        public static TheoryData<char, int> NotBase64Url()
+        {
+            var data = new TheoryData<char, int>();
+
+            foreach (var c in new[] { '+', '/', '=', ' ', '\t', '\n', '%', 'é', 'Ł', '٣', '０' })
+                foreach (var part in new[] { 0, 1, 2 })
+                    data.Add(c, part);
+
+            return data;
+        }
+
+        [Theory]
+        [MemberData(nameof(NotBase64Url))]
+        public void OtherCharactersInAnyPartAreUnreadable(char c, int part)
+        {
+            var token = WithCharacter(access.Mint(), part, c);
+
+            Assert.False(TryReadHeader(token, out var kid, out var problem), $"Part {part} with U+{(int)c:X4} passed as the header was read");
+            Assert.Equal(Unreadable, problem);
+            Assert.Equal("", kid);
+            Assert.Equal(Unreadable, Check(token));
+        }
+
+        // The token with one character of a part replaced
+        internal static string WithCharacter(string token, int part, char c)
+        {
+            var parts = token.Split('.');
+            var chars = parts[part].ToCharArray();
+            chars[chars.Length / 2] = c;
+            parts[part] = new string(chars);
+            return string.Join('.', parts);
+        }
+
+        // Base64url without padding, as JWS writes it, and nothing more. The signature covers only the first two parts, so
+        // without the character rule a good token with the right padding after its signature, or white space the decoder
+        // skips, would pass. A token can only be written one way.
+        [Fact]
+        public void PaddingOrWhiteSpaceIsUnreadable()
+        {
+            var valid = access.Mint();
+            var parts = valid.Split('.');
+
+            Assert.Null(Check(valid));
+
+            foreach (var token in new[]
+            {
+                valid + "=",
+                valid + "==",
+                parts[0] + "=." + parts[1] + "." + parts[2],
+                parts[0] + "." + parts[1] + "=." + parts[2],
+                parts[0] + "." + parts[1] + "." + parts[2][..8] + "==" + parts[2][8..],
+                access.Mint(signWith: keys.Other) + "==",
+                valid + " ",
+                parts[0] + "." + parts[1] + "." + parts[2][..8] + "\n" + parts[2][8..],
+                parts[0] + "." + parts[1] + "." + parts[2][..8] + "\r\n" + parts[2][8..],
+                parts[0] + "." + parts[1] + " ." + parts[2]
+            })
+            {
+                Assert.False(TryReadHeader(token, out var kid, out var problem));
+                Assert.Equal(Unreadable, problem);
+                Assert.Equal("", kid);
+                Assert.Equal(Unreadable, Check(token));
+            }
+        }
+
+        // A signature part that isn't base64url is unreadable, as a header or payload part would be, and not a bad
+        // signature: one character, or a good token cut short by one, can't be decoded at all
+        [Fact]
+        public void SignatureThatIsNotBase64UrlIsUnreadable()
+        {
+            var parts = access.Mint().Split('.');
+
+            foreach (var token in new[] { parts[0] + "." + parts[1] + ".A", access.Mint()[..^1] })
+            {
+                Assert.True(TryReadHeader(token, out _, out _));
                 Assert.Equal(Unreadable, Check(token));
             }
         }

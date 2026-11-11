@@ -219,7 +219,8 @@ namespace DataAccessLibrary.Tests
         // Everything else is refused, checked by MariaDB's error number. {root} is root's own session, for KILL.
         public static TheoryData<string, string> Forbidden => new()
         {
-            // The audit log is only ever added to, and read with the audit page
+            // This login only ever adds to the audit log. The bot's own login, which the cPanel account owns, can still
+            // change it.
             { "read the audit log", $"SELECT * FROM {Bot}.audit_log" },
             { "change the audit log", $"UPDATE {Bot}.audit_log SET detail = 'changed' WHERE 1 = 0" },
             { "delete from the audit log", $"DELETE FROM {Bot}.audit_log WHERE 1 = 0" },

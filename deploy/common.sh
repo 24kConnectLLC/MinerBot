@@ -23,15 +23,31 @@ nginx_secrets=/etc/nginx/minerbot
 nginx_names=(minerbot-dashboard.conf origin-cert.pem origin-key.pem proxy-key.conf)
 # cPanel's own list of Cloudflare's addresses, which cPanel keeps up to date
 cloudflare_list=/etc/nginx/conf.d/includes-optional/cloudflare.conf
+# Where nginx's master writes its PID, as nginx.conf's pid line says on this server
+nginx_pid_file=/var/run/nginx.pid
+# cPanel loads its pipelog module only while WHM's piped logging is on: this file holds the module's load_module line,
+# and cPanel deletes it when the setting goes off. Each time cPanel rebuilds nginx's global files, it writes or deletes
+# that file, then runs every program in pipelog_hook's folder, then tests and reloads nginx. pipelog_hook is MinerBot's:
+# it keeps pipelog.conf in nginx_secrets, which the server file includes, in step with that file.
+pipelog_module=/etc/nginx/conf.d/modules/ngx_http_pipelog_module.conf
+pipelog_hook=/etc/nginx/ea-nginx/config-scripts/global/minerbot-pipelog
 backups=/srv/backups/minerbot
+# The dashboard listens only on this socket, never on a TCP port, so no other account on the server can take its place.
+# Its folder is 2750, owned by 1654 (the dashboard) and the group nobody (nginx's workers): only the dashboard can make
+# a file there, and only nginx's group can reach it. /run is emptied at every boot, so systemd-tmpfiles makes the folder
+# again from tmpfiles_conf, which comes from deploy/minerbot-dashboard.tmpfiles. compose.yml and nginx's file name the
+# same paths.
+socket_dir=/run/minerbot-dashboard
+dashboard_socket=$socket_dir/dashboard.sock
+tmpfiles_conf=/etc/tmpfiles.d/minerbot-dashboard.conf
 # The usual order, /usr/local first, which is also where scripts-test.sh puts its stand-ins
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # ---- Limits
 
 # Runs a command with a time limit: at the limit, timeout sends TERM, and KILL <grace> seconds later (10 by default).
-# Every call to Docker, MariaDB, curl, git, OpenSSL, nginx, ss, sendmail, systemctl, systemd-run and cPanel's
-# /scripts/restartsrv_nginx in these scripts goes through it.
+# Every call to Docker, MariaDB, curl, git, OpenSSL, nginx, sendmail, systemctl, systemd-run, systemd-tmpfiles, pgrep, ps
+# and cPanel's /scripts/restartsrv_nginx in these scripts goes through it.
 run_for() {   # run_for [-k <grace>] <seconds> <command...>
     local grace=10
     if [ "$1" = -k ]; then
@@ -98,7 +114,7 @@ die() {   # die <message>
 # because the subshell's caller sees the failure and stops itself.
 stopped() {   # stopped <exit code> <line>
     [ "$BASHPID" = "$$" ] || return 0
-    die "${0##*/} stopped while ${step:-starting} (line $2, exit code $1).${stop_hint:+ $stop_hint}"
+    die "${0##*/} stopped while ${step:-starting} (line $2, exit code $1)."
 }
 
 # The run's closing line in logs/history.log and its RESULT line, then the exit: 1 when the word is "failed", else 0
@@ -374,16 +390,37 @@ container_image() {   # container_image <container>
     die "Docker didn't answer about the container $1 (above). Nothing more was changed."
 }
 
+# Whether a container runs: true or false, or nothing when there's no such container. Any other failure stops the script,
+# as in container_image: a wrong answer here would leave a stopped dashboard stopped. A container Docker is restarting
+# counts as running.
+container_running() {   # container_running <container>
+    local out status=0
+    out=$(run_for 30 docker container inspect -f '{{.State.Running}}' "$1" 2>&1) || status=$?
+    if [ "$status" = 0 ]; then
+        printf '%s\n' "$out"
+        return 0
+    fi
+    case $out in
+        *"No such container"* | *"No such object"*) return 0 ;;
+    esac
+    printf '%s\n' "$out" >&2
+    die "Docker didn't answer about the container $1 (above). Nothing more was changed."
+}
+
 # The first 12 characters of the commit an image was built from, from the label deploy.sh gives it; "image <short ID>"
 # for an image without the label, such as the bot's images from before; "none" when there's no such image. For messages
-# and history only, so it never stops anything.
+# and history only, so it never stops anything. The template asks for the label only when the image has labels and this
+# one among them: Docker prints "<no value>" for a missing label asked for with index, and fails on an image without
+# labels, which would read as no image at all.
 revision() {   # revision <image or ID>
     local out id='' label=''
     if [ -z "$1" ]; then
         echo none
         return 0
     fi
-    out=$(run_for 30 docker image inspect -f '{{.Id}} {{index .Config.Labels "org.opencontainers.image.revision"}}' "$1" 2> /dev/null) || out=
+    out=$(run_for 30 docker image inspect \
+        -f '{{.Id}} {{with index .Config "Labels"}}{{with index . "org.opencontainers.image.revision"}}{{.}}{{end}}{{end}}' \
+        "$1" 2> /dev/null) || out=
     read -r -t 5 id label <<< "$out" || true
     if [ -n "$label" ]; then
         printf '%s\n' "${label:0:12}"
@@ -422,33 +459,84 @@ start_service() {   # start_service bot|dashboard [--force-recreate]
     fi
 }
 
-ready_service() {   # ready_service bot|dashboard [<public status before the swap>] [<restart count it starts from>]
+# Keeps a copy of the installed compose.yml as state/compose-ready-<service>.yml, the compose.yml the service was last
+# ready under. A swap that fails after compose.yml changed that service's settings puts it back (deploy.sh's swap), so
+# the image before runs as it did. It only warns when it can't: nothing depends on it until such a failure.
+note_ready() {   # note_ready bot|dashboard
+    local tmp=''
+    if install -d -m 700 "$home/state" && tmp=$(mktemp "$home/state/.compose-ready.XXXXXX") \
+        && cp "$home/compose.yml" "$tmp" && mv -f "$tmp" "$home/state/compose-ready-$1.yml"; then
+        return 0
+    fi
+    if [ -n "$tmp" ]; then
+        rm -f "$tmp"
+    fi
+    echo "Warning: couldn't keep a copy of the compose.yml the $1 is ready under (above). Only a failed swap needs it."
+}
+
+# True when the installed compose.yml gives the service other settings than the compose.yml it was last ready under, by
+# Compose's own config hash; false when they're the same, when there's no copy yet, or when Compose can't tell
+compose_changed() {   # compose_changed bot|dashboard
+    local kept=$home/state/compose-ready-$1.yml now was
+    [ -f "$kept" ] || return 1
+    now=$(run_for 30 docker compose -f "$home/compose.yml" --project-directory "$home" config --hash "$1" 2> /dev/null) \
+        || return 1
+    was=$(run_for 30 docker compose -f "$kept" --project-directory "$home" config --hash "$1" 2> /dev/null) || return 1
+    [ -n "$now" ] && [ "$now" != "$was" ]
+}
+
+# ready_service bot|dashboard [<public status before the swap>] [<restart count it starts from>] [<image ID it must run>]
+ready_service() {
     if [ "$1" = bot ]; then
-        ready_bot "${3:-0}"
+        ready_bot "${3:-0}" "${4:-}"
     else
-        ready_dashboard "${2:-}" "${3:-0}"
+        ready_dashboard "${2:-}" "${3:-0}" "${4:-}"
     fi
 }
 
-# Waits until the dashboard is ready, for 90 seconds: its container runs with no new restart and isn't unhealthy;
-# /health/ready answers Healthy, which proves both databases with its own login and rights; and the process listening on
-# 127.0.0.1:5080 is the container's own, so a process that took the port can't pass for it. Then, when the public home
-# page answered 200 before the swap, it must answer 200 again within 30 seconds.
-ready_dashboard() {   # ready_dashboard [<public status before the swap>] [<restart count it starts from, 0 by default>]
-    local public_before=${1:-} base=${2:-0} limit=90 public_limit=30 poll=2 started=$SECONDS
-    local state running restarts health pid said listeners why
+# What's wrong with the dashboard's socket, as one clause, or nothing when nginx can use it: its folder is 2750, owned
+# by 1654 and the group nobody, and the socket in it is a socket owned by 1654 and the group nobody, which the group can
+# write to. Only root and 1654 can make a file in that folder, so a socket that passes is the dashboard's own.
+socket_problem() {
+    local folder uid='' group='' mode='' kind=''
+    folder=$(stat -c '%a %u %G %F' "$socket_dir" 2> /dev/null) || folder=
+    if [ "$folder" != "2750 1654 nobody directory" ]; then
+        echo "its socket's folder $socket_dir is ${folder:-missing}, not a folder with mode 2750, owner 1654 and group nobody, which systemd-tmpfiles --create $tmpfiles_conf makes"
+        return 0
+    fi
+    read -r -t 5 uid group mode kind <<< "$(stat -c '%u %G %a %F' "$dashboard_socket" 2> /dev/null)" || true
+    if [ -z "$kind" ]; then
+        echo "its socket $dashboard_socket isn't there"
+    elif [ "$kind" != socket ] || [ "$uid" != 1654 ] || [ "$group" != nobody ]; then
+        echo "$dashboard_socket isn't a socket owned by 1654 and the group nobody: it's a $kind of $uid and $group"
+    elif [ $((8#$mode & 8#020)) = 0 ]; then
+        echo "its socket's mode is $mode, so nginx, in the group nobody, can't connect to it"
+    fi
+}
+
+# Waits until the dashboard is ready, for 90 seconds: its container runs the image it must, when one is given, with no
+# new restart, and isn't unhealthy; socket_problem finds nothing; and /health/ready, asked through the socket and read
+# up to 64 bytes, answers Healthy, which proves both databases with its own login and rights. Then, when the public home
+# page answered 200 before the swap, it must answer 200 again within 30 seconds. A container on another image fails at
+# once: Compose has returned, so nothing changes it any more.
+ready_dashboard() {   # ready_dashboard [<public status before the swap>] [<restart count it starts from, 0 by default>] [<image ID it must run>]
+    local public_before=${1:-} base=${2:-0} expected=${3:-} limit=90 public_limit=30 poll=2 started=$SECONDS
+    local state image running restarts health said why
     if test_fast; then
         limit=10 public_limit=4 poll=0.5
     fi
     while :; do
         why=
         state=$(run_for 30 docker container inspect \
-            -f '{{.State.Running}} {{.RestartCount}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.State.Pid}}' \
+            -f '{{.Image}} {{.State.Running}} {{.RestartCount}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
             "$dashboard_container" 2> /dev/null) || state=
-        running='' restarts='' health='' pid=''
-        read -r -t 5 running restarts health pid <<< "$state" || true
+        image='' running='' restarts='' health=''
+        read -r -t 5 image running restarts health <<< "$state" || true
         if [ -z "$state" ]; then
             why="its container doesn't exist"
+        elif [ -n "$expected" ] && [ "$image" != "$expected" ]; then
+            echo "The dashboard isn't ready: its container runs $(revision "$image"), not $(revision "$expected"), so Compose didn't recreate it."
+            return 1
         elif [ "$restarts" != "$base" ]; then
             echo "The dashboard isn't ready: its container restarted (restart count $restarts)."
             return 1
@@ -458,15 +546,14 @@ ready_dashboard() {   # ready_dashboard [<public status before the swap>] [<rest
         elif [ "$running" != true ]; then
             why="its container isn't running"
         else
-            said=$(run_for 10 curl -s --max-time 5 -H 'Host: localhost' http://127.0.0.1:5080/health/ready 2> /dev/null) || said=
-            if [ "$said" != Healthy ]; then
-                why="/health/ready answers \"${said:0:40}\""
-            else
-                listeners=$(run_for 10 ss -Hltnp 'sport = :5080' 2> /dev/null) || listeners=
-                if listener_is "$pid" "$listeners"; then
+            why=$(socket_problem)
+            if [ -z "$why" ]; then
+                said=$(run_for 10 curl -s --max-time 5 --unix-socket "$dashboard_socket" -H 'Host: localhost' \
+                    http://localhost/health/ready 2> /dev/null | head -c 64) || true
+                if [ "$said" = Healthy ]; then
                     break
                 fi
-                why="the process listening on 127.0.0.1:5080 isn't the dashboard's container"
+                why="/health/ready answers \"${said:0:40}\""
             fi
         fi
         if [ $((SECONDS - started)) -ge "$limit" ]; then
@@ -475,7 +562,7 @@ ready_dashboard() {   # ready_dashboard [<public status before the swap>] [<rest
         fi
         sleep "$poll"
     done
-    echo "The dashboard is ready: /health/ready answers Healthy, and port 5080 is its own."
+    echo "The dashboard is ready: /health/ready answers Healthy through its socket, which only it can make."
     [ "$public_before" = 200 ] || return 0
     started=$SECONDS
     until [ "$(public_status)" = 200 ]; do
@@ -488,28 +575,14 @@ ready_dashboard() {   # ready_dashboard [<public status before the swap>] [<rest
     echo "The public home page answers 200, as before the swap."
 }
 
-listener_is() {   # listener_is <pid> <lines of ss -Hltnp>: true when there's a listener and each one is that process
-    local pid=$1 line seen=no
-    if ! [[ $pid =~ ^[1-9][0-9]*$ ]]; then
-        return 1
-    fi
-    while IFS= read -r -t 5 line; do
-        [ -n "$line" ] || continue
-        if [[ $line != *"pid=$pid,"* ]]; then
-            return 1
-        fi
-        seen=yes
-    done <<< "$2"
-    [ "$seen" = yes ]
-}
-
 # Waits until the bot is up. Once its image has a health check, that means healthy. Until then, which is until PR 6
 # gives it a heartbeat, it means: its log since it started has a line matching BOT_READY_PATTERN from server.conf within
 # 150 seconds, and 20 seconds later it still runs with the same start time and no new restart. The log goes to a file
-# only root can open, never to the screen, because it can hold a Steam sign-in code.
-ready_bot() {   # ready_bot [<restart count it starts from, 0 by default>]
-    local base=${1:-0} limit=150 steady=20 poll=3 started=$SECONDS pattern=${BOT_READY_PATTERN:-Gateway +Ready}
-    local state running restarts since health log count why started_again
+# only root can open, never to the screen, because it can hold a Steam sign-in code. As for the dashboard, a container on
+# another image than the one given fails at once.
+ready_bot() {   # ready_bot [<restart count it starts from, 0 by default>] [<image ID it must run>]
+    local base=${1:-0} expected=${2:-} limit=150 steady=20 poll=3 started=$SECONDS pattern=${BOT_READY_PATTERN:-Gateway +Ready}
+    local state image running restarts since health log count why started_again
     if test_fast; then
         limit=10 steady=1 poll=0.5
     fi
@@ -518,12 +591,16 @@ ready_bot() {   # ready_bot [<restart count it starts from, 0 by default>]
     while :; do
         why=
         state=$(run_for 30 docker container inspect \
-            -f '{{.State.Running}} {{.RestartCount}} {{.State.StartedAt}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+            -f '{{.Image}} {{.State.Running}} {{.RestartCount}} {{.State.StartedAt}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
             "$bot_container" 2> /dev/null) || state=
-        running='' restarts='' since='' health=''
-        read -r -t 5 running restarts since health <<< "$state" || true
+        image='' running='' restarts='' since='' health=''
+        read -r -t 5 image running restarts since health <<< "$state" || true
         if [ -z "$state" ]; then
             why="its container doesn't exist"
+        elif [ -n "$expected" ] && [ "$image" != "$expected" ]; then
+            echo "The bot isn't ready: its container runs $(revision "$image"), not $(revision "$expected"), so Compose didn't recreate it."
+            rm -f "$log"
+            return 1
         elif [ "$restarts" != "$base" ]; then
             echo "The bot isn't ready: its container restarted (restart count $restarts)."
             rm -f "$log"
@@ -576,13 +653,17 @@ public_status() {
 }
 
 # Asks Compose itself whether "up" with this compose file would leave the bot exactly as it runs. Its dry run changes
-# nothing. It passes only when exactly one line says the bot's container is Running and no line plans a change, so output
-# it doesn't recognise, from a newer Compose say, refuses. Compose's lines are left in $dry_run for the message.
+# nothing. Returns 0 when exactly one line says the bot's container is Running and no line plans a change; 1 when a line
+# plans a change; 2 when the dry run itself failed or didn't finish within 60 seconds, with its exit code in
+# $dry_run_status (124 or 137 at the limit); 3 when its lines are none of these, from a newer Compose say. Compose's
+# lines are left in $dry_run for the message.
 bot_unchanged() {   # bot_unchanged <compose file>
     local line words running=0
     local -a parts
+    dry_run_status=0
     dry_run=$(run_for 60 docker compose -f "$1" --project-directory "$home" up --dry-run -d --no-build --no-deps bot 2>&1) \
-        || return 1
+        || dry_run_status=$?
+    [ "$dry_run_status" = 0 ] || return 2
     while IFS= read -r -t 5 line; do
         parts=()
         read -r -t 5 -a parts <<< "$line" || true
@@ -595,7 +676,7 @@ bot_unchanged() {   # bot_unchanged <compose file>
             running=$((running + 1))
         fi
     done <<< "$dry_run"
-    [ "$running" = 1 ]
+    [ "$running" = 1 ] || return 3
 }
 
 # ---- Migrations and settings
@@ -653,14 +734,14 @@ run_migrate() {
 
 # The dashboard's own validator on an env file: the image's check-settings command, which exits 0 when the dashboard
 # would start and 1 with the list, naming settings but never their values. Nothing listens, nothing connects, and the
-# keys volume isn't touched.
+# keys volume isn't touched. It gets the socket compose.yml gives the dashboard too, so it checks what will run.
 check_settings() {   # check_settings <env file> <image>
     local status=0
     run_for 30 docker rm -f -v minerbot-dashboard-check > /dev/null 2>&1 || true
     run_for 60 docker run --rm --pull never --name minerbot-dashboard-check --network none --read-only \
         --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777 --tmpfs /app/keys:rw,noexec,nosuid,nodev,size=1m,mode=1777 \
         --cap-drop ALL --security-opt no-new-privileges:true --memory 256m --pids-limit 64 \
-        --env-file "$1" "$2" check-settings || status=$?
+        --env-file "$1" -e "Dashboard__UnixSocket=$dashboard_socket" "$2" check-settings || status=$?
     run_for 30 docker rm -f -v minerbot-dashboard-check > /dev/null 2>&1 || true
     return "$status"
 }
@@ -696,6 +777,16 @@ rights_of() {   # rights_of <user> <host>
     run_for 30 mariadb --batch -N <<< "$sql" | LC_ALL=C sort
 }
 
+# What MinerBot's database holds that no migration makes, one per line and sorted, such as "trigger audit_log_stamp":
+# its triggers, events and stored routines. A trigger or an event runs with the rights of the login that made it, so one
+# made with the bot's own login, which has every right in that database and which the cPanel account owns, could change
+# or delete what the dashboard's login writes there, the audit log included, and survive every rights apply. A pull
+# request whose migration makes one changes this check.
+bot_db_extras() {
+    run_for 30 mariadb -N -e "SELECT CONCAT('trigger ', TRIGGER_NAME) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = '$BOT_DB' UNION ALL SELECT CONCAT('event ', EVENT_NAME) FROM information_schema.EVENTS WHERE EVENT_SCHEMA = '$BOT_DB' UNION ALL SELECT CONCAT(LOWER(ROUTINE_TYPE), ' ', ROUTINE_NAME) FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = '$BOT_DB'" \
+        | LC_ALL=C sort
+}
+
 drop_rights_check() {   # drops the rehearsal's throwaway login
     if run_for 30 mariadb --batch -e "DROP USER IF EXISTS '$check_login'@'localhost'"; then
         rights_check_made=no
@@ -708,11 +799,22 @@ drop_rights_check() {   # drops the rehearsal's throwaway login
 # Applies the rights file to the dashboard's login, as deploy/README.md describes: a rehearsal on a locked throwaway
 # login first, then the real login on both its hosts, then a comparison of the two. It says why when it fails: a failed
 # rehearsal leaves the real login as it was, a failed apply leaves it fewer rights and never more, and a difference means
-# someone added a right REVOKE can't take away, such as a PROXY grant, which a person must remove.
+# someone added a right REVOKE can't take away, such as a PROXY grant, which a person must remove. Once the comparison
+# passes, it keeps a copy of the file it applied, as state/dashboard-rights.applied.sql (600). setup-dashboard.sh applies
+# that copy, so a setup run never gives the running dashboard the rights of a newer commit than its last deploy applied.
+# It refuses first, with the login untouched, while MinerBot's database holds anything bot_db_extras lists.
 apply_rights() {   # apply_rights [<rights file>, the installed dashboard-rights.sql by default]
-    local file=${1:-$home/dashboard-rights.sql} rehearsal real expected actual host
+    local file=${1:-$home/dashboard-rights.sql} rehearsal real expected actual host copy='' extras
     rehearsal=$(render "$file" "'$check_login'@'localhost'") || return 1
     real=$(render "$file" "$grantees") || return 1
+    if ! extras=$(bot_db_extras); then
+        echo "Couldn't list the triggers, events and routines in MinerBot's database (above). The dashboard's login wasn't touched."
+        return 1
+    fi
+    if [ -n "$extras" ]; then
+        echo "MinerBot's database, $BOT_DB, holds what no migration makes: ${extras//$'\n'/, }. Each runs with the rights of the login that made it, on rows the dashboard's login writes, the audit log's included, and no rights file takes that away. The bot's own database login can make one, and so can the cPanel account that owns that login. Look at each one, as in SHOW CREATE TRIGGER \`$BOT_DB\`.\`<name>\`; drop it unless someone here made it on purpose, and find out who made it. The dashboard's login wasn't touched."
+        return 1
+    fi
     rights_check_made=yes
     if ! run_for 30 mariadb --batch -e "DROP USER IF EXISTS '$check_login'@'localhost'; CREATE USER '$check_login'@'localhost' ACCOUNT LOCK;"; then
         echo "Couldn't make the throwaway login for the rehearsal (above). The dashboard's login wasn't touched."
@@ -746,6 +848,12 @@ apply_rights() {   # apply_rights [<rights file>, the installed dashboard-rights
             return 1
         fi
     done
+    if ! install -d -m 700 "$home/state" || ! copy=$(mktemp "$home/state/.dashboard-rights.XXXXXX") \
+        || ! cp -- "$file" "$copy" || ! mv -f -- "$copy" "$home/state/dashboard-rights.applied.sql"; then
+        if [ -n "$copy" ]; then rm -f -- "$copy"; fi
+        echo "The rights were applied and compared, but the copy setup-dashboard.sh applies couldn't be saved as state/dashboard-rights.applied.sql (above). Running this again saves it."
+        return 1
+    fi
     echo "The database rights were rehearsed, applied and compared: the dashboard's login has exactly what ${file##*/} gives."
 }
 
@@ -767,7 +875,8 @@ deploy_file_table() {
         "backup.sh $home/backup.sh 700" \
         "status.sh $home/status.sh 700" \
         "README.txt $home/README.txt 600" \
-        "minerbot.cron /etc/cron.d/minerbot 644"
+        "minerbot.cron /etc/cron.d/minerbot 644" \
+        "minerbot-dashboard.tmpfiles $tmpfiles_conf 644"
 }
 
 # The checks a commit's deploy files pass before any of them is installed: every file is there; bash -n passes on every
@@ -777,7 +886,8 @@ check_deploy_files() {   # check_deploy_files <folder> <commit>
     local stage=$1 name out
     local -a problems=()
     for name in compose.yml common.sh dashboard-rights.sql rights-list.sql minerbot-dashboard.conf deploy.sh rollback.sh \
-        setup-dashboard.sh fill-secrets.sh backup.sh status.sh bootstrap.sh README.txt minerbot.cron; do
+        setup-dashboard.sh fill-secrets.sh backup.sh status.sh bootstrap.sh README.txt minerbot.cron \
+        minerbot-dashboard.tmpfiles; do
         [ -f "$stage/$name" ] || problems+=("deploy/$name is missing.")
     done
     for name in common.sh deploy.sh rollback.sh setup-dashboard.sh fill-secrets.sh backup.sh status.sh bootstrap.sh; do
@@ -809,6 +919,9 @@ check_deploy_files() {   # check_deploy_files <folder> <commit>
 # forward only, so deploying an older commit never takes newer scripts back; checked before anything is installed; and
 # each changed file written beside its target and renamed over it, so a script that's running, this one included, keeps
 # its old copy. Sets installed_files to the names it changed, and reexec_due to yes when deploy.sh or common.sh changed.
+# The installed files stay only when they're from a newer commit than this one, or from one on another line of main.
+# When their commit is gone from src or no longer on main, main's history was rewritten, and this commit's files, which
+# passed the check against main, replace them. Then the dashboard's socket folder is made, or put right, either way.
 install_deploy_files() {   # install_deploy_files <commit> [<folder that holds that commit's deploy files>]
     local commit=$1 stage=${2:-} installed='' status=0 name target mode from tmp readme
     installed_files=()
@@ -817,13 +930,24 @@ install_deploy_files() {   # install_deploy_files <commit> [<folder that holds t
         IFS= read -r -t 5 installed < "$home/state/deploy-files.commit" || true
     fi
     if [ -n "$installed" ] && [ "$installed" != "$commit" ]; then
-        run_for 10 git -C "$home/src" merge-base --is-ancestor "$installed" "$commit" || status=$?
+        run_for 10 git -C "$home/src" rev-parse --verify --quiet "$installed^{commit}" > /dev/null || status=$?
         if [ "$status" = 1 ]; then
+            echo "The installed deploy files are from ${installed:0:12}, which src doesn't have any more: main's history was rewritten. The deploy files of ${commit:0:12} replace them."
+        elif [ "$status" != 0 ]; then
+            die "git couldn't tell whether src has ${installed:0:12}, the commit of the installed deploy files (above). Nothing was installed."
+        elif deploy_files_before "$installed" "$commit"; then
+            :
+        elif deploy_files_before "$commit" "$installed"; then
             echo "Kept the deploy files of ${installed:0:12}, which are newer than ${commit:0:12}."
+            make_socket_folder
             return 0
+        elif deploy_files_before "$installed" refs/remotes/origin/main; then
+            echo "Kept the deploy files of ${installed:0:12}, which is on main, on another line than ${commit:0:12}."
+            make_socket_folder
+            return 0
+        else
+            echo "The installed deploy files are from ${installed:0:12}, which isn't on main any more: main's history was rewritten. The deploy files of ${commit:0:12} replace them."
         fi
-        [ "$status" = 0 ] \
-            || die "git couldn't tell whether the installed deploy files, from ${installed:0:12}, are older than ${commit:0:12} (above). Nothing was installed."
     fi
     install -d -m 700 "$home/state" "$home/state/tmp"
     if [ -z "$stage" ]; then
@@ -864,6 +988,27 @@ install_deploy_files() {   # install_deploy_files <commit> [<folder that holds t
     case " ${installed_files[*]} " in
         *" deploy.sh "* | *" common.sh "*) reexec_due=yes ;;
     esac
+    make_socket_folder
+}
+
+# True when the first commit is an ancestor of the second commit or ref in src, false when it isn't; stops the script,
+# with nothing installed, when git can't tell
+deploy_files_before() {   # deploy_files_before <commit> <commit or ref>
+    local status=0 later=$2
+    run_for 10 git -C "$home/src" merge-base --is-ancestor "$1" "$2" || status=$?
+    case $status in
+        0 | 1) return "$status" ;;
+    esac
+    [[ $later == refs/* ]] || later=${later:0:12}
+    die "git couldn't tell whether ${1:0:12} comes before $later (above). Nothing was installed."
+}
+
+# The dashboard's socket folder, as the installed tmpfiles file describes it and the boot makes it: systemd-tmpfiles
+# makes it, or puts its mode and owners right, and never touches what's in it
+make_socket_folder() {
+    [ -f "$tmpfiles_conf" ] || return 0
+    run_for 30 systemd-tmpfiles --create "$tmpfiles_conf" \
+        || die "systemd-tmpfiles couldn't make $socket_dir, the folder of the dashboard's socket (above). Nothing was swapped. Run this again once that's fixed."
 }
 
 # README.txt as installed: the source with {{ORIGIN_CERT_ENDS}} filled in from the certificate nginx has, or "not
@@ -877,25 +1022,119 @@ render_readme() {   # render_readme <README.txt source>
     printf '%s\n' "${text//"{{ORIGIN_CERT_ENDS}}"/"$ends"}"
 }
 
-# True when nginx has MinerBot's file and the reference copy deploy.sh installed differs from it
+# True when nginx has MinerBot's file and the reference copy deploy.sh installed differs from it and is due: it's from
+# the commit the dashboard runs, not waiting for its own dashboard (nginx_file_waits). deploy.sh's note uses it.
 nginx_file_differs() {
-    [ -f "$nginx_conf" ] && [ -f "$home/minerbot-dashboard.conf" ] && ! cmp -s "$home/minerbot-dashboard.conf" "$nginx_conf"
+    [ -f "$nginx_conf" ] && [ -f "$home/minerbot-dashboard.conf" ] && ! cmp -s "$home/minerbot-dashboard.conf" "$nginx_conf" \
+        && ! nginx_file_waits
+}
+
+# True when the reference copy of nginx's file, which comes with the installed deploy files, is from another commit than
+# the dashboard's image, as a --only bot or --no-start deploy, a stopped dashboard swap or a rollback leaves it. It then
+# waits for the dashboard of its own commit: nginx's file moves forward only with the dashboard, so it never runs ahead of
+# it. False when either commit is unknown. Leaves both in files_commit and dashboard_rev, for the messages.
+nginx_file_waits() {
+    files_commit='' dashboard_rev=''
+    if [ -f "$home/state/deploy-files.commit" ]; then
+        IFS= read -r -t 5 files_commit < "$home/state/deploy-files.commit" || true
+    fi
+    [[ $files_commit =~ ^[0-9a-f]{40}$ ]] || return 1
+    dashboard_rev=$(dashboard_commit)
+    [ -n "$dashboard_rev" ] && [ "$dashboard_rev" != "$files_commit" ]
+}
+
+# The full commit the dashboard's image was built from, by its revision label: the image its container runs, else
+# minerbot-dashboard:current, else :new. Nothing when there's no such image or label, or Docker doesn't answer. It never
+# stops anything, since deploy.sh asks at the very end of a deploy.
+dashboard_commit() {
+    local ref='' out='' id='' label='' template
+    template='{{.Id}} {{with index .Config "Labels"}}{{with index . "org.opencontainers.image.revision"}}{{.}}{{end}}{{end}}'
+    ref=$(run_for 30 docker container inspect -f '{{.Image}}' "$dashboard_container" 2> /dev/null) || ref=
+    if [ -n "$ref" ]; then
+        out=$(run_for 30 docker image inspect -f "$template" "$ref" 2> /dev/null) || out=
+    else
+        for ref in minerbot-dashboard:current minerbot-dashboard:new; do
+            out=$(run_for 30 docker image inspect -f "$template" "$ref" 2> /dev/null) && break
+            out=
+        done
+    fi
+    read -r -t 5 id label <<< "$out" || true
+    if [[ $label =~ ^[0-9a-f]{40}$ ]]; then
+        printf '%s\n' "$label"
+    fi
 }
 
 # ---- nginx
 
+# proxy-key.conf's one line, which setup-dashboard.sh writes and status.sh compares: the header nginx adds to every
+# request it passes to the dashboard
+proxy_key_line() {   # proxy_key_line <key>
+    printf 'proxy_set_header X-MinerBot-Proxy-Key "%s";\n' "$1"
+}
+
 nginx_target() {   # nginx_target <name>: where nginx reads that file
     if [ "$1" = minerbot-dashboard.conf ]; then
         printf '%s\n' "$nginx_conf"
+    elif [ "$1" = minerbot-pipelog ]; then
+        printf '%s\n' "$pipelog_hook"
     else
         printf '%s\n' "$nginx_secrets/$1"
     fi
 }
 
+# pipelog.conf's text, which the server file includes in both its blocks: "pipelog off;" while cPanel loads its pipelog
+# module, so the dashboard's requests, Discord's sign-in codes among them, stay out of cPanel's piped domain logs;
+# nothing while it doesn't, as when WHM's piped logging is off, since nginx would then refuse the directive for every site
+pipelog_text() {
+    if [ -e "$pipelog_module" ]; then
+        printf 'pipelog off;\n'
+    fi
+}
+
+# Writes pipelog_text to the file, by rename, unless the file holds it already
+nginx_pipelog_conf() {   # nginx_pipelog_conf <file>
+    local tmp
+    tmp=$(mktemp "$(dirname "$1")/.minerbot-pipelog.XXXXXX")
+    pipelog_text > "$tmp"
+    if cmp -s "$tmp" "$1"; then
+        rm -f "$tmp"
+        return 0
+    fi
+    sync -- "$tmp"
+    mv -f "$tmp" "$1"
+}
+
+# The program setup puts at pipelog_hook, where cPanel runs it each time it rebuilds nginx's global files: right after
+# it writes or deletes the pipelog module's load_module line, and before its own nginx -t and reload. It writes
+# pipelog.conf as pipelog_text does, so WHM's piped logging can go off or on without nginx refusing MinerBot's file, and
+# every site with it. It does nothing once nginx_secrets is gone.
+pipelog_hook_text() {
+    printf '%s\n' '#!/bin/sh' \
+        "# MinerBot's, from deploy/common.sh in the MinerBot repository; setup-dashboard.sh installs it. cPanel runs" \
+        "# it each time it rebuilds nginx's global files, after it writes or deletes the pipelog module's load line" \
+        "# and before it tests and reloads nginx. MinerBot's nginx file includes $nginx_secrets/pipelog.conf, which" \
+        "# this keeps in step with that line: \"pipelog off;\" while the module loads, nothing while it doesn't," \
+        "# since nginx would then refuse the directive for every site. It does nothing once that folder is gone." \
+        "dir=$nginx_secrets" "module=$pipelog_module"
+    cat << 'EOF'
+[ -d "$dir" ] || exit 0
+tmp=$(mktemp "$dir/.minerbot-pipelog.XXXXXX") || exit 1
+if [ -e "$module" ]; then
+    printf 'pipelog off;\n' > "$tmp" || { rm -f "$tmp"; exit 1; }
+fi
+if cmp -s "$tmp" "$dir/pipelog.conf"; then
+    rm -f "$tmp"
+    exit 0
+fi
+mv -f "$tmp" "$dir/pipelog.conf" || { rm -f "$tmp"; exit 1; }
+EOF
+}
+
 # Writes the marker state/nginx-change, which holds the backup's folder, before any change, then copies each named file
 # nginx reads into state/nginx-backup/<UTC>/ and lists the ones that didn't exist, so nginx_restore can put back exactly
-# what was there. The file "complete" comes last: a marker whose backup isn't complete was cut off before any file
-# changed. Keeps the newest 3 backups, and leaves the folder in nginx_backup_dir.
+# what was there. The copies are on disk before the file "complete", which comes last: a marker whose backup isn't
+# complete was cut off before any file changed, and a power loss never leaves a complete backup of empty copies. Keeps
+# the newest 3 backups, and leaves the folder in nginx_backup_dir.
 nginx_backup() {   # nginx_backup <name>...
     local name target old
     local -a all
@@ -916,6 +1155,7 @@ nginx_backup() {   # nginx_backup <name>...
             printf '%s\n' "$name" >> "$nginx_backup_dir/missing"
         fi
     done
+    sync -- "$nginx_backup_dir"/* "$nginx_backup_dir"
     : > "$nginx_backup_dir/complete"
     all=("$home"/state/nginx-backup/*/)
     if [ ${#all[@]} -gt 3 ]; then
@@ -925,33 +1165,48 @@ nginx_backup() {   # nginx_backup <name>...
     fi
 }
 
-# Puts back every file a backup kept, byte for byte (a copy beside it, then a rename), and removes the ones that didn't
-# exist before. Files the backup doesn't name are left alone.
+# Puts back every file a backup kept, byte for byte (a copy beside it, on disk, then a rename), and removes the ones that
+# didn't exist before. Files the backup doesn't name are left alone. When the backup names the conf.d file, that file
+# goes out first and comes back last, so a run cut off in between never leaves nginx a live conf.d file beside a
+# certificate and key that don't belong together, which would fail nginx -t, and every reload and start, for every site.
+# pipelog.conf then follows cPanel's setting, which may have changed since the backup, as cPanel's hook would make it.
 nginx_restore() {   # nginx_restore <backup folder>
     local dir=$1 name target tmp
-    for name in "${nginx_names[@]}"; do
+    if [ -f "$dir/minerbot-dashboard.conf" ] || grep -qxF minerbot-dashboard.conf "$dir/missing" 2> /dev/null; then
+        rm -f "$nginx_conf"
+    fi
+    for name in origin-cert.pem origin-key.pem proxy-key.conf pipelog.conf minerbot-pipelog minerbot-dashboard.conf; do
         target=$(nginx_target "$name")
         if [ -f "$dir/$name" ]; then
+            # cPanel's folder of config scripts, gone since the backup, means cPanel no longer runs the hook
+            [ "$name" != minerbot-pipelog ] || [ -d "$(dirname "$target")" ] || continue
             install -d -m 700 "$nginx_secrets"
             tmp=$(mktemp "$(dirname "$target")/.minerbot-restore.XXXXXX")
             cp -p "$dir/$name" "$tmp"
+            sync -- "$tmp"
             mv -f "$tmp" "$target"
         elif grep -qxF -- "$name" "$dir/missing" 2> /dev/null; then
             rm -f "$target"
         fi
     done
+    if [ -f "$nginx_secrets/pipelog.conf" ]; then
+        nginx_pipelog_conf "$nginx_secrets/pipelog.conf"
+    fi
 }
 
-# Changes nginx's files for the dashboard, as deploy/README.md describes. Sets nginx_result to "reloaded" when the new
-# files run and both smoke checks passed; "problem" when the new files run but a smoke check failed, with the words in
-# nginx_problem; or "refused" when the standalone test, the full test or the reload failed, and the old files, back
-# byte for byte, are what runs. INT, TERM and HUP are ignored from the first change until the marker is gone. A run
-# killed in between leaves the marker, and the next setup run undoes the change from its backup first.
+# Changes nginx's files for the dashboard, as deploy/README.md describes. With the four files it's given, it installs
+# pipelog.conf and cPanel's hook, pipelog_hook, which keeps pipelog.conf in step with WHM's piped logging from then on.
+# Sets nginx_result to "reloaded" when nginx took the reload of the new files and both smoke checks passed; "problem"
+# when the new files run but a smoke check failed, with the words in nginx_problem; or "refused" when the standalone
+# test or the full test failed, or nginx didn't take the reload, and the old files, back byte for byte, are what runs.
+# After a reload nginx may have taken that holds only once a second reload, of the old files, was taken; when it isn't,
+# the marker stays. INT, TERM and HUP are ignored from the first change until the marker is gone. A run killed in
+# between leaves the marker, and the next setup run undoes the change from its backup first.
 nginx_change() {   # nginx_change <folder with minerbot-dashboard.conf, origin-cert.pem, origin-key.pem, proxy-key.conf>
-    local from=$1 staging=$nginx_secrets/.staging check=$home/state/nginx-check name
+    local from=$1 staging=$nginx_secrets/.staging check=$home/state/nginx-check name reload=0
     nginx_result='' nginx_problem=''
     # 1. The marker and the backup, before any change
-    nginx_backup "${nginx_names[@]}"
+    nginx_backup "${nginx_names[@]}" pipelog.conf minerbot-pipelog
     trap '' INT TERM HUP
     # 2. The candidate on its own, with the server's main context, before it goes near conf.d
     install -d -m 700 "$nginx_secrets"
@@ -961,6 +1216,10 @@ nginx_change() {   # nginx_change <folder with minerbot-dashboard.conf, origin-c
     for name in origin-cert.pem origin-key.pem proxy-key.conf; do
         install -m 600 "$from/$name" "$staging/$name"
     done
+    pipelog_text > "$staging/pipelog.conf"
+    chmod 600 "$staging/pipelog.conf"
+    pipelog_hook_text > "$staging/minerbot-pipelog"
+    chmod 755 "$staging/minerbot-pipelog"
     install -m 644 "$from/minerbot-dashboard.conf" "$staging/minerbot-dashboard.conf"
     sed -e "s#$nginx_secrets/#$staging/#g" -e '/pipelog/d' "$staging/minerbot-dashboard.conf" > "$check/candidate.conf"
     {
@@ -975,10 +1234,22 @@ nginx_change() {   # nginx_change <folder with minerbot-dashboard.conf, origin-c
         nginx_result=refused
         return 0
     fi
-    # 3. Installed by rename, the conf.d file last. Both folders are under /etc, so each rename is atomic.
-    for name in origin-cert.pem origin-key.pem proxy-key.conf; do
+    # 3. Installed by rename. The staged files are on disk first, so a power loss never leaves an empty one in place. Our
+    # conf.d file goes out first and comes back last, so a run cut off in between never leaves nginx a live conf.d file
+    # beside a certificate and key that don't belong together, or beside files it names that aren't there yet: either
+    # would fail nginx -t, and every reload and start, for every site. A cPanel reload in those few milliseconds loads
+    # nginx without the dashboard, until step 5's. Both folders are under /etc, so each rename is atomic.
+    sync -- "$staging"/* "$staging"
+    rm -f "$nginx_conf"
+    for name in origin-cert.pem origin-key.pem proxy-key.conf pipelog.conf; do
         mv -f "$staging/$name" "$nginx_secrets/$name"
     done
+    if [ -d "${pipelog_hook%/*}" ]; then
+        mv -f "$staging/minerbot-pipelog" "$pipelog_hook"
+    else
+        rm -f "$staging/minerbot-pipelog"
+        echo "Note: cPanel's folder for nginx's config scripts, ${pipelog_hook%/*}, isn't on this server, so pipelog.conf can't follow WHM's piped logging. Keep piped logging on: with it off, nginx refuses MinerBot's file, and every site with it."
+    fi
     mv -f "$staging/minerbot-dashboard.conf" "$nginx_conf"
     rmdir "$staging"
     # 4. With every site on this server
@@ -986,9 +1257,14 @@ nginx_change() {   # nginx_change <folder with minerbot-dashboard.conf, origin-c
         nginx_put_back "nginx -t refused the new files (above), so the old ones are back and nginx wasn't reloaded."
         return 0
     fi
-    # 5. cPanel's own reload
-    if ! run_for 120 /scripts/restartsrv_nginx --reload; then
-        nginx_put_back "cPanel's reload of nginx failed (above), so the old files are back, as nginx still runs them."
+    # 5. cPanel's own reload, which nginx must take. One that failed may still have loaded the new files, and so may one
+    # that nginx loads after its wait, so the old ones are loaded again either way.
+    cpanel_reload || reload=$?
+    if [ "$reload" = 1 ]; then
+        nginx_put_back --reload "cPanel's reload of nginx failed (above), so the old files are back."
+        return 0
+    elif [ "$reload" = 2 ]; then
+        nginx_put_back --reload "nginx didn't take cPanel's reload (above), so it still runs the old files, and they're back."
         return 0
     fi
     # 6. Done: nginx runs the new files
@@ -998,18 +1274,44 @@ nginx_change() {   # nginx_change <folder with minerbot-dashboard.conf, origin-c
     nginx_smoke_check
 }
 
-nginx_put_back() {   # nginx_put_back <message>: every file back from the backup, and a second nginx -t, which must pass
+# Every file back from the backup, then a second nginx -t, which must pass. With --reload, for a reload that nginx may
+# have taken with the new files after all, nginx then loads the old ones again. The marker goes only once nginx took that
+# reload: a run cut off before, or a second reload that fails or isn't taken, leaves it, so the next setup run puts the
+# old files back and reloads first, and deploy.sh and status.sh --check report it until then.
+nginx_put_back() {   # nginx_put_back [--reload] <message>
+    local again=no said reload=0
+    if [ "$1" = --reload ]; then
+        again=yes
+        shift
+    fi
+    said=$1
     nginx_restore "$nginx_backup_dir"
     rm -rf "$nginx_secrets/.staging"
     if ! run_for 30 nginx -t -q; then
         echo "WARNING: nginx -t still fails with the old files back (above). Look at it now: until it passes, every reload of nginx fails, AutoSSL's included."
+    elif [ "$again" = yes ]; then
+        cpanel_reload || reload=$?
+        if [ "$reload" != 0 ]; then
+            trap - INT TERM HUP
+            echo "$said"
+            if [ "$reload" = 1 ]; then
+                echo "WARNING: cPanel's reload failed again, with the old files back (above). If the first reload took effect before it failed, nginx still runs the new files, which don't match dashboard.env. The marker state/nginx-change stays, so the next ./setup-dashboard.sh puts the old files back and reloads nginx first. Or run /scripts/restartsrv_nginx --reload once it works."
+            else
+                echo "WARNING: nginx didn't take the reload of the old files either (above), so it takes no reload now, AutoSSL's included, until what its error log names is fixed. It runs what it ran before this change, unless a reload took the new files after all. The marker state/nginx-change stays, so the next ./setup-dashboard.sh puts the old files back and reloads nginx first."
+            fi
+            nginx_result=refused
+            return 0
+        fi
+        said+=" nginx was reloaded with them, in case the first reload had loaded the new ones after all."
     fi
     rm -f "$home/state/nginx-change"
     trap - INT TERM HUP
-    echo "$1"
+    echo "$said"
     nginx_result=refused
 }
 
+# After a reload nginx took: a request from this server, which isn't Cloudflare's, gets 403, and nginx serves the
+# installed certificate. Neither sees the proxy key, which only the reload's new workers prove.
 nginx_smoke_check() {   # sets nginx_result to reloaded or problem
     local answer=000 served='' expected tries=0 pause=2
     if test_fast; then
@@ -1027,9 +1329,15 @@ nginx_smoke_check() {   # sets nginx_result to reloaded or problem
         fi
         sleep "$pause"
     done
-    nginx_problem="nginx runs the new file, but it answered $answer to a request from this server, where 403 was expected"
+    nginx_problem="nginx runs the new file, but"
+    if [ "$answer" != 403 ]; then
+        nginx_problem+=" it answered $answer to a request from this server, where 403 was expected"
+    fi
     if [ -z "$expected" ] || [ "$served" != "$expected" ]; then
-        nginx_problem+=", and the certificate it serves for $public_host isn't the installed one"
+        if [ "$answer" != 403 ]; then
+            nginx_problem+=", and"
+        fi
+        nginx_problem+=" the certificate it serves for $public_host isn't the installed one"
     fi
     nginx_problem+=". The other sites are unaffected, since nginx -t and the reload passed. Look for another block naming the host: grep -rn --exclude-dir=minerbot $public_host /etc/nginx"
     echo "$nginx_problem"
@@ -1038,13 +1346,16 @@ nginx_smoke_check() {   # sets nginx_result to reloaded or problem
 
 # Undoes an nginx change that was cut off, from its backup, byte for byte, then tests and reloads. With --no-reload it
 # only puts the files back, for --remove-nginx, which tests itself. Sets nginx_result to none (there was no marker),
-# undone, or failed (with the reason above).
+# undone, or failed (with the reason above). The cut-off run's staging folder goes, and so does any copy a cut-off
+# restore left beside its target, which may hold the old key.
 nginx_undo_cut_off() {   # nginx_undo_cut_off [--no-reload]
-    local dir=
+    local dir='' reload=0
     nginx_result=none
     [ -f "$home/state/nginx-change" ] || return 0
     IFS= read -r -t 5 dir < "$home/state/nginx-change" || true
     rm -rf "$nginx_secrets/.staging"
+    rm -f "$nginx_secrets"/.minerbot-restore.* "$nginx_secrets"/.minerbot-pipelog.* \
+        "$(dirname "$nginx_conf")"/.minerbot-restore.* "${pipelog_hook%/*}"/.minerbot-restore.*
     if [[ $dir != "$home/state/nginx-backup/"* ]] || [ ! -f "$dir/complete" ]; then
         rm -f "$home/state/nginx-change"
         echo "An nginx change was cut off before it changed any file, so there was nothing to undo."
@@ -1067,10 +1378,15 @@ nginx_undo_cut_off() {   # nginx_undo_cut_off [--no-reload]
         nginx_result=failed
         return 0
     fi
-    if ! run_for 120 /scripts/restartsrv_nginx --reload; then
+    cpanel_reload || reload=$?
+    if [ "$reload" != 0 ]; then
         rm -f "$home/state/nginx-change"
         trap - INT TERM HUP
-        echo "An nginx change was cut off earlier. Its files are back as they were before it and nginx -t passes, but cPanel's reload failed (above). Run /scripts/restartsrv_nginx --reload, then this again."
+        if [ "$reload" = 1 ]; then
+            echo "An nginx change was cut off earlier. Its files are back as they were before it and nginx -t passes, but cPanel's reload failed (above). Run /scripts/restartsrv_nginx --reload, then this again."
+        else
+            echo "An nginx change was cut off earlier. Its files are back as they were before it and nginx -t passes, but nginx didn't take cPanel's reload (above). Fix what its error log names, run /scripts/restartsrv_nginx --reload, then this again."
+        fi
         nginx_result=failed
         return 0
     fi
@@ -1085,6 +1401,7 @@ nginx_undo_cut_off() {   # nginx_undo_cut_off [--no-reload]
 # reload-failed (out, and the test passes without it, but the reload failed) or other-file (the test still fails, so
 # the file is back as it was and nothing was reloaded).
 nginx_remove() {
+    local reload=0
     nginx_undo_cut_off --no-reload
     if [ ! -e "$nginx_conf" ]; then
         echo "MinerBot's file isn't in nginx. Nothing was changed."
@@ -1102,10 +1419,15 @@ nginx_remove() {
         nginx_result=other-file
         return 0
     fi
-    if ! run_for 120 /scripts/restartsrv_nginx --reload; then
+    cpanel_reload || reload=$?
+    if [ "$reload" != 0 ]; then
         rm -f "$home/state/nginx-change"
         trap - INT TERM HUP
-        echo "MinerBot's file is out of nginx, and nginx -t passes without it, but cPanel's reload failed (above). nginx's next reload, AutoSSL's included, loads the configuration without it. Its copy: ${nginx_backup_dir#"$home"/}/"
+        if [ "$reload" = 1 ]; then
+            echo "MinerBot's file is out of nginx, and nginx -t passes without it, but cPanel's reload failed (above). nginx's next reload, AutoSSL's included, loads the configuration without it. Its copy: ${nginx_backup_dir#"$home"/}/"
+        else
+            echo "MinerBot's file is out of nginx, and nginx -t passes without it, but nginx didn't take cPanel's reload (above), so it still runs the file. The first reload nginx takes loads the configuration without it. Its copy: ${nginx_backup_dir#"$home"/}/"
+        fi
         nginx_result=reload-failed
         return 0
     fi
@@ -1129,29 +1451,30 @@ main_context() {   # main_context [<nginx.conf>, /etc/nginx/nginx.conf by defaul
 }
 
 # The http-level look: every line of nginx's whole configuration outside server and types blocks, with its file. It never
-# prints a secret: nginx -T runs as root and prints every included file, so it skips every file that isn't
-# world-readable (under /etc/nginx, and any other file nginx -T names), the folder /etc/nginx/minerbot, and any line
-# naming X-MinerBot-Proxy-Key or cPanel-localhost, whatever the letter case.
+# prints a secret: nginx -T runs as root and prints every included file, so it prints only the files nginx -T names that
+# anyone may read, by their whole path, spaces included; whatever it can't match to such a file, it leaves out. It also
+# skips the folder /etc/nginx/minerbot whatever the modes there, and any line naming X-MinerBot-Proxy-Key or
+# cPanel-localhost, whatever the letter case.
 nginx_look() {
-    local conf private file
+    local conf public='' file
     conf=$(run_for 30 nginx -T 2> /dev/null) || {
         echo "nginx -T failed. nginx -t shows why." >&2
         return 1
     }
-    private=$(find -L /etc/nginx -type f ! -perm -o=r 2> /dev/null) || true
     while IFS= read -r -t 5 file; do
-        if [ -n "$(find -L "$file" -maxdepth 0 -type f ! -perm -o=r 2> /dev/null)" ]; then
-            private+=$'\n'$file
+        if [ -n "$(find -L "$file" -maxdepth 0 -type f -perm -o=r 2> /dev/null)" ]; then
+            public+=$file$'\n'
         fi
     done < <(printf '%s\n' "$conf" | sed -n 's/^# configuration file \(.*\):$/\1/p')
     {
-        printf '%s\n' "$private"
+        printf '%s' "$public"
         printf '\001\n'
         printf '%s\n' "$conf"
     } | awk '
-        !listed { if ($0 == "\001") listed = 1; else if ($0 != "") private[$0] = 1; next }
-        /^# configuration file / { file = $4; sub(/:$/, "", file); depth = 0; skip = 0
-                                   secret = (file in private) || (file ~ /^\/etc\/nginx\/minerbot\//); next }
+        !listed { if ($0 == "\001") listed = 1; else if ($0 != "") public[$0] = 1; next }
+        /^# configuration file / { file = $0; sub(/^# configuration file /, "", file); sub(/:$/, "", file)
+                                   depth = 0; skip = 0
+                                   secret = !(file in public) || (file ~ /^\/etc\/nginx\/minerbot\//); next }
         secret { next }
         { line = $0; sub(/#.*/, "", line) }
         !skip && line ~ /^[ \t]*(server|types)[ \t]*(\{|$)/ { skip = 1; skip_at = depth; opened = 0 }
@@ -1175,6 +1498,50 @@ local_answer() {
     printf '%s\n' "${code:-000}"
 }
 
+# The PIDs of nginx's worker processes, the master's children that nginx titles "nginx: worker process", one per line
+# and sorted; nothing when the master can't be found or its workers can't be listed. Workers an earlier reload is
+# letting finish, titled "nginx: worker process is shutting down", are among them.
+nginx_worker_pids() {
+    local master=''
+    { IFS= read -r -t 5 master < "$nginx_pid_file"; } 2> /dev/null || true
+    [[ $master =~ ^[0-9]+$ ]] || return 0
+    run_for 10 pgrep -P "$master" -f '^nginx: worker process' 2> /dev/null | LC_ALL=C sort || true
+}
+
+# cPanel's reload of nginx, and the proof that nginx took it. The reload only signals nginx's master, and cPanel's script
+# exits 0 whatever the master does then. A master that loads the new configuration starts new workers for it; one that
+# can't, as when a new listen address is held by another program, which nginx -t never tries, keeps its old workers and
+# its old configuration, and says why only in its error log. Neither the 403 check nor the certificate can tell those
+# apart when only the proxy key changed. So the reload counts once a worker runs that didn't before, within 10 seconds.
+# Returns 0 when one does, 1 when cPanel's reload failed, and 2, with the reason, when it exited 0 but nginx kept its old
+# workers. When the workers can't be listed beforehand, cPanel's exit code is all there is, and it says so.
+cpanel_reload() {
+    local before after new limit=10 poll=0.5 started
+    if test_fast; then
+        limit=2 poll=0.2
+    fi
+    before=$(nginx_worker_pids)
+    run_for 120 /scripts/restartsrv_nginx --reload || return 1
+    if [ -z "$before" ]; then
+        echo "Note: nginx's worker processes couldn't be listed from $nginx_pid_file, so only cPanel's exit code says nginx took the reload."
+        return 0
+    fi
+    started=$SECONDS
+    while :; do
+        after=$(nginx_worker_pids)
+        new=$(printf '%s\n' "$after" | grep -vxF -f <(printf '%s\n' "$before")) || new=
+        if [ -n "$new" ]; then
+            return 0
+        fi
+        if [ $((SECONDS - started)) -ge "$limit" ]; then
+            echo "cPanel's reload exited 0, but nginx kept its old worker processes for $limit seconds, so it didn't load the files on disk: nginx keeps its running configuration when it can't apply a new one, as with a listen address another program holds, which nginx -t never tries, and says why only in its error log."
+            echo "nginx's reason: grep -F '[emerg]' /var/log/nginx/error.log | tail -n 5"
+            return 2
+        fi
+        sleep "$poll"
+    done
+}
+
 # ---- Setup
 
 on_terminal() {   # true when the input is a terminal; every stty is behind it
@@ -1193,10 +1560,13 @@ drain_input() {
 
 # Reads one pasted PEM block into a file, line by line, each line waiting at most 10 minutes. Blank lines are skipped,
 # since a CRLF paste arrives with a blank line after every line. The first line must be the BEGIN line, or "keep", and the
-# paste ends by itself at the END line, at most 200 lines. hidden turns the terminal's echo off for the whole paste.
-# Returns 0 for a block, 3 for keep, 4 when it's too long, 5 when nothing came, 6 when the first line isn't BEGIN.
+# paste ends by itself at the END line, at most 200 lines. hidden turns the terminal's echo off for the whole paste and
+# for the draining of what's left of it, so a key pasted along never shows.
+# Returns 0 for a block, 3 for keep, 4 when it's too long, 5 when nothing came, 6 when the first line isn't BEGIN. With
+# 6, pem_begin holds the label of a BEGIN line of another kind, such as PRIVATE KEY, which is no secret, or nothing.
 paste_pem() {   # paste_pem <CERTIFICATE|PRIVATE KEY> <file> [hidden]
     local kind=$1 out=$2 hidden=${3:-} line count=0 status=5 limit
+    pem_begin=
     limit=$(read_limit)
     : > "$out"
     if [ "$hidden" = hidden ] && on_terminal; then stty -echo; fi
@@ -1215,6 +1585,9 @@ paste_pem() {   # paste_pem <CERTIFICATE|PRIVATE KEY> <file> [hidden]
                 break
             fi
             if [[ $line != "-----BEGIN "*"$kind-----" ]]; then
+                if [[ $line =~ ^-----BEGIN\ ([A-Z0-9 ]{1,40})-----$ ]]; then
+                    pem_begin=${BASH_REMATCH[1]}
+                fi
                 status=6
                 break
             fi
@@ -1230,8 +1603,9 @@ paste_pem() {   # paste_pem <CERTIFICATE|PRIVATE KEY> <file> [hidden]
             break
         fi
     done
-    if [ "$hidden" = hidden ] && on_terminal; then stty echo; fi
+    # Drained before echo comes back: each read -s puts back the state it found, so the whole drain runs without echo
     drain_input
+    if [ "$hidden" = hidden ] && on_terminal; then stty echo; fi
     return "$status"
 }
 

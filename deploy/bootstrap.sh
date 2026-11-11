@@ -22,7 +22,7 @@ usage="Usage: bash <staging folder>/deploy/bootstrap.sh <commit> <staging folder
 old_files=(compose.yml deploy.sh rollback.sh fill-secrets.sh setup-login.sh move-docker-storage.sh README.txt)
 # The commands the scripts use, checked before the move: cmp and diff come from diffutils, which a minimal AlmaLinux lacks
 needed=(awk cmp curl cut date df diff docker du find flock getent git grep groupadd gzip install jq mariadb mariadb-dump
-    mktemp nginx openssl readlink sed sort ss stat systemctl systemd-run tail tar timeout tr useradd)
+    mktemp nginx openssl readlink sed sort stat systemctl systemd-run systemd-tmpfiles tail tar timeout tr useradd)
 
 apply=no
 if [ "${1:-}" = --apply ]; then
@@ -82,13 +82,13 @@ needed_commands() {   # every command the scripts use, there before anything cha
 foreground_part() {
     local done_line=''
     step="checking before it starts"
+    trap 'status=$?; foreground_cleanup || true; exit "$status"' EXIT
     [ "$(id -u)" = 0 ] || die "Run this as root. Nothing was changed."
     if [ ! -d "$home" ] || [ "$(stat -c %a "$home")" != 700 ]; then
         die "$home must exist, with mode 700. Nothing was changed."
     fi
     [ -f "$home/bot.env" ] || die "$home/bot.env is missing, so this isn't the server's MinerBot folder. Nothing was changed."
     cd "$home"
-    trap 'status=$?; foreground_cleanup || true; exit "$status"' EXIT
     needed_commands
     if [ -f "$home/state/bootstrap.done" ]; then
         IFS= read -r -t 5 done_line < "$home/state/bootstrap.done" || true
@@ -199,19 +199,34 @@ reserve_1654() {   # UID and GID 1654, the containers' user, for a system user t
     echo "Warning: UID 1654 belongs to ${user:-nobody} and GID 1654 to ${group:-nobody}, so they weren't reserved. Both containers run as 1654, and whoever has it could see their processes. The rest goes on, and status.sh keeps saying so."
 }
 
+dry_run_check() {   # dry_run_check <the file, in words> <compose file> <message when Compose would recreate the bot>
+    local s=0
+    bot_unchanged "$2" || s=$?
+    [ "$s" != 0 ] || return 0
+    if [ -n "${dry_run:-}" ]; then
+        printf '%s\n' "$dry_run" | sed 's/^/  /'
+    fi
+    case $s in
+        1) die "$3" ;;
+        2)
+            case ${dry_run_status:-} in
+                124 | 137) die "Compose's dry run with $1 didn't finish within 60 seconds, so it said nothing about the bot. Nothing was installed, and the bot wasn't touched. Run the same commands again." ;;
+                *) die "Compose's dry run with $1 failed with exit code ${dry_run_status:-unknown} (its lines, if any, are above), so it said nothing about the bot. Nothing was installed, and the bot wasn't touched. Run the same commands again once Docker and Compose answer." ;;
+            esac
+            ;;
+        *) die "Compose's dry run with $1 printed lines this check doesn't recognise (above, if any), perhaps from a newer Compose, so it can't tell whether the bot would stay as it runs. Nothing was installed, and the bot wasn't touched. Decide with the owner what those lines mean first." ;;
+    esac
+}
+
 check_bot_unchanged() {   # Compose's own dry run, with today's compose.yml and then with the new one
     local hash_old hash_new
     [ -f "$home/old/compose.yml" ] \
         || die "Today's compose.yml isn't in old/, so the bot can't be checked. Nothing was installed, and the bot wasn't touched."
-    if ! bot_unchanged "$home/old/compose.yml"; then
-        printf '%s\n' "${dry_run:-}" | sed 's/^/  /'
-        die "Compose would recreate the bot even with today's compose.yml, so bot.env was edited after the bot started, or Compose was upgraded. Nothing was installed, and the bot wasn't touched. Decide with the owner whether to recreate the bot on purpose first."
-    fi
+    dry_run_check "today's compose.yml" "$home/old/compose.yml" \
+        "Compose would recreate the bot even with today's compose.yml, so bot.env was edited after the bot started, or Compose was upgraded. Nothing was installed, and the bot wasn't touched. Decide with the owner whether to recreate the bot on purpose first."
     echo "Compose's dry run with today's compose.yml: the bot stays exactly as it runs."
-    if ! bot_unchanged "$stage/deploy/compose.yml"; then
-        printf '%s\n' "${dry_run:-}" | sed 's/^/  /'
-        die "The new compose.yml would recreate the bot (Compose's lines are above). Nothing was installed, and the bot wasn't touched."
-    fi
+    dry_run_check "the new compose.yml" "$stage/deploy/compose.yml" \
+        "The new compose.yml would recreate the bot (Compose's lines are above). Nothing was installed, and the bot wasn't touched."
     echo "Compose's dry run with the new compose.yml: the bot stays exactly as it runs."
     hash_old=$(run_for 30 docker compose -f "$home/old/compose.yml" --project-directory "$home" config --hash bot) \
         || die "Compose couldn't parse today's compose.yml (above). Nothing was installed."

@@ -11,7 +11,8 @@ using MinerBot.Dashboard.Settings;
 
 namespace MinerBot.Dashboard.Hosting
 {
-    // Kestrel, the proxy in front of it, Data Protection and the rate limiter, each set from the checked settings
+    // Kestrel and its socket file, the proxy in front of it, Data Protection and the rate limiter, each set from the checked
+    // settings
     internal static class DashboardHosting
     {
         // Data Protection keys made under this name open only for it, wherever the app's files are
@@ -26,7 +27,9 @@ namespace MinerBot.Dashboard.Hosting
             // Kestrel is made as the app is built, before the settings are checked, so it reads its address itself. One that
             // doesn't parse falls back to the default here, and never binds: the check right after the build stops the app.
             services.AddOptions<KestrelServerOptions>().Configure<IConfiguration>((kestrel, configuration) =>
-                ConfigureKestrel(kestrel, DashboardSettings.ListenEndpoint(configuration) ?? new IPEndPoint(IPAddress.Loopback, DashboardOptions.DefaultPort)));
+                ConfigureKestrel(kestrel, DashboardSettings.ListenEndpoint(configuration) ?? new IPEndPoint(IPAddress.Loopback, DashboardOptions.DefaultPort),
+                    DashboardSettings.UnixSocket(configuration)));
+            services.AddHostedService<UnixSocketFile>();
             services.Configure<ForwardedHeadersOptions>(ConfigureForwardedHeaders);
             services.AddOptions<HostFilteringOptions>().Configure<IOptions<DashboardOptions>>((filtering, settings) => ConfigureHostFiltering(filtering, settings.Value));
 
@@ -42,7 +45,8 @@ namespace MinerBot.Dashboard.Hosting
             return services;
         }
 
-        internal static void ConfigureKestrel(KestrelServerOptions kestrel, IPEndPoint endpoint)
+        // On the Unix socket when one is given, and then on nothing else, otherwise on the endpoint
+        internal static void ConfigureKestrel(KestrelServerOptions kestrel, IPEndPoint endpoint, string? unixSocket = null)
         {
             kestrel.AddServerHeader = false;
             kestrel.Limits.MaxRequestBodySize = MaxRequestBodySize;
@@ -54,7 +58,25 @@ namespace MinerBot.Dashboard.Hosting
 
             // An endpoint set in code wins over ASPNETCORE_HTTP_PORTS and ASPNETCORE_URLS, so the aspnet image's 8080 can
             // never bind every address. nginx talks HTTP/1.1, so there's no reason to offer h2c.
-            kestrel.Listen(endpoint, listen => listen.Protocols = HttpProtocols.Http1);
+            if (unixSocket == null)
+            {
+                kestrel.Listen(endpoint, listen => listen.Protocols = HttpProtocols.Http1);
+                return;
+            }
+
+            kestrel.ListenUnixSocket(unixSocket, listen =>
+            {
+                listen.Protocols = HttpProtocols.Http1;
+
+                // A connection on the socket has no address. Only nginx's group can open the socket's folder, so it counts as
+                // loopback, as nginx's connections did on TCP: the forwarded headers trust it for one hop, and the rate
+                // limits count each visitor by the address nginx sends.
+                listen.Use(next => connection =>
+                {
+                    connection.RemoteEndPoint = new IPEndPoint(IPAddress.Loopback, 0);
+                    return next(connection);
+                });
+            });
         }
 
         internal static void ConfigureForwardedHeaders(ForwardedHeadersOptions options)

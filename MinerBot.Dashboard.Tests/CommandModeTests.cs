@@ -102,6 +102,84 @@ namespace MinerBot.Dashboard.Tests
             Assert.StartsWith("Unhealthy", output.ToString());
         }
 
+        // With Dashboard:UnixSocket set, as compose.yml sets it on the server, the check asks through the socket, on Host
+        // localhost like the address's
+        [Fact]
+        public async Task HealthyAnswerOnTheSocketExitsZero()
+        {
+            using var sockets = new TestSockets();
+            var path = sockets.PathOf("dashboard.sock");
+            await using var server = LoopbackServer.Answering(200, "OK", "Healthy", unixSocket: path);
+            var output = new StringWriter();
+
+            var exit = await DashboardCommands.HealthCheckAsync(Settings(("Dashboard:UnixSocket", path)), output, Token).WaitAsync(TimeSpan.FromSeconds(30), Token);
+
+            Assert.Equal(0, exit);
+            Assert.Equal("Healthy", output.ToString().Trim());
+
+            var request = await server.Request.WaitAsync(TimeSpan.FromSeconds(10), Token);
+            Assert.StartsWith("GET /health/live HTTP/1.1\r\n", request);
+            Assert.Contains("\r\nHost: localhost\r\n", request);
+        }
+
+        // The socket replaces the address, so the port isn't asked, even when something there would say Healthy
+        [Fact]
+        public async Task SocketIsAskedInsteadOfThePort()
+        {
+            using var sockets = new TestSockets();
+            await using var port = LoopbackServer.Answering(200, "OK", "Healthy");
+            await using var socket = LoopbackServer.Answering(503, "Service Unavailable", "Unhealthy", unixSocket: sockets.PathOf("dashboard.sock"));
+            var output = new StringWriter();
+
+            var exit = await DashboardCommands.HealthCheckAsync(Settings(("Dashboard:Port", port.Port.ToString()), ("Dashboard:UnixSocket", sockets.PathOf("dashboard.sock"))), output, Token)
+                .WaitAsync(TimeSpan.FromSeconds(30), Token);
+
+            Assert.Equal(1, exit);
+            Assert.Equal("Unhealthy: 503", output.ToString().Trim());
+            Assert.False(port.Request.IsCompleted, "The check asked the port");
+        }
+
+        // No socket there, as before the dashboard has started or after it was killed
+        [Fact]
+        public async Task NothingOnTheSocketExitsOne()
+        {
+            using var sockets = new TestSockets();
+            var output = new StringWriter();
+
+            var exit = await DashboardCommands.HealthCheckAsync(Settings(("Dashboard:UnixSocket", sockets.PathOf("dashboard.sock"))), output, Token).WaitAsync(TimeSpan.FromSeconds(30), Token);
+
+            Assert.Equal(1, exit);
+            Assert.Equal("Unhealthy: HttpRequestException", output.ToString().Trim());
+        }
+
+        // A path the dashboard couldn't listen on is said as such, and nothing is asked
+        [Theory]
+        [InlineData("dashboard.sock")]
+        [InlineData("relative/dashboard.sock")]
+        public async Task BadSocketPathExitsOne(string path)
+        {
+            var output = new StringWriter();
+
+            Assert.Equal(1, await DashboardCommands.HealthCheckAsync(Settings(("Dashboard:UnixSocket", path)), output, Token).WaitAsync(TimeSpan.FromSeconds(30), Token));
+            Assert.Equal("Unhealthy: Dashboard:UnixSocket isn't valid", output.ToString().Trim());
+        }
+
+        // Empty is the setting turned off, so the port is asked as before
+        [Theory]
+        [InlineData("")]
+        [InlineData(" ")]
+        public async Task EmptySocketAsksThePort(string empty)
+        {
+            await using var server = LoopbackServer.Answering(200, "OK", "Healthy");
+            var output = new StringWriter();
+
+            var exit = await DashboardCommands.HealthCheckAsync(Settings(("Dashboard:Port", server.Port.ToString()), ("Dashboard:UnixSocket", empty)), output, Token)
+                .WaitAsync(TimeSpan.FromSeconds(30), Token);
+
+            Assert.Equal(0, exit);
+            Assert.Equal("Healthy", output.ToString().Trim());
+        }
+
         [Fact]
         public async Task MigrateWithoutBotConnectionExitsOne()
         {

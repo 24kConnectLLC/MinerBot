@@ -7,8 +7,10 @@
 # terminal follows. They change only what differs, so running this again finishes whatever an interruption left.
 # Usage:
 #   ./setup-dashboard.sh                         asks every question; Enter keeps a value, and keep keeps a paste
-#   ./setup-dashboard.sh --no-questions          keeps every current value, installs a changed nginx file, applies the
-#                                                rights again and repairs whatever differs, then asks "Go ahead?"
+#   ./setup-dashboard.sh --no-questions          keeps every current value, installs a changed nginx file once the
+#                                                dashboard of its commit runs, applies the rights the last apply used
+#                                                again, repairs whatever differs and starts a dashboard that's stopped,
+#                                                then asks "Go ahead?"
 #   ./setup-dashboard.sh --no-questions --yes    the same without that question, for a run without a terminal
 #   --rotate-proxy-key, --rotate-db-password     make a new proxy key or database password; either goes with the above
 #   ./setup-dashboard.sh --remove-nginx [--yes]  the emergency path: takes MinerBot's file out of nginx, nothing else
@@ -25,6 +27,11 @@ step="taking its options"
 trap 'stopped $? $LINENO' ERR
 usage="Usage: ./setup-dashboard.sh [--no-questions] [--yes] [--rotate-proxy-key] [--rotate-db-password], or ./setup-dashboard.sh --remove-nginx [--yes]"
 env_file=$home/dashboard.env
+# The copy apply_rights keeps of the rights file it last applied. Setup applies that copy again, so it never gives the
+# running dashboard rights from a newer commit than the last dashboard deploy applied: a --only bot deploy installs a
+# newer dashboard-rights.sql without applying it. Only before any apply has kept one, on the first setup, does setup
+# apply the installed dashboard-rights.sql.
+rights_copy=$home/state/dashboard-rights.applied.sql
 env_header_1="# The web dashboard's settings. setup-dashboard.sh writes this file: run it again to change them."
 env_header_2="# It keeps lines under other names. The dashboard reads the file only when its container is created."
 managed=(Dashboard__PublicOrigin Dashboard__ProxyKey Dashboard__Owners Dashboard__Admins Discord__ClientId
@@ -204,18 +211,21 @@ key_ok() {   # key_ok <key file> <certificate file>: a key without a passphrase 
     fi
 }
 
+# The certificate isn't secret, but it's read hidden too: a private key pasted here by mistake, alone or after the
+# certificate in one paste, must never reach the screen. certificate_ok shows what arrived instead.
 ask_certificate() {
     local status _
     for _ in 1 2 3; do
         if [ -f "$nginx_secrets/origin-cert.pem" ]; then
-            echo "Paste the Origin certificate, from -----BEGIN CERTIFICATE----- to -----END CERTIFICATE-----, or type keep to keep the current one. It ends by itself at its END line; press Enter if it doesn't."
+            echo "Paste the Origin certificate, from -----BEGIN CERTIFICATE----- to -----END CERTIFICATE-----, or type keep to keep the current one. It isn't shown as you paste or type, and it ends by itself at its END line; press Enter if it doesn't."
         else
-            echo "Paste the Origin certificate, from -----BEGIN CERTIFICATE----- to -----END CERTIFICATE-----. It ends by itself at its END line; press Enter if it doesn't."
+            echo "Paste the Origin certificate, from -----BEGIN CERTIFICATE----- to -----END CERTIFICATE-----. It isn't shown as you paste, and it ends by itself at its END line; press Enter if it doesn't."
         fi
         status=0
-        paste_pem CERTIFICATE "$answers_dir/origin-cert.pem" || status=$?
+        paste_pem CERTIFICATE "$answers_dir/origin-cert.pem" hidden || status=$?
         case $status in
             0)
+                echo "(The certificate arrived.)"
                 if certificate_ok "$answers_dir/origin-cert.pem"; then
                     new_cert=yes
                     return 0
@@ -232,7 +242,13 @@ ask_certificate() {
                 ;;
             4) echo "That paste is longer than a certificate and has no END line. Paste the certificate again." ;;
             5) die "No certificate came in time, or the input ended. Nothing was changed." ;;
-            *) echo "That doesn't start with -----BEGIN CERTIFICATE-----. Paste the certificate from Cloudflare again." ;;
+            *)
+                if [[ $pem_begin == *"PRIVATE KEY" ]]; then
+                    echo "That was a private key, and it wasn't shown. Paste the certificate first: the key comes next, at its own prompt."
+                else
+                    echo "That doesn't start with -----BEGIN CERTIFICATE-----. Paste the certificate from Cloudflare again."
+                fi
+                ;;
         esac
     done
     die "Three answers in a row weren't right. Nothing was changed."
@@ -284,8 +300,61 @@ connection_string() {   # connection_string <database> <password>
         "$1" "$dashboard_login" "$2"
 }
 
-proxy_key_line() {   # proxy_key_line <key>: proxy-key.conf's one line
-    printf 'proxy_set_header X-MinerBot-Proxy-Key "%s";\n' "$1"
+# The proxy key nginx sends, from proxy-key.conf, when its line is one setup wrote; nothing otherwise. Once a cut-off
+# change is undone, nginx holds only a key a whole nginx change put there, so a key there that differs from
+# dashboard.env's is newer: a run was cut off after nginx's change, before dashboard.env moved. dashboard.env takes it,
+# so a key that was rotated because it may have leaked never goes back into nginx.
+nginx_proxy_key() {
+    local line='' shape='^proxy_set_header X-MinerBot-Proxy-Key "([0-9a-f]{64})";$'
+    [ -f "$nginx_secrets/proxy-key.conf" ] || return 0
+    IFS= read -r -t 5 line < "$nginx_secrets/proxy-key.conf" || true
+    if [[ $line =~ $shape ]]; then
+        printf '%s\n' "${BASH_REMATCH[1]}"
+    fi
+}
+
+# The file setup puts into nginx for the dashboard, in conf_source: the reference copy deploy.sh installed, unless it
+# waits for the dashboard of its own commit (nginx_file_waits) while nginx has a file for the dashboard already. Then
+# nginx keeps its own, and conf_note says why when the two differ. With no file in nginx yet, the reference goes in.
+nginx_conf_source() {
+    conf_source=$home/minerbot-dashboard.conf
+    conf_note=
+    if [ -f "$nginx_conf" ] && nginx_file_waits; then
+        conf_source=$nginx_conf
+        if ! cmp -s "$home/minerbot-dashboard.conf" "$nginx_conf"; then
+            conf_note="nginx keeps its current file for the dashboard: the reference copy is from ${files_commit:0:12}, but the dashboard's image is from ${dashboard_rev:0:12}, and nginx's file moves only with the dashboard. Once ./deploy.sh has deployed the dashboard of ${files_commit:0:12}, it says to run ./setup-dashboard.sh --no-questions, which installs it."
+        fi
+    fi
+}
+
+# True when pipelog.conf or cPanel's hook isn't what an nginx change writes, as on a server set up before they existed,
+# or after WHM's piped logging changed while the hook was missing. Every nginx change writes both, so one is due then.
+pipelog_stale() {
+    ! cmp -s <(pipelog_text) "$nginx_secrets/pipelog.conf" \
+        || { [ -d "${pipelog_hook%/*}" ] && ! cmp -s <(pipelog_hook_text) "$pipelog_hook"; }
+}
+
+# True when the dashboard's container runs on other values of setup's ten settings than dashboard.env holds: a recreate
+# that failed left the old container running, or a run was cut off after dashboard.env moved, before its recreate.
+# Docker reads the env file only when it makes a container, so only a recreate brings it in step. False when they agree,
+# or when Docker or dashboard.env can't tell; a setting dashboard.env doesn't name isn't compared. The values are only
+# compared, never printed.
+container_env_stale() {
+    local vars name value line
+    vars=$(run_for 30 docker container inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$dashboard_container" 2> /dev/null) \
+        || return 1
+    if [ -z "$vars" ] || [ ! -f "$env_file" ]; then
+        return 1
+    fi
+    for name in "${managed[@]}"; do
+        grep -q "^$name=" "$env_file" || continue
+        value=$(env_value "$env_file" "$name" 2> /dev/null) || return 1
+        line=$(grep -m 1 "^$name=" <<< "$vars") || line=
+        if [ "$line" != "$name=$value" ]; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 login_hosts() {   # how many of the login's two hosts exist, 0 to 2
@@ -463,14 +532,24 @@ gather_answers() {
 # What the unit will change, worked out ahead for the summary, with setting names and never values. The unit works it
 # out again itself before it changes anything.
 plan_and_summarize() {
-    local cur_key cur_pw hosts name served expected
+    local cur_key plan_key sent_key='' cur_pw hosts name served expected rights running
     local -a changed=() lines=()
     local -A new=()
     step="working out what changes"
     cur_key=$(current Dashboard__ProxyKey)
+    # The key the unit will use: dashboard.env's, nginx's newer one (nginx_proxy_key), or a new one, empty here. After a
+    # cut-off nginx change the unit undoes it before it looks at nginx's key, so then this counts on dashboard.env's.
+    plan_key=$cur_key
     key_changes=no
     if [ "$rotate_key" = yes ] || ! [[ $cur_key =~ ^[0-9a-f]{64}$ ]]; then
         key_changes=yes
+        plan_key=
+    elif [ ! -e "$home/state/nginx-change" ]; then
+        sent_key=$(nginx_proxy_key)
+        if [ -n "$sent_key" ] && [ "$sent_key" != "$cur_key" ]; then
+            key_changes=yes
+            plan_key=$sent_key
+        fi
     fi
     hosts=$(login_hosts) || die "MariaDB didn't answer (above). Nothing was changed."
     cur_pw=$(current_password)
@@ -493,10 +572,11 @@ plan_and_summarize() {
         fi
     done
 
+    nginx_conf_source
     nginx_changes=no
-    if [ "$new_cert" = yes ] || [ "$key_changes" = yes ] || ! cmp -s "$home/minerbot-dashboard.conf" "$nginx_conf" \
+    if [ "$new_cert" = yes ] || [ -z "$plan_key" ] || ! cmp -s "$conf_source" "$nginx_conf" \
         || [ ! -f "$nginx_secrets/origin-key.pem" ] || [ ! -f "$nginx_secrets/proxy-key.conf" ] \
-        || [ "$(< "$nginx_secrets/proxy-key.conf")" != "$(proxy_key_line "$cur_key")" ]; then
+        || [ "$(< "$nginx_secrets/proxy-key.conf")" != "$(proxy_key_line "$plan_key")" ] || pipelog_stale; then
         nginx_changes=yes
     fi
     reload_only=no
@@ -507,8 +587,10 @@ plan_and_summarize() {
             reload_only=yes
         fi
     fi
+    # true or false for a container that exists, nothing when there's none
+    running=$(container_running "$dashboard_container")
     container_exists=no
-    if [ -n "$(container_image "$dashboard_container")" ]; then
+    if [ -n "$running" ]; then
         container_exists=yes
     fi
 
@@ -518,26 +600,42 @@ plan_and_summarize() {
     if [ "$new_cert" = yes ]; then
         lines+=("install the new certificate and its key for nginx")
     fi
+    if [ -n "$sent_key" ] && [ "$sent_key" != "$cur_key" ] && [ "$plan_key" = "$sent_key" ]; then
+        lines+=("give dashboard.env the proxy key nginx sends, which is newer: a run was cut off after nginx's change, before dashboard.env moved")
+    fi
     if [ ${#changed[@]} -gt 0 ]; then
         printf -v name '%s, ' "${changed[@]}"
         lines+=("change these settings in dashboard.env: ${name%, }")
     fi
-    if [ "$hosts" != 2 ]; then
-        lines+=("create the dashboard's database login, $dashboard_login, on localhost and 127.0.0.1, with a new password")
-    elif [ "$pw_changes" = yes ]; then
-        lines+=("give the dashboard's database login a new password")
+    if [ -n "$conf_note" ]; then
+        lines+=("keep nginx's current file for the dashboard: the reference copy is from ${files_commit:0:12}, but the dashboard's image is from ${dashboard_rev:0:12}, so it waits for the deploy of that commit's dashboard")
     fi
-    lines+=("apply the login's database rights again, after a rehearsal on a throwaway login, and compare them")
+    if [ -f "$rights_copy" ]; then
+        rights="apply the database rights the last apply used again, from ${rights_copy#"$home"/} (only a dashboard deploy moves them forward), after a rehearsal on a throwaway login, and compare them"
+    else
+        rights="apply the database rights in dashboard-rights.sql, after a rehearsal on a throwaway login, and compare them"
+    fi
+    if [ "$hosts" != 2 ]; then
+        lines+=("create the dashboard's database login, $dashboard_login, on localhost and 127.0.0.1, with a new password" "$rights")
+    elif [ "$pw_changes" = yes ]; then
+        lines+=("$rights" "then give the dashboard's database login a new password")
+    else
+        lines+=("$rights")
+    fi
+    if [ "$key_changes" = yes ] && [ "$container_exists" = yes ]; then
+        lines+=("stop the dashboard first, so visitors see nginx's restarting page while the proxy key changes")
+    fi
     if [ "$nginx_changes" = yes ]; then
-        if [ "$key_changes" = yes ] && [ "$container_exists" = yes ]; then
-            lines+=("stop the dashboard first, so visitors see nginx's restarting page while the proxy key changes")
-        fi
         lines+=("test nginx's files on their own and with every site, and reload nginx for every site on this server only if both tests pass")
     elif [ "$reload_only" = yes ]; then
         lines+=("reload nginx, which serves an older copy of the certificate")
     fi
     if [ ${#changed[@]} -gt 0 ] && [ "$container_exists" = yes ]; then
         lines+=("recreate the dashboard with the new settings: about 10 seconds of the restarting page")
+    elif [ "$running" = false ]; then
+        lines+=("start the dashboard, which isn't running: its container is stopped, so visitors get nginx's restarting page until then")
+    elif [ "$running" = true ] && [ ${#changed[@]} -eq 0 ] && container_env_stale; then
+        lines+=("recreate the dashboard, which runs on other settings than dashboard.env holds: a recreate failed, or a run was cut off after dashboard.env moved")
     elif [ ${#changed[@]} -gt 0 ]; then
         lines+=("leave the dashboard to the next deploy, which starts it: it isn't running yet")
     fi
@@ -615,21 +713,87 @@ detached_cleanup() {
     fi
 }
 
-# What die does first in the unit: start the dashboard again on its old settings when this run stopped it and the
-# settings didn't move, and say so when an nginx change is left cut off
+# What die does first in the unit, when dashboard.env didn't move: it leaves dashboard.env agreeing with nginx and
+# MariaDB, and the dashboard running on it.
+# - nginx runs the new files already, with their proxy key: the candidate moves, whole, and the dashboard is recreated.
+# - Else the database password changed in this run, which can't be taken back: dashboard.env gets the new password and
+#   nothing else, and the dashboard is recreated.
+# - Else a dashboard this run stopped starts again on its old settings.
+# It also says so when an nginx change is left cut off.
 before_stop() {
     [ "${run_mode:-}" = detached ] || return 0
-    rm -f "$home/dashboard.env.next"
-    if [ "${stopped_dashboard:-no}" = yes ] && [ "${env_moved:-no}" = no ]; then
-        echo "Starting the dashboard again on its old settings."
-        if start_service dashboard && ready_dashboard; then
-            echo "The dashboard runs again on its old settings."
-        else
-            echo "The dashboard didn't get ready again (above). Run ./setup-dashboard.sh --no-questions once the cause is fixed."
+    if [ "${env_moved:-no}" = no ]; then
+        if [[ ${nginx_result:-} =~ ^(reloaded|problem)$ ]] && [ -f "$home/dashboard.env.next" ]; then
+            env_moved=yes
+            if mv -f "$home/dashboard.env.next" "$env_file"; then
+                echo "nginx runs the new files already, so dashboard.env got its new settings too."
+                recreate_after_stop "with its new settings"
+            else
+                echo "nginx runs the new files already, but dashboard.env couldn't take its new settings (above). Run ./setup-dashboard.sh --no-questions once the cause is fixed."
+            fi
+        elif [ "${pw_applied:-no}" = yes ] && [ -f "$env_file" ]; then
+            password_to_env
+        elif [ "${stopped_dashboard:-no}" = yes ]; then
+            echo "Starting the dashboard again on its old settings."
+            if start_again; then
+                echo "The dashboard runs again on its old settings."
+            else
+                echo "The dashboard didn't get ready again (above). Run ./setup-dashboard.sh --no-questions once the cause is fixed."
+            fi
         fi
     fi
+    rm -f "$home/dashboard.env.next"
     if [ -e "$home/state/nginx-change" ]; then
         echo "An nginx change was left cut off. Run ./setup-dashboard.sh again: it undoes that first."
+    fi
+}
+
+# The database password changed in this run and dashboard.env didn't move: dashboard.env gets the new password and
+# nothing else, since the old one no longer works, and the dashboard is recreated with it
+password_to_env() {
+    env_moved=yes
+    write_env "$env_file" ConnectionStrings__DefaultConnection "$(connection_string "$SITE_DB" "$pw")"
+    write_env "$env_file" ConnectionStrings__BotConnection "$(connection_string "$BOT_DB" "$pw")"
+    echo "The dashboard's database password changed in this run, so dashboard.env got the new one and nothing else."
+    recreate_after_stop "with its old settings and the new password"
+}
+
+# Starts the dashboard this run stopped again, on its old settings, and waits until it's ready. Its restart count is
+# taken once Compose is done: a container it started begins again at 0, and one it left running, as after a stop call
+# that failed before Docker stopped it, keeps its earlier restarts, which aren't this run's.
+start_again() {
+    local base
+    start_service dashboard || return 1
+    base=$(run_for 30 docker container inspect -f '{{.RestartCount}}' "$dashboard_container" 2> /dev/null) || base=0
+    ready_dashboard "" "$base" || return 1
+    note_ready dashboard
+}
+
+# Recreates the dashboard on dashboard.env as it is now, and waits until it's ready. That counts only when Compose exits
+# 0 and the container is a new one: a recreate that failed can leave the old container running on its old settings, and
+# ready all the same. Once the dashboard is ready, the compose.yml it runs under is kept as the one it was last ready
+# under (note_ready), which a failed deploy swap puts back.
+recreate_dashboard() {
+    local before after
+    before=$(run_for 30 docker container inspect -f '{{.Id}}' "$dashboard_container" 2> /dev/null) || before=
+    start_service dashboard --force-recreate || return 1
+    after=$(run_for 30 docker container inspect -f '{{.Id}}' "$dashboard_container" 2> /dev/null) || after=
+    if [ -z "$after" ] || [ "$after" = "$before" ]; then
+        echo "The dashboard isn't ready: Compose didn't make it a new container, so it doesn't run on dashboard.env as it is now."
+        return 1
+    fi
+    ready_dashboard || return 1
+    note_ready dashboard
+}
+
+# Recreates the dashboard after a stop, when its container exists. It looks the container up itself: a stop can come
+# before step 7 does.
+recreate_after_stop() {   # recreate_after_stop <how it runs, for the message>
+    [ -n "$(container_image "$dashboard_container")" ] || return 0
+    if recreate_dashboard; then
+        echo "The dashboard runs again, $1."
+    else
+        echo "The dashboard didn't get ready (above). Run ./setup-dashboard.sh --no-questions once the cause is fixed."
     fi
 }
 
@@ -683,32 +847,67 @@ new_password() {   # 40 letters and digits, made as setup-login.sh made the bot'
     return 1
 }
 
+# Creates the login on the missing hosts given, and gives every other host the same new password: with no host given,
+# both get it. The statements go in on stdin, never on a command line, and with --skip-print-query-on-error, without
+# which MariaDB's client prints a failing statement, password included.
+set_password() {   # set_password [<missing host>...]
+    local host sql=''
+    step="creating or changing the dashboard's database login"
+    for host in localhost 127.0.0.1; do
+        if [[ " $* " == *" $host "* ]]; then
+            sql+="CREATE USER '$dashboard_login'@'$host' IDENTIFIED BY '$pw';"$'\n'
+        else
+            sql+="ALTER USER '$dashboard_login'@'$host' IDENTIFIED BY '$pw';"$'\n'
+        fi
+    done
+    run_for 30 mariadb --batch --skip-print-query-on-error <<< "$sql" \
+        || die "Creating the dashboard's database login or changing its password failed (above). Run ./setup-dashboard.sh again to finish: it makes the rest agree."
+    pw_applied=yes
+}
+
+# Applies the rights file the last apply used, from the copy apply_rights keeps; before any apply has kept one, the
+# installed dashboard-rights.sql. It says which.
+apply_login_rights() {
+    local file=$home/dashboard-rights.sql
+    step="applying the dashboard's database rights"
+    if [ -f "$rights_copy" ]; then
+        file=$rights_copy
+        echo "Applying the rights the last apply used, from ${rights_copy#"$home"/}: only a dashboard deploy moves them forward."
+    else
+        echo "Applying the rights in dashboard-rights.sql: no apply has kept a copy of its file yet."
+    fi
+    if ! apply_rights "$file"; then
+        if [ "$pw_applied" = yes ]; then
+            die "The dashboard's database rights didn't apply (above). Its login was created in this run, before the rights, which need it on both hosts. Once the cause is fixed, run ./setup-dashboard.sh again: it finishes the rest."
+        fi
+        die "The dashboard's database rights didn't apply (above), and its password is as it was. Once the cause is fixed, run ./setup-dashboard.sh again."
+    fi
+}
+
 # nginx refused the new files and runs the old ones, which match the dashboard.env that didn't move. A dashboard this run
 # stopped starts again on it. A database password this run changed can't be taken back, so then dashboard.env gets only
-# the new password, and the dashboard is recreated with it.
+# the new password, and the dashboard is recreated with it. When nginx took no reload of the old files either,
+# nginx_put_back keeps the marker and says so (above): nginx may then still run what a reload that failed loaded, so the
+# message doesn't say that nothing changed, and the next run reloads the old files first.
 nginx_refused() {
+    local said="nginx refused the new files, so nothing changed" kept="nginx refused the new files, so nginx and the dashboard's other settings are as they were."
+    if [ -e "$home/state/nginx-change" ]; then
+        said="nginx refused the new files, and the old ones are back on disk, though nginx hasn't loaded them again (above)"
+        kept="$said. The dashboard's other settings are as they were."
+    fi
     rm -f "$home/dashboard.env.next"
+    if [ "$pw_applied" = yes ] && [ -f "$env_file" ]; then
+        password_to_env
+        die "$kept"
+    fi
     env_moved=yes
-    if [ "$pw_changed" = yes ] && [ -f "$env_file" ]; then
-        write_env "$env_file" ConnectionStrings__DefaultConnection "$(connection_string "$SITE_DB" "$pw")"
-        write_env "$env_file" ConnectionStrings__BotConnection "$(connection_string "$BOT_DB" "$pw")"
-        echo "The dashboard's database password changed in this run, so dashboard.env got the new one and nothing else."
-        if [ "$container_exists" = yes ]; then
-            if start_service dashboard --force-recreate && ready_dashboard; then
-                echo "The dashboard runs again, with its old settings and the new password."
-            else
-                echo "The dashboard didn't get ready (above). Run ./setup-dashboard.sh --no-questions once the cause is fixed."
-            fi
-        fi
-        die "nginx refused the new files, so nginx and the dashboard's other settings are as they were."
-    fi
     if [ "$stopped_dashboard" = yes ]; then
-        if start_service dashboard && ready_dashboard; then
-            die "nginx refused the new files, so nothing changed, and the dashboard runs again on its old settings."
+        if start_again; then
+            die "$said, and the dashboard runs again on its old settings."
         fi
-        die "nginx refused the new files, so nothing changed, but the dashboard this run stopped didn't get ready again (above). Run ./setup-dashboard.sh --no-questions once the cause is fixed."
+        die "$said, but the dashboard this run stopped didn't get ready again (above). Run ./setup-dashboard.sh --no-questions once the cause is fixed."
     fi
-    die "nginx refused the new files, so nothing changed."
+    die "$said."
 }
 
 not_ready_after_recreate() {
@@ -718,8 +917,7 @@ not_ready_after_recreate() {
         tmp=$(mktemp "$home/.dashboard.env.XXXXXX")
         cp -p "$home/dashboard.env.previous" "$tmp"
         mv -f "$tmp" "$env_file"
-        start_service dashboard --force-recreate || true
-        if ready_dashboard; then
+        if recreate_dashboard; then
             die "The dashboard wasn't ready with the new settings (above), so it runs on the earlier ones again. Check the values you gave, then run ./setup-dashboard.sh again."
         fi
         die "The dashboard isn't ready with the earlier settings either (above), so the problem is outside its settings: the database or the server. Its log: docker logs --tail 50 $dashboard_container"
@@ -749,7 +947,7 @@ refresh_readme() {   # renders README.txt again from the installed deploy files'
 }
 
 detached_part() {
-    local cur_key cur_pw host n image served expected ends sql name joined
+    local cur_key sent_key cur_pw host n image served expected ends name joined running
     local -a missing_hosts=() changes=() problems=()
     if [ "${MINERBOT_DETACHED:-}" != 1 ] || [ -z "${MINERBOT_LOG:-}" ]; then
         die "--apply is only for the run setup-dashboard.sh starts itself. Nothing was changed."
@@ -787,10 +985,15 @@ detached_part() {
     step="loading server.conf"
     load_server_conf
 
-    # 2. The proxy key
+    # 2. The proxy key: dashboard.env's, nginx's when that's newer (nginx_proxy_key), or a new one
     step="choosing the proxy key"
     cur_key=$(current Dashboard__ProxyKey)
-    if [ "$rotate_key" = no ] && [[ $cur_key =~ ^[0-9a-f]{64}$ ]]; then
+    sent_key=$(nginx_proxy_key)
+    if [ "$rotate_key" = no ] && [[ $cur_key =~ ^[0-9a-f]{64}$ ]] && [ -n "$sent_key" ] && [ "$sent_key" != "$cur_key" ]; then
+        key=$sent_key
+        key_changed=yes
+        echo "nginx sends a newer proxy key than dashboard.env has: a run was cut off after nginx's change, before dashboard.env moved. dashboard.env takes nginx's key, so the old one never goes back."
+    elif [ "$rotate_key" = no ] && [[ $cur_key =~ ^[0-9a-f]{64}$ ]]; then
         key=$cur_key
         key_changed=no
     else
@@ -810,6 +1013,8 @@ detached_part() {
         fi
     done
     cur_pw=$(current_password)
+    # yes once MariaDB has the new password, which before_stop then puts into dashboard.env whatever stops the run
+    pw_applied=no
     if [ ${#missing_hosts[@]} -eq 0 ] && [ "$rotate_pw" = no ] && [ -n "$cur_pw" ] && password_works "$cur_pw" "$BOT_DB"; then
         pw=$cur_pw
         pw_changed=no
@@ -833,33 +1038,21 @@ detached_part() {
     check_settings "$home/dashboard.env.next" "$image" \
         || die "The dashboard's own check refused the new settings (above). Nothing was changed."
 
-    # 6. The login, its rights, and its password on both databases
-    step="creating or changing the dashboard's database login"
-    sql=
-    for host in localhost 127.0.0.1; do
-        if [[ " ${missing_hosts[*]} " == *" $host "* ]]; then
-            sql+="CREATE USER '$dashboard_login'@'$host' IDENTIFIED BY '$pw';"$'\n'
-        elif [ "$pw_changed" = yes ]; then
-            sql+="ALTER USER '$dashboard_login'@'$host' IDENTIFIED BY '$pw';"$'\n'
-        fi
-    done
-    if [ -n "$sql" ]; then
-        # On stdin, never on a command line, and with --skip-print-query-on-error, without which MariaDB's client prints a
-        # failing statement, password included
-        run_for 30 mariadb --batch --skip-print-query-on-error <<< "$sql" \
-            || die "Creating the dashboard's database login or changing its password failed (above). Run ./setup-dashboard.sh again to finish: it makes the rest agree."
-        sql=
-        if [ ${#missing_hosts[@]} -gt 0 ]; then
-            changes+=("login created")
-        else
+    # 6. The login, its rights, and its password on both databases. A password change can't be taken back, so when both
+    # hosts exist the rights come first, and a rights failure stops the run with the login's password as it was. A
+    # missing host must exist before the rights, which name both: then the login is made, and the other host gets the
+    # same new password, in one go first.
+    if [ ${#missing_hosts[@]} -gt 0 ]; then
+        set_password "${missing_hosts[@]}"
+        changes+=("login created")
+        apply_login_rights
+    else
+        apply_login_rights
+        if [ "$pw_changed" = yes ]; then
+            set_password
             changes+=("new database password")
         fi
     fi
-    if [ "$pw_changed" = yes ]; then
-        stop_hint="The dashboard's database password changed in this run: run ./setup-dashboard.sh again to finish, and it makes the rest agree."
-    fi
-    step="applying the dashboard's database rights"
-    apply_rights "$home/dashboard-rights.sql" || die "The dashboard's database rights didn't apply (above)."
     step="testing the dashboard's password on both databases"
     if ! password_works "$pw" "$SITE_DB" || ! password_works "$pw" "$BOT_DB"; then
         die "The dashboard's login can't open both databases with its password (above)."
@@ -869,7 +1062,11 @@ detached_part() {
     # 7. What else needs to change
     step="comparing nginx's files"
     install -d -m 700 "$work/nginx"
-    cp "$home/minerbot-dashboard.conf" "$work/nginx/minerbot-dashboard.conf"
+    nginx_conf_source
+    if [ -n "$conf_note" ]; then
+        echo "$conf_note"
+    fi
+    cp "$conf_source" "$work/nginx/minerbot-dashboard.conf"
     proxy_key_line "$key" > "$work/nginx/proxy-key.conf"
     if [ "$new_cert" = yes ]; then
         cp "$work/origin-cert.pem" "$work/origin-key.pem" "$work/nginx/"
@@ -884,6 +1081,9 @@ detached_part() {
             nginx_files_change=yes
         fi
     done
+    if pipelog_stale; then
+        nginx_files_change=yes
+    fi
     reload_only=no
     if [ "$nginx_files_change" = no ]; then
         served=$(served_fingerprint 2> /dev/null) || served=
@@ -896,19 +1096,28 @@ detached_part() {
     if ! cmp -s "$home/dashboard.env.next" "$env_file"; then
         env_changed=yes
     fi
+    # true or false for a container that exists, nothing when there's none
+    running=$(container_running "$dashboard_container")
     container_exists=no
-    if [ -n "$(container_image "$dashboard_container")" ]; then
+    if [ -n "$running" ]; then
         container_exists=yes
     fi
+    env_stale=no
+    if [ "$env_changed" = no ] && [ "$running" = true ] && container_env_stale; then
+        env_stale=yes
+    fi
 
-    # 8. In this order
+    # 8. In this order. Each cut_point is a test seam that does nothing in a real run.
     stopped_dashboard=no
     env_moved=no
     if [ "$key_changed" = yes ] && [ "$container_exists" = yes ]; then
         step="stopping the dashboard"
         echo "Stopping the dashboard while the proxy key changes, so visitors see nginx's restarting page."
-        compose 60 stop dashboard
+        # Set first: a stop call that fails or hits its limit may have stopped the container all the same, and before_stop
+        # starts it again only when this says so
         stopped_dashboard=yes
+        compose 60 stop dashboard
+        cut_point 8-stop
     fi
     if [ "$nginx_files_change" = yes ]; then
         step="changing nginx's files"
@@ -918,13 +1127,15 @@ detached_part() {
             problem) problems+=("$nginx_problem") ;;
         esac
         changes+=("nginx files")
+        cut_point 8-nginx
     elif [ "$reload_only" = yes ]; then
         step="reloading nginx"
-        if run_for 30 nginx -t -q && run_for 120 /scripts/restartsrv_nginx --reload; then
+        # cpanel_reload counts the reload only once nginx took it, as nginx_change's does
+        if run_for 30 nginx -t -q && cpanel_reload; then
             echo "nginx reloaded: it served an older copy of the certificate."
             changes+=("nginx reloaded")
         else
-            problems+=("nginx serves another certificate than the installed one, and the reload that would fix it failed (above).")
+            problems+=("nginx serves another certificate than the installed one, and the reload that would fix it failed, or nginx didn't take it (above).")
         fi
     fi
     step="moving dashboard.env"
@@ -938,17 +1149,30 @@ detached_part() {
     else
         rm -f "$home/dashboard.env.next"
     fi
+    cut_point 8-env
     if [ "$env_changed" = yes ] && [ "$container_exists" = yes ]; then
         step="recreating the dashboard"
         echo "Recreating the dashboard with its new settings."
-        start_service dashboard --force-recreate || true
-        if ! ready_dashboard; then
+        if ! recreate_dashboard; then
             not_ready_after_recreate
         fi
         changes+=("dashboard recreated")
-    elif [ "$stopped_dashboard" = yes ]; then
-        start_service dashboard || true
-        ready_dashboard || die "The dashboard isn't ready after nginx's change (above)."
+    elif [ "$container_exists" = yes ] && { [ "$running" != true ] || [ "$stopped_dashboard" = yes ]; }; then
+        # A container that exists but doesn't run: a run of this script cut off after it stopped it, a stop call that
+        # failed after Docker had stopped it, a start that failed, or a stop by hand. Docker's restart policy never starts
+        # a container stopped that way again, not even at boot, so every run starts it. It's recreated, so it runs on
+        # dashboard.env as it is now, also when a cut-off run moved dashboard.env after it stopped the container.
+        step="starting the dashboard"
+        echo "Starting the dashboard, which isn't running."
+        recreate_dashboard \
+            || die "The dashboard didn't get ready after it was started (above). Its log: docker logs --tail 50 $dashboard_container. Once the cause is fixed, run ./setup-dashboard.sh --no-questions, which starts it again if it's stopped."
+        changes+=("dashboard started")
+    elif [ "$env_stale" = yes ]; then
+        step="recreating the dashboard"
+        echo "Recreating the dashboard, which runs on other settings than dashboard.env holds: a recreate failed, or a run was cut off after dashboard.env moved."
+        recreate_dashboard \
+            || die "The dashboard didn't get ready on dashboard.env's settings (above). Its log: docker logs --tail 50 $dashboard_container. Once the cause is fixed, run ./setup-dashboard.sh --no-questions again."
+        changes+=("dashboard recreated")
     fi
 
     # 9. README.txt, the history, and the summary

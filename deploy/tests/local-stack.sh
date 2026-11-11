@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # A manual test of the whole stack on one machine, laid out as on the server: MariaDB 11.4, the dashboard image and
-# nginx 1.31.8 share one loopback, as host networking gives them there, so 127.0.0.1:3306 and 127.0.0.1:5080 behave the
-# same. A holder container owns that loopback, on a user network of its own, and the other three join it, so this
-# machine's own ports are never used. Two more containers make the requests: one at the address in the stand-in
-# Cloudflare list, which sends CF-Connecting-IP as Cloudflare does, and one elsewhere. It isn't in CI.
+# nginx 1.31.8 share one loopback, as host networking gives them there, so 127.0.0.1:3306 behaves the same. The dashboard
+# listens on no port, only on its socket /run/minerbot-dashboard/dashboard.sock, in a folder of mode 2750 owned by 1654
+# and the group nobody (65534), which nginx's workers run as, as on the server. A Windows folder can't hold a socket, so
+# that folder is a volume, mounted at the same path in the dashboard, nginx and the holder. A holder container owns the
+# loopback, on a user network of its own, and the other three join it, so this machine's own ports are never used. The
+# holder also stands for the server itself: the checks ask the socket there as root, as deploy.sh does, and as other
+# accounts, as a cPanel site could. Two more containers make the requests: one at the address in the stand-in Cloudflare
+# list, which sends CF-Connecting-IP as Cloudflare does, and one elsewhere. It isn't in CI.
 #
 #   bash deploy/tests/local-stack.sh up               Builds mbtest-dashboard:local as the server builds the dashboard,
 #                                                     if it's missing, then starts the stack
@@ -29,8 +33,9 @@ here=$(cd "$(dirname "$0")" && pwd)
 deploy=$(cd "$here/.." && pwd)
 repo=$(cd "$deploy/.." && pwd)
 
-# The server's own functions: apply_rights, env_safe, env_value, bot_unchanged, start_service and the image helpers.
-# Sourcing runs nothing, but sets the server's PATH, which on Windows has no docker, so this PATH comes back.
+# The server's own functions: apply_rights, env_safe, env_value, bot_unchanged, start_service and the image helpers,
+# revision among them; and its names, socket_dir and dashboard_socket among them. Sourcing runs nothing, but sets the
+# server's PATH, which on Windows has no docker, so this PATH comes back.
 path_before=$PATH
 # shellcheck source=../common.sh
 source "$deploy/common.sh"
@@ -66,6 +71,18 @@ nginx=$stack-nginx
 cloudflare=$stack-cloudflare
 elsewhere=$stack-elsewhere
 keys_volume=$stack-keys
+# The socket's folder, socket_dir from common.sh, as a volume at the same path in the holder, the dashboard and nginx,
+# and read-only in the container that runs deploy.sh's readiness rule. Docker never copies anything into it, so it keeps
+# the mode, owner and group the holder gives it.
+socket_volume=$stack-socket
+socket_mount=(--mount "type=volume,source=$socket_volume,target=$socket_dir,volume-nocopy=true")
+socket_mount_ro=(--mount "type=volume,source=$socket_volume,target=$socket_dir,volume-nocopy=true,readonly=true")
+# nobody, nginx's workers' account on the server, and Apache's on cPanel; and an account like any cPanel site's
+nobody_account=65534:65534
+other_account=4001:4001
+# The server's OS, as scripts-test.sh has it, where common.sh's socket_problem runs as on the server: there, as here,
+# 65534 is named nobody
+alma_image=almalinux:9
 image=mbtest-dashboard:local
 mariadb_image=mariadb:11.4
 # The server's nginx version, as in nginx-test.sh. Its image has curl, so it also serves for the holder and the clients.
@@ -83,8 +100,8 @@ client_id=1000000000000000009
 public=$public_host
 # The visitor's address, as Cloudflare's CF-Connecting-IP header gives it
 visitor=203.0.113.7
-# A line that is exactly "pipelog off;", give or take spaces
-pipelog_line='[[:space:]]*pipelog off;[[:space:]]*'
+# The line that includes pipelog.conf, give or take spaces
+pipelog_include='[[:space:]]*include /etc/nginx/minerbot/pipelog\.con\[f\];[[:space:]]*'
 lifetime=${MINERBOT_TEST_STACK_LIFETIME:-7200}
 [[ $lifetime =~ ^[1-9][0-9]*$ ]] || { echo "MINERBOT_TEST_STACK_LIFETIME must be a number of seconds."; exit 1; }
 # Every container but the clients joins the holder's loopback, and every one shares its processes, so all of them end
@@ -205,14 +222,14 @@ in_database() {   # in_database <bash command>
 }
 
 # check_settings in common.sh, with this stack's names: the image's own validator, with no network, a read-only root, and
-# tmpfs for /tmp and the keys folder. Its output is the caller's.
+# tmpfs for /tmp and the keys folder, and the socket compose.yml gives the dashboard. Its output is the caller's.
 check_settings_on() {   # check_settings_on <env file>
     local status=0
     dk 30 rm -f -v "$stack-check" > /dev/null 2>&1 || true
     run_for 60 docker run --rm --pull never --name "$stack-check" --network none --read-only \
         --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777 --tmpfs /app/keys:rw,noexec,nosuid,nodev,size=1m,mode=1777 \
         --cap-drop ALL --security-opt no-new-privileges:true --memory 256m --pids-limit 64 \
-        --env-file "$1" "$image" check-settings || status=$?
+        --env-file "$1" -e "Dashboard__UnixSocket=$dashboard_socket" "$image" check-settings || status=$?
     dk 30 rm -f -v "$stack-check" > /dev/null 2>&1 || true
     return "$status"
 }
@@ -222,15 +239,27 @@ loopback() {   # loopback <curl arguments...>
     dk 20 exec "$holder" curl -s --max-time 10 "$@" 2>&1 || true
 }
 
-# The same with nginx's proxy key, which goes in on stdin, so it's never in a command line
-loopback_with_key() {   # loopback_with_key <curl arguments...>
-    printf 'X-MinerBot-Proxy-Key: %s\n' "$proxy_key" \
-        | dk 20 exec -i "$holder" curl -s --max-time 10 -H @- "$@" 2>&1 || true
+# A request on the dashboard's socket, as root makes it on the server: deploy.sh's readiness check, say
+on_socket() {   # on_socket <curl arguments...>
+    dk 20 exec "$holder" curl -s --max-time 10 --unix-socket "$dashboard_socket" "$@" 2>&1 || true
 }
 
-dashboard_ready() {   # Docker says healthy, and /health/ready answers Healthy, which proves both databases
+# The same with nginx's proxy key, which goes in on stdin, so it's never in a command line
+on_socket_with_key() {   # on_socket_with_key <curl arguments...>
+    printf 'X-MinerBot-Proxy-Key: %s\n' "$proxy_key" \
+        | dk 20 exec -i "$holder" curl -s --max-time 10 --unix-socket "$dashboard_socket" -H @- "$@" 2>&1 || true
+}
+
+# The same as another account on the server, without the key
+on_socket_as() {   # on_socket_as <uid:gid> <curl arguments...>
+    local account=$1
+    shift
+    dk 20 exec -u "$account" "$holder" curl -s --max-time 10 --unix-socket "$dashboard_socket" "$@" 2>&1 || true
+}
+
+dashboard_ready() {   # Docker says healthy, and /health/ready answers Healthy through the socket, which proves both databases
     [ "$(dk 30 container inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$dashboard" 2> /dev/null)" = healthy ] \
-        && [ "$(loopback -H 'Host: localhost' http://127.0.0.1:5080/health/ready)" = Healthy ]
+        && [ "$(on_socket -H 'Host: localhost' http://localhost/health/ready)" = Healthy ]
 }
 
 request() {   # request <client> <curl arguments...>: nginx's answer, headers first, or curl's error
@@ -338,12 +367,22 @@ start_holder() {
     local out
     out=$(dk 60 network create --subnet "$subnet" --label "$label" "$net" 2>&1) \
         || stop "Couldn't make the network $net: $out. Another network may hold $subnet; see docker network ls."
+    out=$(dk 60 volume create --label "$label" "$socket_volume" 2>&1) || stop "Couldn't make the volume $socket_volume: $out"
     # --init reaps what ends in the shared process namespace. When sleep ends, the namespace ends, and every container in
     # it with it.
     out=$(dk 60 run -d --rm --init --name "$holder" --label "$label" --network "$net" --ip "$host_ip" \
-        --sysctl net.ipv6.conf.all.disable_ipv6=0 "$nginx_image" sleep "$lifetime" 2>&1) \
+        --sysctl net.ipv6.conf.all.disable_ipv6=0 "${socket_mount[@]}" "$nginx_image" sleep "$lifetime" 2>&1) \
         || stop "Couldn't start $holder: $out"
     stops_at=$(date -u -d "@$(($(date +%s) + lifetime))" +%Y-%m-%dT%H:%M:%SZ)
+}
+
+# The socket's folder as systemd-tmpfiles makes it on the server, from deploy/minerbot-dashboard.tmpfiles: 2750, owned by
+# 1654, the dashboard, and 65534, the group nobody. Only the dashboard can make a file there, and only nobody's group, of
+# nginx's workers, can enter. The set-group-ID bit gives the socket that group.
+lay_out_socket_folder() {
+    local out
+    out=$(dk 30 exec "$holder" sh -c "chown 1654:65534 $socket_dir && chmod 2750 $socket_dir" 2>&1) \
+        || stop "Couldn't lay out the socket's folder $socket_dir in $socket_volume: $out"
 }
 
 start_clients() {
@@ -449,16 +488,18 @@ settings_pass() {
 
 start_dashboard() {
     local out started=$SECONDS
-    # compose.yml's settings for the dashboard, as docker run options. No restart policy: a test stack mustn't come back
+    # compose.yml's settings for the dashboard, as docker run options: Dashboard__UnixSocket from its environment, which
+    # wins over dashboard.env, and the socket's folder at the same path. No restart policy: a test stack mustn't come back
     # by itself after Docker restarts.
     out=$(dk 60 run -d --name "$dashboard" "${joined[@]}" --user 1654:1654 --env-file "$state/dashboard.env" \
-        --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777 -v "$keys_volume:/app/keys" \
+        -e "Dashboard__UnixSocket=$dashboard_socket" --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777 \
+        -v "$keys_volume:/app/keys" "${socket_mount[@]}" \
         --security-opt no-new-privileges:true --cap-drop ALL --memory 512m --memory-swap 512m --cpus 1 \
         --pids-limit 256 --stop-timeout 30 --log-driver json-file --log-opt max-size=10m --log-opt max-file=5 \
         "$image" 2>&1) || stop "Couldn't start the dashboard: $out"
     wait_for 90 dashboard_ready \
         || stop "The dashboard wasn't ready within 90 seconds. The end of its log: $(dk 30 logs --tail 20 "$dashboard" 2>&1)"
-    say "The dashboard was ready $((SECONDS - started)) seconds after it started: Docker says healthy, and /health/ready answers Healthy."
+    say "The dashboard was ready $((SECONDS - started)) seconds after it started: Docker says healthy, and /health/ready answers Healthy through its socket."
 }
 
 nginx_answers() {   # a local request isn't Cloudflare, so nginx refuses it
@@ -467,11 +508,13 @@ nginx_answers() {   # a local request isn't Cloudflare, so nginx refuses it
 
 start_nginx() {
     local out count
-    count=$(grep -cxE "$pipelog_line" "$deploy/minerbot-dashboard.conf" || true)
-    [ "$count" = 2 ] || stop "deploy/minerbot-dashboard.conf has the line \"pipelog off;\" $count time(s), not 2."
+    count=$(grep -cxE "$pipelog_include" "$deploy/minerbot-dashboard.conf" || true)
+    [ "$count" = 2 ] || stop "deploy/minerbot-dashboard.conf includes pipelog.conf $count time(s), not 2."
     mkdir -p "$state/nginx" "$state/nginx/conf.d" "$state/nginx/conf.d/includes-optional" "$state/nginx/minerbot"
-    # The real file. cPanel's pipelog module isn't in nginx's image, so its two lines stay out.
-    grep -vxE "$pipelog_line" "$deploy/minerbot-dashboard.conf" | tr -d '\r' > "$state/nginx/conf.d/minerbot-dashboard.conf"
+    # The real file, as it is. cPanel's pipelog module isn't in nginx's image, so pipelog.conf is empty, as setup writes
+    # it on a server where WHM's piped logging is off.
+    tr -d '\r' < "$deploy/minerbot-dashboard.conf" > "$state/nginx/conf.d/minerbot-dashboard.conf"
+    : > "$state/nginx/minerbot/pipelog.conf"
     # The shape of cPanel's list of Cloudflare's addresses, with the one client's address
     printf 'set_real_ip_from %s;\nreal_ip_header CF-Connecting-IP;\n' "$cloudflare_ip" \
         > "$state/nginx/conf.d/includes-optional/cloudflare.conf"
@@ -479,9 +522,21 @@ start_nginx() {
     out=$(cd "$state/nginx/minerbot" && run_for 60 openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=$public" \
         -addext "subjectAltName=DNS:$public" -keyout origin-key.pem -out origin-cert.pem 2>&1) \
         || stop "openssl couldn't make the stand-in certificate: $out"
-    out=$(dk 60 create --name "$nginx" "${joined[@]}" "$nginx_image" 2>&1) || stop "Couldn't make nginx's container: $out"
+    out=$(dk 60 create --name "$nginx" "${joined[@]}" "${socket_mount[@]}" "$nginx_image" 2>&1) \
+        || stop "Couldn't make nginx's container: $out"
+    # As on the server, nginx's workers run as nobody, whose group may enter the socket's folder. The image's own
+    # nginx.conf says user nginx, and nothing else in it changes.
+    out=$(cd "$state/nginx" && dk 60 cp "$nginx:/etc/nginx/nginx.conf" nginx.conf.image 2>&1) \
+        || stop "Couldn't read nginx.conf from nginx's container: $out"
+    tr -d '\r' < "$state/nginx/nginx.conf.image" | sed 's/^user[[:space:]][[:space:]]*nginx;$/user nobody;/' \
+        > "$state/nginx/nginx.conf"
+    if [ "$(grep -c '^[[:space:]]*user[[:space:]]' "$state/nginx/nginx.conf" || true)" != 1 ] \
+        || [ "$(grep -cx 'user nobody;' "$state/nginx/nginx.conf" || true)" != 1 ]; then
+        stop "The nginx.conf of $nginx_image doesn't have the one line \"user nginx;\" this script makes \"user nobody;\"."
+    fi
     # Relative paths, which docker reads the same way in Git Bash and in Linux
     out=$(cd "$state/nginx" && dk 60 cp conf.d/. "$nginx:/etc/nginx/conf.d/" 2>&1 \
+        && dk 60 cp nginx.conf "$nginx:/etc/nginx/nginx.conf" 2>&1 \
         && dk 60 cp minerbot "$nginx:/etc/nginx/minerbot" 2>&1) || stop "Couldn't copy the files into nginx's container: $out"
     out=$(dk 60 start "$nginx" 2>&1) || stop "nginx didn't start: $out"
     # As on the server, only root can open the certificate's key and the proxy key: nginx's master reads them as root
@@ -505,6 +560,7 @@ up() {
     build_image
     make_files
     start_holder
+    lay_out_socket_folder
     start_clients
     start_database
     prepare_database
@@ -556,19 +612,21 @@ start_dashboard_again() {
     dk 60 start "$dashboard" > /dev/null 2>&1 && wait_for 90 dashboard_ready
 }
 
-# What a check cut off halfway can leave: nginx's key file renamed, or the dashboard stopped
+# What a check cut off halfway can leave: nginx's key file renamed, the dashboard stopped or killed, or a file another
+# account made in the socket's folder, which only a defect lets it make
 put_back() {
     if dk 30 exec "$nginx" test -e /etc/nginx/minerbot/proxy-key.off > /dev/null 2>&1; then
         put_key_back || echo "Couldn't put nginx's proxy key file back."
     fi
+    dk 30 exec "$holder" rm -f "$socket_dir/mbtest-other" "$socket_dir/mbtest-other.sock" > /dev/null 2>&1 || true
     if [ "$(dk 30 container inspect -f '{{.State.Running}}' "$dashboard" 2> /dev/null)" = false ]; then
         start_dashboard_again || echo "The dashboard didn't start again within 90 seconds."
     fi
 }
 
-remove_bot() {   # the stand-in bot's containers, image tags and volumes
+remove_bot() {   # the stand-in bot's containers, image tags and volumes, and the images revision_labels makes
     local tags tag
-    dk 60 rm -f -v "$bot_container" "$stack-other" > /dev/null 2>&1 || true
+    dk 60 rm -f -v "$bot_container" "$stack-other" "$stack-labels" > /dev/null 2>&1 || true
     tags=$(dk 30 images --format '{{.Repository}}:{{.Tag}}' "$bot_image" 2> /dev/null) || tags=''
     for tag in $tags; do
         dk 60 rmi "$tag" > /dev/null 2>&1 || true
@@ -609,13 +667,17 @@ database() {
 }
 
 dashboard_health() {
-    local health out logs
+    local health out logs listening
     health=$(dk 30 container inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$dashboard" 2>&1)
     [ "$health" = healthy ] || problem "Docker's health check says '$health'"
     out=$(dk 30 exec "$dashboard" dotnet MinerBot.Dashboard.dll healthcheck 2>&1) || problem "the healthcheck command failed" "$out"
     [ "$out" = Healthy ] || problem "the healthcheck command didn't say just Healthy" "$out"
     logs=$(dk 60 logs "$dashboard" 2>&1)
     expect "The Cloudflare Access check is off" "$logs" "the dashboard's start-up log"
+    # Each start logs every address it listens on, one line each
+    listening=$(grep -o 'Now listening on: .*' <<< "$logs" | tr -d '\r' | LC_ALL=C sort -u)
+    [ "$listening" = "Now listening on: http://unix:$dashboard_socket" ] \
+        || problem "the dashboard's log doesn't say it listens only on http://unix:$dashboard_socket" "$listening"
 }
 
 home_page() {
@@ -664,20 +726,181 @@ outsider_refused() {
     expect "HTTP/1.1 403" "$answer" "from $elsewhere_ip on 80"
 }
 
-on_the_loopback() {
+# The dashboard's own answers on its socket, asked as root, without nginx. Its old port answers nothing now.
+on_the_socket() {
     local said
-    said=$(loopback -o /dev/null -w '%{http_code}' -H "Host: $public" http://127.0.0.1:5080/)
+    said=$(on_socket -o /dev/null -w '%{http_code}' -H "Host: $public" http://localhost/)
     [ "$said" = 404 ] || problem "the public name without the key got $said, not 404"
-    said=$(loopback -o /dev/null -w '%{http_code}' -H 'Host: localhost' http://127.0.0.1:5080/)
+    said=$(on_socket -o /dev/null -w '%{http_code}' -H 'Host: localhost' http://localhost/)
     [ "$said" = 404 ] || problem "localhost's / without the key got $said, not 404"
-    said=$(loopback_with_key -o /dev/null -w '%{http_code}' -H 'Host: other.example' http://127.0.0.1:5080/)
+    said=$(on_socket_with_key -o /dev/null -w '%{http_code}' -H 'Host: other.example' http://localhost/)
     [ "$said" = 400 ] || problem "another Host, even with the key, got $said, not 400"
-    said=$(loopback_with_key -o /dev/null -w '%{http_code}' -H "Host: $public" http://127.0.0.1:5080/)
+    said=$(on_socket_with_key -o /dev/null -w '%{http_code}' -H "Host: $public" http://localhost/)
     [ "$said" = 200 ] || problem "the public name with nginx's key got $said, not 200"
-    said=$(loopback -H 'Host: localhost' http://127.0.0.1:5080/health/live)
+    said=$(on_socket -H 'Host: localhost' http://localhost/health/live)
     [ "$said" = Healthy ] || problem "localhost's /health/live said '$said'"
-    said=$(loopback -H 'Host: localhost' http://127.0.0.1:5080/health/ready)
+    said=$(on_socket -H 'Host: localhost' http://localhost/health/ready)
     [ "$said" = Healthy ] || problem "localhost's /health/ready said '$said'"
+    said=$(loopback -o /dev/null -w '%{http_code}' -H 'Host: localhost' http://127.0.0.1:5080/health/live)
+    [ "$said" = 000 ] || problem "127.0.0.1:5080, where the dashboard listened before, answered $said"
+}
+
+# ---------- the dashboard's socket
+
+# The mode, owner, group and kind of a path, as root on the server sees it, such as "2750 1654 65534 nobody directory",
+# or nothing when it isn't there. Alpine names the group 65534 nobody, as the server does.
+socket_stat() {   # socket_stat <path>
+    dk 20 exec "$holder" stat -c '%a %u %g %G %F' "$1" 2> /dev/null || true
+}
+
+socket_folder_names() {   # what's in the socket's folder, one name per line
+    dk 20 exec "$holder" ls -A "$socket_dir" 2>&1 || true
+}
+
+# Each nginx worker's real user and group IDs, one worker per line, such as "65534 65534"
+nginx_worker_ids() {
+    # shellcheck disable=SC2016 # the $ are for the container's shell
+    dk 30 exec "$nginx" sh -c 'for worker in $(pgrep -P "$(cat /run/nginx.pid)"); do
+            awk "/^Uid:/ { uid = \$2 } /^Gid:/ { gid = \$2 } END { print uid, gid }" "/proc/$worker/status"
+        done' 2>&1 || true
+}
+
+who_is() {   # who_is <uid:gid>: the account, as the messages name it
+    if [ "$1" = "$nobody_account" ]; then
+        echo "nobody (65534), nginx's workers' account"
+    else
+        echo "another account (${1%%:*})"
+    fi
+}
+
+# Has an account try to make a socket at the path, here with nginx, as any program of its own could: it prints what
+# nginx said. The folder refuses at once with "(13: Permission denied)". A socket nginx can make, it listens on until
+# the 5-second limit, and deletes as it stops.
+bind_as() {   # bind_as <uid:gid> <socket path>
+    local conf
+    conf=$(printf '%s\n' 'pid nginx.pid;' 'error_log stderr notice;' 'events {}' 'http {' '    access_log off;' \
+        '    client_body_temp_path body;' '    proxy_temp_path proxy;' '    fastcgi_temp_path fastcgi;' \
+        '    uwsgi_temp_path uwsgi;' '    scgi_temp_path scgi;' "    server { listen unix:$2; }" '}')
+    # shellcheck disable=SC2016 # the $ are for the container's shell
+    dk 30 exec -i -u "$1" "$holder" sh -c 'folder=$(mktemp -d) || exit 1
+        cat > "$folder/nginx.conf" || exit 1
+        timeout 5 nginx -e stderr -p "$folder/" -c "$folder/nginx.conf" -g "daemon off;" 2>&1
+        status=$?
+        rm -rf "$folder"
+        exit "$status"' <<< "$conf" 2>&1 || true
+}
+
+# deploy.sh's readiness check on the socket, in the server's OS as root: common.sh's own socket_problem, which status.sh
+# uses too, then /health/ready through the socket, read up to 64 bytes. It prints what socket_problem said, or "none",
+# and on the next line what /health/ready answered.
+server_rule() {
+    local out
+    have_image "$alma_image" || {
+        echo "couldn't pull $alma_image within 5 minutes"
+        return 0
+    }
+    dk 30 rm -f -v "$stack-rule" > /dev/null 2>&1 || true
+    # shellcheck disable=SC2016 # the $ are for the container's shell
+    out=$(dk 120 run -i --rm --name "$stack-rule" --label "$label" --network none "${socket_mount_ro[@]}" "$alma_image" \
+        bash -c 'cat > /tmp/common.sh && source /tmp/common.sh || exit 1
+            why=$(socket_problem)
+            said=$(run_for 10 curl -s --max-time 5 --unix-socket "$dashboard_socket" -H "Host: localhost" \
+                http://localhost/health/ready | head -c 64)
+            printf "%s\n%s\n" "${why:-none}" "$said"' < "$deploy/common.sh" 2>&1) || out="it didn't run: $out"
+    dk 30 rm -f -v "$stack-rule" > /dev/null 2>&1 || true
+    printf '%s\n' "$out"
+}
+
+# The socket's folder and the socket as on the server: the folder 2750, owned by 1654 and nobody, with nothing in it but
+# the socket, which the dashboard owns, nobody's group can read and write, and no one else can open. nginx's workers run
+# as nobody. deploy.sh's own readiness rule passes. compose.yml, nginx's file and the tmpfiles line name the same paths as
+# common.sh, which this stack uses.
+socket_files() {
+    local said ids compose conf tmpfiles
+    said=$(socket_stat "$socket_dir")
+    [ "$said" = "2750 1654 65534 nobody directory" ] \
+        || problem "the socket's folder is '$said', not '2750 1654 65534 nobody directory' (mode, owner, group, its name, kind)"
+    said=$(socket_stat "$dashboard_socket")
+    [ "$said" = "660 1654 65534 nobody socket" ] \
+        || problem "the dashboard's socket is '$said', not '660 1654 65534 nobody socket' (mode, owner, group, its name, kind)"
+    said=$(socket_folder_names)
+    [ "$said" = dashboard.sock ] || problem "the socket's folder holds more or less than dashboard.sock" "$said"
+    ids=$(nginx_worker_ids)
+    if [ -z "$ids" ] || grep -qvx '65534 65534' <<< "$ids"; then
+        problem "nginx's workers don't all run as 65534:65534, nobody" "$ids"
+    fi
+    said=$(server_rule)
+    [ "$said" = $'none\nHealthy' ] \
+        || problem "deploy.sh's readiness rule in $alma_image, socket_problem and then /health/ready, didn't pass" "$said"
+    compose=$(tr -d '\r' < "$deploy/compose.yml")
+    conf=$(tr -d '\r' < "$deploy/minerbot-dashboard.conf")
+    tmpfiles=$(tr -d '\r' < "$deploy/minerbot-dashboard.tmpfiles")
+    # Each line by its words, whatever the spaces around them
+    said=$(awk -v want="$dashboard_socket" '$1 == "Dashboard__UnixSocket:" && $2 == want && NF == 2 { n++ } END { print n + 0 }' \
+        <<< "$compose")
+    [ "$said" = 1 ] || problem "compose.yml doesn't give the dashboard Dashboard__UnixSocket: $dashboard_socket once"
+    for said in "source: $socket_dir" "target: $socket_dir" "create_host_path: false"; do
+        if [ "$(awk -v want="$said" '$1 " " $2 == want && NF == 2 { n++ } END { print n + 0 }' <<< "$compose")" != 1 ]; then
+            problem "compose.yml doesn't have the line '$said' once, for the socket's folder"
+        fi
+    done
+    said=$(awk -v want="http://unix:$dashboard_socket;" '$1 == "proxy_pass" && $2 == want && NF == 2 { n++ } END { print n + 0 }' \
+        <<< "$conf")
+    [ "$said" = 2 ] || problem "nginx's file has proxy_pass http://unix:$dashboard_socket; $said time(s), not 2"
+    said=$(grep -c 'proxy_pass' <<< "$conf" || true)
+    [ "$said" = 2 ] || problem "nginx's file has $said proxy_pass lines, not just the two to the socket"
+    said=$(grep -cxF "d $socket_dir 2750 1654 nobody -" <<< "$tmpfiles" || true)
+    [ "$said" = 1 ] || problem "deploy/minerbot-dashboard.tmpfiles doesn't have the line 'd $socket_dir 2750 1654 nobody -'"
+}
+
+# Who can reach the socket, and who can make a file in its folder, as the server's other accounts would try: nobody's
+# group can ask the dashboard, which still answers the bare 404 without nginx's key; any other account can't even
+# enter the folder; and neither can make a file or a socket there.
+socket_access() {
+    local said account out
+    said=$(on_socket_as "$nobody_account" -H 'Host: localhost' http://localhost/health/live)
+    [ "$said" = Healthy ] || problem "$(who_is "$nobody_account") couldn't ask /health/live through the socket" "$said"
+    said=$(on_socket_as "$nobody_account" -o /dev/null -w '%{http_code}' -H "Host: $public" http://localhost/)
+    [ "$said" = 404 ] || problem "$(who_is "$nobody_account") got $said for the public name without the key, not 404"
+    said=$(on_socket_as "$other_account" -o /dev/null -w '%{http_code}' -H 'Host: localhost' http://localhost/health/live)
+    [ "$said" = 000 ] || problem "$(who_is "$other_account") reached the dashboard through the socket: $said"
+    for account in "$other_account" "$nobody_account"; do
+        if out=$(dk 20 exec -u "$account" "$holder" touch "$socket_dir/mbtest-other" 2>&1); then
+            problem "$(who_is "$account") made a file in the socket's folder"
+        fi
+        expect "Permission denied" "$out" "$(who_is "$account") making a file in the socket's folder"
+        out=$(bind_as "$account" "$socket_dir/mbtest-other.sock")
+        expect "bind() to unix:$socket_dir/mbtest-other.sock failed (13: Permission denied)" "$out" \
+            "$(who_is "$account") making a socket in the socket's folder"
+    done
+    said=$(socket_folder_names)
+    [ "$said" = dashboard.sock ] || problem "the socket's folder holds more than dashboard.sock afterwards" "$said"
+    dk 30 exec "$holder" rm -f "$socket_dir/mbtest-other" "$socket_dir/mbtest-other.sock" > /dev/null 2>&1 || true
+}
+
+# The TCP ports anything listens on in the stack's network, in decimal, one per line and sorted, from the kernel's own
+# tables, which every container of the stack shares. Docker's DNS server for the network, on 127.0.0.11, is left out.
+tcp_listeners() {
+    local table hex
+    table=$(dk 20 exec "$holder" sh -c 'cat /proc/net/tcp; cat /proc/net/tcp6 2> /dev/null; true' 2>&1) || return 1
+    awk '$4 == "0A" { split($2, address, ":"); if (address[1] != "0B00007F") print address[2] }' <<< "$table" \
+        | while IFS= read -r -t 5 hex; do printf '%d\n' "0x$hex"; done | LC_ALL=C sort -nu
+}
+
+error_lines() {   # how many lines nginx's error log for the dashboard has now
+    local count
+    count=$(dk 30 exec "$nginx" sh -c 'cat /var/log/nginx/minerbot-dashboard.error.log 2> /dev/null | wc -l' 2> /dev/null) \
+        || count=0
+    count=${count//[!0-9]/}
+    printf '%s\n' "${count:-0}"
+}
+
+errors_since() {   # errors_since <line count>: nginx's error log for the dashboard after that many lines
+    dk 30 exec "$nginx" tail -n "+$(($1 + 1))" /var/log/nginx/minerbot-dashboard.error.log 2>&1 || true
+}
+
+dashboard_stopped() {
+    [ "$(dk 30 container inspect -f '{{.State.Running}}' "$dashboard" 2> /dev/null)" = false ]
 }
 
 broken_settings() {
@@ -724,20 +947,78 @@ key_missing() {
     expect "HTTP/1.1 200" "$answer" "/ with the key file back"
 }
 
+# A clean stop, as a deploy's swap makes: the dashboard deletes its socket, nginx answers with its 503 page, and while it
+# stays down no other account can put a socket in its place. Its TCP ports are the same with it and without it: none.
 dashboard_down() {
-    local out answer
+    local out answer before with without account said
+    with=$(tcp_listeners) || with=''
+    before=$(error_lines)
     out=$(dk 60 stop -t 30 "$dashboard" 2>&1) || {
         problem "couldn't stop the dashboard" "$out"
         return
     }
+    said=$(socket_stat "$dashboard_socket")
+    [ -z "$said" ] || problem "the socket is still there after a clean stop: $said"
     answer=$(from_cloudflare "https://$public/admin")
     expect "HTTP/1.1 503" "$answer" "the dashboard stopped"
     expect "Retry-After: 30" "$answer" "the dashboard stopped"
     expect "Cache-Control: no-store" "$answer" "the dashboard stopped"
     expect "The MinerBot dashboard is restarting or stopped" "$answer" "the dashboard stopped"
+    expect "connect() to unix:$dashboard_socket failed (2: No such file or directory)" "$(errors_since "$before")" \
+        "nginx's error log, with the socket gone"
+    said=$(socket_stat "$socket_dir")
+    [ "$said" = "2750 1654 65534 nobody directory" ] \
+        || problem "with the dashboard stopped, the socket's folder is '$said', not '2750 1654 65534 nobody directory'"
+    for account in "$other_account" "$nobody_account"; do
+        out=$(bind_as "$account" "$dashboard_socket")
+        expect "bind() to unix:$dashboard_socket failed (13: Permission denied)" "$out" \
+            "$(who_is "$account") putting a socket in the dashboard's place while it's stopped"
+    done
+    said=$(socket_folder_names)
+    [ -z "$said" ] || problem "the socket's folder isn't empty while the dashboard is stopped" "$said"
+    answer=$(from_cloudflare -o /dev/null -D - "https://$public/")
+    expect "HTTP/1.1 503" "$answer" "/ after other accounts tried the socket's place"
+    without=$(tcp_listeners) || without=''
+    if ! grep -qx 443 <<< "$with" || ! grep -qx 3306 <<< "$with"; then
+        problem "the TCP listeners read don't have nginx's 443 and MariaDB's 3306, so they weren't read right" "$with"
+    elif [ "$with" != "$without" ]; then
+        problem "the dashboard's stop closed TCP listeners, so it listened on a port" \
+            "with the dashboard: ${with//$'\n'/ }"$'\n'"without: ${without//$'\n'/ }"
+    fi
     start_dashboard_again || problem "the dashboard wasn't ready within 90 seconds of starting again"
     answer=$(from_cloudflare -o /dev/null -D - "https://$public/")
     expect "HTTP/1.1 200" "$answer" "/ after the dashboard started again"
+}
+
+# What a dashboard killed outright leaves, by the memory limit or at the end of the stop's grace period: its socket, with
+# nothing listening. nginx answers with its 503 page, and the next start deletes that socket and listens again.
+dashboard_killed() {
+    local out answer before started logs left
+    out=$(dk 30 kill "$dashboard" 2>&1) || {
+        problem "couldn't kill the dashboard" "$out"
+        return
+    }
+    wait_for 30 dashboard_stopped || problem "the dashboard still ran 30 seconds after docker kill"
+    left=$(socket_stat "$dashboard_socket")
+    [ "$left" = "660 1654 65534 nobody socket" ] \
+        || problem "docker kill left '$left' at the socket's path, not the dashboard's socket, so this check proves nothing"
+    before=$(error_lines)
+    answer=$(from_cloudflare "https://$public/admin")
+    expect "HTTP/1.1 503" "$answer" "the dashboard killed"
+    expect "Retry-After: 30" "$answer" "the dashboard killed"
+    expect "The MinerBot dashboard is restarting or stopped" "$answer" "the dashboard killed"
+    expect "connect() to unix:$dashboard_socket failed (111: Connection refused)" "$(errors_since "$before")" \
+        "nginx's error log, with a socket nothing listens on"
+    start_dashboard_again || problem "the dashboard wasn't ready within 90 seconds of starting again over the socket left behind"
+    started=$(dk 30 container inspect -f '{{.State.StartedAt}}' "$dashboard" 2>&1) || started=''
+    logs=$(dk 60 logs --since "$started" "$dashboard" 2>&1) || problem "couldn't read the dashboard's log" "$logs"
+    expect "Deleted the socket at $dashboard_socket, which a dashboard that was stopped without closing it left behind" \
+        "$logs" "the dashboard's log as it started again"
+    left=$(socket_stat "$dashboard_socket")
+    [ "$left" = "660 1654 65534 nobody socket" ] \
+        || problem "after the start, the socket is '$left', not '660 1654 65534 nobody socket'"
+    answer=$(from_cloudflare -o /dev/null -D - "https://$public/")
+    expect "HTTP/1.1 200" "$answer" "/ after the dashboard started again over the socket left behind"
 }
 
 with_command() {   # the stand-in bot runs sleep instead of the bot
@@ -787,11 +1068,20 @@ make_bot() {
     wait_for 30 bot_running || bot_problem="the stand-in bot isn't running"
 }
 
+# bot_unchanged's answer for a compose file in dry_status: 0 when the bot would stay as it runs, 1 when Compose plans a
+# change, 2 when the dry run failed, 3 for lines it doesn't know. Compose's lines are in dry_run.
+dry_run_with() {   # dry_run_with <compose file>
+    dry_status=0
+    bot_unchanged "$1" || dry_status=$?
+}
+
 bot_dry_runs_pass() {
     local old new
     bot_before=$(bot_state)
-    if ! bot_unchanged "$home/old/compose.yml"; then problem "bot_unchanged refused today's compose file" "$dry_run"; fi
-    if ! bot_unchanged "$home/compose.yml"; then problem "bot_unchanged refused the new compose file" "$dry_run"; fi
+    dry_run_with "$home/old/compose.yml"
+    [ "$dry_status" = 0 ] || problem "bot_unchanged gave $dry_status, not 0, for today's compose file" "$dry_run"
+    dry_run_with "$home/compose.yml"
+    [ "$dry_status" = 0 ] || problem "bot_unchanged gave $dry_status, not 0, for the new compose file" "$dry_run"
     old=$(run_for 30 docker compose -f "$home/old/compose.yml" --project-directory "$home" config --hash bot 2>&1) \
         || problem "Compose couldn't hash today's file" "$old"
     new=$(run_for 30 docker compose -f "$home/compose.yml" --project-directory "$home" config --hash bot 2>&1) \
@@ -801,17 +1091,19 @@ bot_dry_runs_pass() {
 
 bot_dry_runs_refuse() {
     printf 'MBTEST_SETTING=changed\nMBTEST_OTHER=two\n' > "$home/bot.env"
-    if bot_unchanged "$home/old/compose.yml"; then problem "bot_unchanged passed today's file after bot.env changed" "$dry_run"; fi
+    dry_run_with "$home/old/compose.yml"
+    [ "$dry_status" = 1 ] || problem "bot_unchanged gave $dry_status, not 1, for today's file after bot.env changed" "$dry_run"
     expect Recreate "$dry_run" "the dry run with today's file after bot.env changed"
-    if bot_unchanged "$home/compose.yml"; then problem "bot_unchanged passed the new file after bot.env changed" "$dry_run"; fi
+    dry_run_with "$home/compose.yml"
+    [ "$dry_status" = 1 ] || problem "bot_unchanged gave $dry_status, not 1, for the new file after bot.env changed" "$dry_run"
     expect Recreate "$dry_run" "the dry run with the new file after bot.env changed"
     printf 'MBTEST_SETTING=one\nMBTEST_OTHER=two\n' > "$home/bot.env"
     sed 's/max-file: "5"/max-file: "6"/' "$home/compose.yml" > "$home/max-file.yml"
-    if bot_unchanged "$home/max-file.yml"; then problem "bot_unchanged passed a max-file change" "$dry_run"; fi
+    dry_run_with "$home/max-file.yml"
+    [ "$dry_status" = 1 ] || problem "bot_unchanged gave $dry_status, not 1, after a max-file change" "$dry_run"
     expect Recreate "$dry_run" "the dry run after a max-file change"
-    if ! bot_unchanged "$home/compose.yml"; then
-        problem "bot_unchanged refused the new file again once bot.env was as before" "$dry_run"
-    fi
+    dry_run_with "$home/compose.yml"
+    [ "$dry_status" = 0 ] || problem "bot_unchanged gave $dry_status, not 0, for the new file once bot.env was as before" "$dry_run"
 }
 
 bot_untouched() {
@@ -863,6 +1155,39 @@ bot_swap() {
     [ "$(bot_state)" = "$third" ] || problem "a second compose up on the same ID recreated the bot" "$out"
 }
 
+# revision in common.sh, which names images in messages and the history, against real Docker's templates: an image with
+# the revision label gives the label's first 12 characters, and one with labels but not that one gives "image <12>",
+# where asking for the missing label would print "<no value>". Two images made by docker commit, without a build.
+revision_labels() {
+    local out said labels_id
+    have_image "$runtime_image" || {
+        problem "couldn't pull $runtime_image within 5 minutes"
+        return
+    }
+    dk 30 rm -f -v "$stack-labels" > /dev/null 2>&1 || true
+    if ! out=$(dk 60 create --name "$stack-labels" --label "$label" "$runtime_image" true 2>&1) \
+        || ! out=$(dk 60 commit --change "LABEL org.opencontainers.image.revision=0123456789abcdef0123456789abcdef01234567" \
+            "$stack-labels" "$bot_image:revision" 2>&1) \
+        || ! out=$(dk 60 commit --change "LABEL mbtest-stack.note=no-revision" "$stack-labels" "$bot_image:labels" 2>&1); then
+        problem "couldn't make the two images" "$out"
+    fi
+    dk 30 rm -f -v "$stack-labels" > /dev/null 2>&1 || true
+    said=$(revision "$bot_image:revision")
+    [ "$said" = 0123456789ab ] || problem "revision gave '$said' for an image with the revision label, not 0123456789ab"
+    out=$(dk 30 image inspect -f '{{json .Config.Labels}}' "$bot_image:labels" 2>&1) || out=''
+    if [[ $out != *'"mbtest-stack.note":"no-revision"'* ]] || [[ $out == *org.opencontainers.image.revision* ]]; then
+        problem "the second image doesn't have labels without the revision label, so this check proves nothing" "$out"
+    fi
+    labels_id=$(image_id "$bot_image:labels") || labels_id=''
+    labels_id=${labels_id#sha256:}
+    said=$(revision "$bot_image:labels")
+    if [ -z "$labels_id" ] || [ "$said" != "image ${labels_id:0:12}" ]; then
+        problem "revision gave '$said' for an image with labels but not the revision label, not 'image ${labels_id:0:12}'"
+    fi
+    said=$(revision "$bot_image:missing")
+    [ "$said" = none ] || problem "revision gave '$said' for an image that isn't there, not none"
+}
+
 no_secrets_in_logs() {
     local name text file i where
     local -a secrets=("$proxy_key" "$db_password" "$client_secret" "$bot_password" "$root_password")
@@ -902,7 +1227,7 @@ check() {
         running "$name" || stop "$name isn't running. The stack stops by itself $lifetime seconds after up. Run down, then up."
     done
     dk 30 container inspect "$dashboard" > /dev/null 2>&1 || stop "There's no $dashboard. Run down, then up."
-    checks=16
+    checks=20
     made=0
     passed=0
     notes=''
@@ -915,7 +1240,7 @@ check() {
     database || true
     verdict "MariaDB's default is latin1, the migrations ran with the bot-like login (schema_version 1 0001_core), and apply_rights left the same rights on both of the login's hosts"
     dashboard_health || true
-    verdict "Docker's health check says healthy, the healthcheck command exits 0 with Healthy, and the start-up log says the Access check is off"
+    verdict "Docker's health check says healthy, the healthcheck command exits 0 with Healthy, and the start-up log says the Access check is off and that it listens only on its socket"
     home_page || true
     verdict "/ gives 200 through nginx, with the app's CSP and X-Frame-Options exactly once each, no-transform, and nothing compressed"
     admin_page || true
@@ -925,24 +1250,32 @@ check() {
     verdict "/signin gives 302 to discord.com with the long state, through nginx's 16k proxy buffer: $signin_note"
     outsider_refused || true
     verdict "$elsewhere_ip, outside the stand-in Cloudflare list, gets 403 on 443 and on 80"
-    on_the_loopback || true
-    verdict "on the loopback: 404 without the key, 400 for another Host even with it, 200 with it, and Healthy from localhost's /health/live and /health/ready"
+    on_the_socket || true
+    verdict "on the dashboard's socket, as root: 404 without the key, 400 for another Host even with it, 200 with it, Healthy from localhost's /health/live and /health/ready; and nothing answers on 127.0.0.1:5080"
+    socket_files || true
+    verdict "the socket's folder is 2750, 1654:nobody, with only the socket in it, which is 660, 1654:nobody; nginx's workers run as nobody; deploy.sh's readiness rule passes in $alma_image; compose.yml, nginx's file and the tmpfiles line name the same paths"
+    socket_access || true
+    verdict "nobody, nginx's account, can ask the dashboard through the socket and gets the bare 404 without the key; another account can't reach it; neither can make a file or a socket in its folder"
     broken_settings || true
     verdict "check-settings with a broken env exits 1 and names each setting, never a value"
     key_missing || true
     verdict "with nginx's proxy key file renamed, the dashboard's 404 comes through nginx, and with it back, 200"
     dashboard_down || true
-    verdict "with the dashboard stopped, nginx's 503 page with Retry-After: 30, and once it's started again, 200"
+    verdict "with the dashboard stopped, its socket is gone and nginx gives its 503 page with Retry-After: 30; no other account can put a socket in its place; it had no TCP port; and once it's started again, 200"
+    dashboard_killed || true
+    verdict "with the dashboard killed, the socket it left gives nginx's 503 page; the next start deletes it, says so, and listens again, 660, 1654:nobody, and / gives 200"
 
     make_bot
     if [ -n "$bot_problem" ]; then problem "$bot_problem"; else bot_dry_runs_pass || true; fi
-    verdict "bot_unchanged passes for today's compose file and for the new one, and config --hash bot is the same for both"
+    verdict "bot_unchanged gives 0 for today's compose file and for the new one, and config --hash bot is the same for both"
     if [ -n "$bot_problem" ]; then problem "$bot_problem"; else bot_dry_runs_refuse || true; fi
-    verdict "bot_unchanged refuses after a line of bot.env changes and after a max-file change, where Compose would recreate"
+    verdict "bot_unchanged gives 1 after a line of bot.env changes and after a max-file change, where Compose would recreate"
     if [ -n "$bot_problem" ]; then problem "$bot_problem"; else bot_untouched || true; fi
     verdict "after every dry run, the stand-in bot has the same container ID, start time and Compose label"
     if [ -n "$bot_problem" ]; then problem "$bot_problem"; else bot_swap || true; fi
     verdict "compose up leaves the bot when :current has the same image ID, and recreates it on the other ID when :current moves"
+    revision_labels || true
+    verdict "revision names an image with the revision label by its first 12 characters, one with labels but not that one as 'image <12>', and a missing one none"
     remove_bot
     left=$(image_leftovers)
     [ -z "$left" ] || echo "The stand-in bot's images are still there: $left"
@@ -1015,13 +1348,13 @@ down() {
     remove_bot
     for _ in 1 2 3 4 5; do
         dk 120 rm -f -v "$cloudflare" "$elsewhere" "$nginx" "$dashboard" "$db" "$stack-migrate" "$stack-check" \
-            "$stack-other" "$bot_container" "$holder" > /dev/null 2>&1 || true
+            "$stack-rule" "$stack-other" "$stack-labels" "$bot_container" "$holder" > /dev/null 2>&1 || true
         # Anything else with the stack's label or name, in case a run was cut while it made one
         for name in $(dk 30 ps -aq --filter "label=$stack" 2> /dev/null || true) \
             $(dk 30 ps -aq --filter "name=$stack-" 2> /dev/null || true); do
             dk 60 rm -f -v "$name" > /dev/null 2>&1 || true
         done
-        for volume in "$keys_volume" "$bot_volume" "$stack-dashboard-keys" $(anonymous_volumes); do
+        for volume in "$keys_volume" "$socket_volume" "$bot_volume" "$stack-dashboard-keys" $(anonymous_volumes); do
             dk 60 volume rm "$volume" > /dev/null 2>&1 || true
         done
         dk 60 network rm "$net" > /dev/null 2>&1 || true

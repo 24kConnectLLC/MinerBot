@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # A stand-in for nginx, for scripts-test.sh:
 #   nginx -t -q            the test with every site. Like nginx, it fails when MinerBot's file is in conf.d and its
-#                          certificate or key is missing, or the two don't belong together. FAKE_NGINX_T makes it fail
-#                          always (fail), or whenever the four files differ from what /fake/nginx/accepted lists
-#                          (accepted: one line per file, its sha256 or "absent")
+#                          certificate or key is missing, or the two don't belong together, or when that file or the
+#                          pipelog.conf it includes has a pipelog line while cPanel's modules folder doesn't load the
+#                          pipelog module, as with WHM's piped logging off. FAKE_NGINX_T makes it fail
+#                          always (fail), only the first time (fail-once, as during a reload), or whenever the four
+#                          files differ from what /fake/nginx/accepted lists (accepted: one line per file, its sha256 or
+#                          "absent")
 #   nginx -t -q -c <file>  the standalone test. Like nginx, it reads a relative path against /etc/nginx, falls back to a
 #                          user that doesn't exist here without a user line, and fails when the candidate's certificate
 #                          and key are missing or don't belong together. FAKE_NGINX_STANDALONE=fail fails it.
@@ -42,17 +45,38 @@ full_test() {
         fail)
             refuse "nginx: [emerg] unexpected \"}\" in /etc/nginx/conf.d/users/example.conf:41 (a made-up failure)"
             ;;
+        fail-once)
+            if [ ! -e "$fake/nginx/failed-once" ]; then
+                mkdir -p "$fake/nginx"
+                : > "$fake/nginx/failed-once"
+                refuse "nginx: [emerg] unexpected \"}\" in /etc/nginx/conf.d/users/example.conf:41 (a made-up failure, once)"
+            fi
+            ;;
         accepted)
             [ "$(live_state)" = "$(cat "$fake/nginx/accepted" 2> /dev/null)" ] \
                 || refuse "nginx: [emerg] a made-up failure: MinerBot's files aren't the ones this test accepts"
             ;;
     esac
     if [ -f "$conf" ]; then
+        pipelog_known "$conf"
+        if grep -q '^[[:space:]]*include[[:space:]]\{1,\}/etc/nginx/minerbot/pipelog\.con\[f\];' "$conf" \
+            && [ -f "$secrets/pipelog.conf" ]; then
+            pipelog_known "$secrets/pipelog.conf"
+        fi
         [ -f "$secrets/origin-cert.pem" ] \
             || refuse "nginx: [emerg] cannot load certificate \"$secrets/origin-cert.pem\": BIO_new_file() failed (SSL: error:80000002:system library::No such file or directory)"
         pair_ok "$secrets/origin-cert.pem" "$secrets/origin-key.pem" \
             || refuse "nginx: [emerg] SSL_CTX_use_PrivateKey(\"$secrets/origin-key.pem\") failed (SSL: error:05800074:x509 certificate routines::key values mismatch)"
     fi
+}
+
+# Like nginx, it knows the pipelog directive only while cPanel's modules folder loads the module, that is while WHM's
+# piped logging is on, and refuses it for every site otherwise
+pipelog_known() {   # pipelog_known <file>
+    local n
+    [ ! -e /etc/nginx/conf.d/modules/ngx_http_pipelog_module.conf ] || return 0
+    n=$(grep -n '^[[:space:]]*pipelog[[:space:]]' "$1" | head -n 1 | cut -d: -f1)
+    [ -z "$n" ] || refuse "nginx: [emerg] unknown directive \"pipelog\" in $1:$n"
 }
 
 standalone() {   # standalone <the file given with -c>

@@ -6,7 +6,7 @@ using MinerBot.Dashboard.Security;
 using MinerBot.Dashboard.Settings;
 
 // The deploy's migration step and the container's health check need none of the web settings, and must never try to
-// take the port the running dashboard holds
+// take the port or socket the running dashboard holds
 if (DashboardCommands.Find(args) is { } command)
     return await DashboardCommands.RunAsync(command, args);
 
@@ -15,8 +15,9 @@ if (DashboardCommands.Find(args) is { } command)
 string[] publicPages = ["/Index", "/SignIn", "/SignOut", "/Denied", "/Error"];
 
 // "check-settings" checks the settings the way a start would, then exits: 0 when the dashboard would start, 1 with the
-// list when it wouldn't. Nothing listens and nothing connects, so deploy.sh and setup-dashboard.sh run it before they
-// change anything.
+// list when it wouldn't. Nothing listens and nothing connects. deploy.sh runs it on the new image after the build and any
+// migrations, before the rights and the swap. setup-dashboard.sh runs it on the dashboard.env it's about to write, before
+// it changes the database login, the rights, nginx's files or dashboard.env.
 var checkOnly = args is [DashboardCommands.CheckSettings, ..];
 var builder = WebApplication.CreateBuilder(checkOnly ? args[1..] : args);
 
@@ -77,7 +78,7 @@ app.UseMiddleware<SecurityHeaders>();
 app.UseMiddleware<ProxyKeyMiddleware>();
 
 // 3. The visitor's address and https are trusted only after the key has shown that nginx sent them: one hop, from
-//    loopback only, and never X-Forwarded-Host.
+//    loopback only, and never X-Forwarded-Host. A connection on the Unix socket counts as loopback.
 app.UseForwardedHeaders();
 
 // 4. A cookie named like the session or the sign-in's correlation cookie, but with __Host- in another case, is one

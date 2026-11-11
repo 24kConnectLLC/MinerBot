@@ -8,16 +8,22 @@
 # statement that came on stdin in /fake/stdin.log, passwords included: the one place a secret may be. Its line in
 # calls.log names the kind of statement that came on stdin, such as {stdin: rehearsal}. These variables change it:
 #   FAKE_DB_SCHEMATA     what the check that both databases exist counts (2 by default)
-#   FAKE_DB_TABLES       none: neither the dashboard's tables nor the website's three exist
+#   FAKE_DB_TABLES       none: neither the dashboard's tables nor the website's three exist; site-two: the dashboard's
+#                        tables exist, and only two of the website's three
+#   FAKE_DB_DENY         a database the dashboard's login is refused on (1044), however right its password
 #   FAKE_REHEARSAL       fail: the rehearsal stops at a missing table, as MariaDB does (1146)
 #   FAKE_APPLY           fail: applying the rights to the real login fails
 #   FAKE_RIGHTS_EXTRA    1: the real login has a PROXY grant that REVOKE can't take away
+#   FAKE_DROP_CHECK      fail-once: the first plain DROP USER of the throwaway login fails, as when the connection drops
+#   FAKE_DB_EXTRAS       what MinerBot's database holds that no migration makes, one per line, as in "trigger
+#                        mbtest_stamp" (nothing by default); fail: the query about them fails
 # shellcheck source=record.sh
 source /usr/local/lib/mbtest/record.sh
 db=$fake/db
 mkdir -p "$db"
 
 sql=''
+database=''
 from_stdin=no
 password_test=no
 skip_print=no
@@ -29,6 +35,9 @@ for arg in "$@"; do
     esac
     if [ "$prev" = -e ]; then
         sql=$arg
+    fi
+    if [ "$prev" = -D ]; then
+        database=$arg
     fi
     prev=$arg
 done
@@ -72,6 +81,9 @@ if [ "$password_test" = yes ]; then
     pw=$(printf '%s\n' "$sql" | sed -n 's/^password=//p')
     if [ "$user" = minerbot-dashboard ] && [ -f "$db/login-127.0.0.1" ] && [ -f "$db/password" ] \
         && [ "$pw" = "$(cat "$db/password")" ]; then
+        if [ -n "$database" ] && [ "$database" = "${FAKE_DB_DENY:-}" ]; then
+            refuse "ERROR 1044 (42000): Access denied for user '$user'@'localhost' to database '$database'"
+        fi
         echo 1
         exit 0
     fi
@@ -81,6 +93,10 @@ fi
 case $sql in
     *"FROM information_schema.schemata"*)
         echo "${FAKE_DB_SCHEMATA:-2}"
+        ;;
+    *"FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = 'minerbot_db'"*"information_schema.ROUTINES"*)
+        [ "${FAKE_DB_EXTRAS:-}" != fail ] || refuse "ERROR 2013 (HY000): Lost connection to server during query (made up)"
+        if [ -n "${FAKE_DB_EXTRAS:-}" ]; then printf '%s\n' "$FAKE_DB_EXTRAS"; fi
         ;;
     *"table_name = 'schema_version'"*)
         if [ -f "$db/version" ]; then echo 1; else echo 0; fi
@@ -93,7 +109,11 @@ case $sql in
         if [ -f "$db/version" ] && [ "${FAKE_DB_TABLES:-}" != none ]; then echo 1; else echo 0; fi
         ;;
     *"table_name IN ('ihvph_armor_styles'"*)
-        if [ "${FAKE_DB_TABLES:-}" = none ]; then echo 0; else echo 3; fi
+        case ${FAKE_DB_TABLES:-} in
+            none) echo 0 ;;
+            site-two) echo 2 ;;
+            *) echo 3 ;;
+        esac
         ;;
     *"FROM mysql.user WHERE User = 'minerbot-dashboard' AND Host IN ('localhost', '127.0.0.1')"*)
         n=0
@@ -112,6 +132,10 @@ case $sql in
         touch "$db/check-login"
         ;;
     "DROP USER IF EXISTS $check_login")
+        if [ "${FAKE_DROP_CHECK:-}" = fail-once ] && [ ! -e "$db/drop-check-failed" ]; then
+            touch "$db/drop-check-failed"
+            refuse "ERROR 2013 (HY000): Lost connection to server during query (made up)"
+        fi
         rm -f "$db/check-login" "$db/check-applied"
         ;;
     *)

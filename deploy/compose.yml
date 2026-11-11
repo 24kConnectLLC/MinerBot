@@ -32,11 +32,15 @@ services:
         max-size: 10m
         max-file: "5"
 
+  # The dashboard's section must work with the previous dashboard image too: rollback.sh runs that image under it, and
+  # setup-dashboard.sh may recreate it under it after a --only bot deploy. A change that can't is split over pull
+  # requests: first an image that works both ways, then the change here.
   dashboard:
     image: minerbot-dashboard:current
     pull_policy: never
     container_name: minerbot-dashboard
-    # Host networking like the bot. The dashboard listens on 127.0.0.1:5080 only, set in its code, where nginx reaches it.
+    # Host networking like the bot, so the database is on 127.0.0.1. The dashboard listens on no port: only on the
+    # socket below, where nginx reaches it, and no other account on the server can take its place while it restarts.
     network_mode: host
     restart: unless-stopped
     # The image's own user, set here too, so an image that lost its USER line still never runs as root
@@ -45,6 +49,9 @@ services:
     env_file:
       - path: ./dashboard.env
         required: false
+    environment:
+      # Set here, so it wins over dashboard.env
+      Dashboard__UnixSocket: /run/minerbot-dashboard/dashboard.sock
     read_only: true
     tmpfs:
       # Each new sign-in key is written here before it moves to /app/keys, and the dashboard won't start without it
@@ -52,6 +59,14 @@ services:
     volumes:
       # The sign-in keys, so a restart signs nobody out
       - minerbot-dashboard-keys:/app/keys
+      # The socket's folder, at the same path inside: 2750, owned by 1654 and the group nobody, which systemd-tmpfiles
+      # makes at every boot from deploy/minerbot-dashboard.tmpfiles. A missing folder stops the start, rather than Docker
+      # making one as root, where the dashboard couldn't write.
+      - type: bind
+        source: /run/minerbot-dashboard
+        target: /run/minerbot-dashboard
+        bind:
+          create_host_path: false
     security_opt:
       - no-new-privileges:true
     cap_drop:

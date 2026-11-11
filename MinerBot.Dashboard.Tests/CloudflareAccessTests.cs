@@ -26,8 +26,8 @@ namespace MinerBot.Dashboard.Tests
         const string AdminPath = "/admin";
 
         // The app with the fake as Cloudflare, on its clock. On unless told otherwise, and with the fixture's databases
-        // unless it's given one that's down.
-        static DashboardFactory Factory(MariaDbFixture db, FakeCloudflareAccess access, bool on = true, DeadDatabase? dead = null)
+        // unless it's given one that's down. A test can add services of its own after the fake's.
+        static DashboardFactory Factory(MariaDbFixture db, FakeCloudflareAccess access, bool on = true, DeadDatabase? dead = null, Action<IServiceCollection>? more = null)
         {
             var factory = new DashboardFactory(db, new DashboardFactoryOptions
             {
@@ -36,12 +36,26 @@ namespace MinerBot.Dashboard.Tests
                 Settings = on
                     ? new Dictionary<string, string?> { ["CloudflareAccess:TeamDomain"] = FakeCloudflareAccess.TeamDomain, ["CloudflareAccess:Audience"] = access.Audience }
                     : new Dictionary<string, string?>(),
-                Services = services => access.Install(services)
+                Services = services =>
+                {
+                    access.Install(services);
+                    more?.Invoke(services);
+                }
             });
 
             access.Clock = factory.Clock;
             return factory;
         }
+
+        // The admin overview at a second address outside /admin. It keeps the Admin folder's policy, so only the check's
+        // reading of the page's policy can guard it there.
+        static void ElsewhereToo(IServiceCollection services) =>
+            services.Configure<RazorPagesOptions>(options => options.Conventions.AddPageRoute("/Admin/Index", "elsewhere"));
+
+        // For the requests that never reach the database: the app on one that isn't there, so these need neither the
+        // fixture's database nor Docker
+        static DashboardFactory WithoutDatabase(MariaDbFixture db, FakeCloudflareAccess access, Action<IServiceCollection>? more = null) =>
+            Factory(db, access, dead: new DeadDatabase(), more: more);
 
         static Task<HttpResponseMessage> GetAsync(TestBrowser browser, string path, params string[] tokens)
         {
@@ -223,6 +237,109 @@ namespace MinerBot.Dashboard.Tests
             using var local = factory.Local();
             Assert.Equal(HttpStatusCode.OK, (await local.GetAsync("/health/live", Token)).StatusCode);
             Assert.Equal(HttpStatusCode.OK, (await local.GetAsync("/health/ready", Token)).StatusCode);
+        }
+
+        // Where the check sits in the pipeline. Each of these fails if it moves: before routing, before the proxy key,
+        // before the limits, or before the origin check.
+
+        // A page with the Admin policy needs the token wherever it is, not only under /admin. That works only because the
+        // check runs after routing and sees the page's policy. Fails if the check runs before routing.
+        [Fact]
+        public async Task AdminPageAtAnotherAddressStillNeedsTheToken()
+        {
+            var access = new FakeCloudflareAccess(keys);
+            await using var factory = WithoutDatabase(fixture, access, ElsewhereToo);
+            var visitor = factory.Visitor("203.0.113.94");
+
+            var refused = await GetAsync(visitor, "/elsewhere");
+            Assert.Equal(HttpStatusCode.Forbidden, refused.StatusCode);
+            Assert.Equal(Refusal, await refused.Content.ReadAsStringAsync(Token));
+
+            // With a token it's the admin page, so sign-in comes next: the address does reach the page
+            var withToken = await GetAsync(visitor, "/elsewhere", access.Mint());
+            Assert.Equal(HttpStatusCode.Redirect, withToken.StatusCode);
+            Assert.Equal("/signin?returnUrl=%2Felsewhere", SignInSteps.PathOf(withToken.Headers.Location));
+        }
+
+        // And a session alone isn't enough there: a signed-in Admin without the token is refused, and with it gets the page
+        [Fact]
+        public async Task SignedInAdminAtAnotherAddressStillNeedsTheToken()
+        {
+            var access = new FakeCloudflareAccess(keys);
+            await using var factory = Factory(await fixture.ReadyAsync(), access, more: ElsewhereToo);
+            var admin = factory.Visitor("203.0.113.95");
+            await SignInSteps.SignedInAsync(factory, admin, TestUsers.Admin);
+
+            var refused = await GetAsync(admin, "/elsewhere");
+            Assert.Equal(HttpStatusCode.Forbidden, refused.StatusCode);
+            Assert.Equal(Refusal, await refused.Content.ReadAsStringAsync(Token));
+
+            var page = await GetAsync(admin, "/elsewhere", access.Mint());
+            Assert.Equal(HttpStatusCode.OK, page.StatusCode);
+            Assert.Contains("You're signed in as Test Admin", WebUtility.HtmlDecode(await page.Content.ReadAsStringAsync(Token)));
+        }
+
+        // The proxy key comes first, so anything on the server that calls the dashboard without it gets the bare 404 for
+        // /admin too: no refusal naming the public address, no log line and no key fetch, whatever token it sends. Fails if
+        // the check moves ahead of the proxy key.
+        [Fact]
+        public async Task AdminAddressWithoutTheProxyKeyIsTheBare404()
+        {
+            var access = new FakeCloudflareAccess(keys);
+            await using var factory = WithoutDatabase(fixture, access);
+            var outsider = factory.Visitor("203.0.113.96", proxyKey: false);
+            var answers = new List<HttpResponseMessage>
+            {
+                await GetAsync(outsider, "/admin"),
+                await GetAsync(outsider, "/admin", access.Mint()),
+                await GetAsync(outsider, "/admin", access.Mint(header: head => head["kid"] = "made-up-key"))
+            };
+
+            using (var local = factory.Local())
+                answers.Add(await local.GetAsync("/admin", Token));
+
+            foreach (var response in answers)
+            {
+                Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+                Assert.Empty(await response.Content.ReadAsByteArrayAsync(Token));
+            }
+
+            Assert.Equal(0, access.Fetches);
+            Assert.DoesNotContain(factory.Logs.Entries, entry => entry.Message.Contains("Cloudflare Access check:", StringComparison.Ordinal));
+        }
+
+        // The limits come first, so whoever reaches the dashboard around Access is held to the visitor's limit, refusals and
+        // their log lines included, and one over it never reaches the check. Fails if the check moves ahead of the limiter.
+        [Fact]
+        public async Task RefusedAdminRequestsCountTowardTheVisitorsLimit()
+        {
+            var access = new FakeCloudflareAccess(keys);
+            await using var factory = WithoutDatabase(fixture, access);
+            var visitor = factory.Visitor("203.0.113.97");
+
+            for (var i = 0; i < RateLimits.VisitorPerMinute; i++)
+                Assert.Equal(HttpStatusCode.Forbidden, (await GetAsync(visitor, "/admin")).StatusCode);
+
+            var limited = await GetAsync(visitor, "/admin", access.Mint(header: head => head["kid"] = "made-up-key"));
+            Assert.Equal(HttpStatusCode.TooManyRequests, limited.StatusCode);
+            Assert.Equal(RateLimits.Rejection, await limited.Content.ReadAsStringAsync(Token));
+
+            // Its made-up key was never looked up
+            Assert.Equal(0, access.Fetches);
+        }
+
+        // A change from another site meets the origin check before any token is looked at. Both are 403s, so this only
+        // pins the order. Fails if the check moves ahead of the origin check.
+        [Fact]
+        public async Task CrossSitePostToAnAdminAddressMeetsTheOriginCheckFirst()
+        {
+            var access = new FakeCloudflareAccess(keys);
+            await using var factory = WithoutDatabase(fixture, access);
+
+            var response = await SignInSteps.PostAsync(factory.Visitor("203.0.113.98"), "/admin", null, origin: "https://murderminershub.com");
+
+            Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+            Assert.Equal(OriginCheck.Refusal, await response.Content.ReadAsStringAsync(Token));
         }
 
         // No token, good or bad, appears in a log line, a header or a page

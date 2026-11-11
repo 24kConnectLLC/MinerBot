@@ -1,4 +1,6 @@
+using System.Buffers.Text;
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
@@ -250,26 +252,50 @@ namespace MinerBot.Dashboard.Tests
         {
             "not RSA",
             "1024 bits",
+            "1024 bits after zero bytes",
+            "2040 bits after a zero byte",
             "use enc",
+            "use null",
+            "use a number",
+            "use true",
+            "use a list",
             "alg RS512",
+            "alg null",
+            "alg a number",
             "no kid",
             "empty kid",
             "kid of 129 characters",
             "no modulus",
-            "not base64url"
+            "not base64url",
+            "no exponent",
+            "empty exponent"
         };
 
         Dictionary<string, object?> Unusable(string which) => which switch
         {
             "not RSA" => FakeCloudflareAccess.Jwk("key", keys.Signer, kty: "EC"),
             "1024 bits" => FakeCloudflareAccess.Jwk("key", keys.Weak),
+            // Leading zero bytes don't count: the weak key written in 256 bytes, and 255 bytes whose first bit is set
+            // written after one zero byte
+            "1024 bits after zero bytes" => With(FakeCloudflareAccess.Jwk("key", keys.Weak), "n", Base64Url.EncodeToString([.. new byte[128], .. Modulus(keys.Weak)])),
+            "2040 bits after a zero byte" => With(FakeCloudflareAccess.Jwk("key", keys.Signer), "n", Base64Url.EncodeToString([0, (byte)(Modulus(keys.Signer)[1] | 0x80), .. Modulus(keys.Signer)[2..]])),
             "use enc" => FakeCloudflareAccess.Jwk("key", keys.Signer, use: "enc"),
+            // There, but not a string, so neither sig nor absent
+            "use null" => With(FakeCloudflareAccess.Jwk("key", keys.Signer), "use", null),
+            "use a number" => With(FakeCloudflareAccess.Jwk("key", keys.Signer), "use", 1),
+            "use true" => With(FakeCloudflareAccess.Jwk("key", keys.Signer), "use", true),
+            "use a list" => With(FakeCloudflareAccess.Jwk("key", keys.Signer), "use", new[] { "sig" }),
             "alg RS512" => FakeCloudflareAccess.Jwk("key", keys.Signer, alg: "RS512"),
+            // There, but not a string, so neither RS256 nor absent
+            "alg null" => With(FakeCloudflareAccess.Jwk("key", keys.Signer), "alg", null),
+            "alg a number" => With(FakeCloudflareAccess.Jwk("key", keys.Signer), "alg", 256),
             "no kid" => FakeCloudflareAccess.Jwk(null, keys.Signer),
             "empty kid" => FakeCloudflareAccess.Jwk("", keys.Signer),
             "kid of 129 characters" => FakeCloudflareAccess.Jwk(new string('k', MaxKeyIdLength + 1), keys.Signer),
             "no modulus" => Without(FakeCloudflareAccess.Jwk("key", keys.Signer), "n"),
             "not base64url" => With(FakeCloudflareAccess.Jwk("key", keys.Signer), "n", "@@@@"),
+            "no exponent" => Without(FakeCloudflareAccess.Jwk("key", keys.Signer), "e"),
+            "empty exponent" => With(FakeCloudflareAccess.Jwk("key", keys.Signer), "e", ""),
             _ => throw new ArgumentOutOfRangeException(nameof(which))
         };
 
@@ -279,13 +305,16 @@ namespace MinerBot.Dashboard.Tests
             return jwk;
         }
 
-        static Dictionary<string, object?> With(Dictionary<string, object?> jwk, string name, object value)
+        // Jwk leaves a null field out, so this is the only way to write one as null
+        static Dictionary<string, object?> With(Dictionary<string, object?> jwk, string name, object? value)
         {
             jwk[name] = value;
             return jwk;
         }
 
-        static string Document(params object[] list) => JsonSerializer.Serialize(new Dictionary<string, object> { ["keys"] = list });
+        static byte[] Modulus(RSA key) => key.ExportParameters(false).Modulus!;
+
+        static string Document(params object?[] list) => JsonSerializer.Serialize(new Dictionary<string, object> { ["keys"] = list });
 
         [Theory]
         [MemberData(nameof(UnusableKeys))]
@@ -331,6 +360,70 @@ namespace MinerBot.Dashboard.Tests
             Assert.ThrowsAny<JsonException>(() => Parse("<html>"u8));
             Assert.Empty(Parse("""{"keys":{}}"""u8));
             Assert.Empty(Parse("[]"u8));
+        }
+
+        // An entry of the list that isn't an object is left out, and the keys beside it are still kept, so one odd entry
+        // can't cost the whole set
+        [Fact]
+        public async Task EntryThatIsNotAnObjectIsLeftOut()
+        {
+            var good = FakeCloudflareAccess.Jwk("good", keys.Signer);
+
+            Assert.Equal(["good"], Parse(Encoding.UTF8.GetBytes(Document(null, "x", 5, true, Array.Empty<object>(), good))).Keys);
+
+            using var run = Start();
+            run.Access.Document = Document(null, FakeCloudflareAccess.Jwk(run.Access.CurrentKeyId, keys.Signer));
+
+            Assert.Equal(KeyLookup.Found, await run.LookupAsync(run.Access.CurrentKeyId));
+            Assert.DoesNotContain(run.Logs.Entries, entry => entry.Level == LogLevel.Warning);
+        }
+
+        // A 2048-bit key written after a zero byte, as RFC 7518 says some libraries write one, is kept as itself
+        [Fact]
+        public void FullKeyAfterAZeroByteIsKept()
+        {
+            var found = Parse(Encoding.UTF8.GetBytes(Document(With(FakeCloudflareAccess.Jwk("key", keys.Signer), "n", Base64Url.EncodeToString([0, .. Modulus(keys.Signer)])))));
+
+            Assert.Equal(keys.Signer.ExportSubjectPublicKeyInfo(), Assert.Single(found).Value.ExportSubjectPublicKeyInfo());
+        }
+
+        // A key this platform's RSA refuses to import is left out on its own, and the rest of the document is kept. Windows
+        // refuses a public exponent of more than 8 bytes, and OpenSSL 3's import check refuses e = 1, so each platform has one
+        // here that it refuses.
+        [Fact]
+        public async Task KeyThePlatformRefusesCostsOnlyItself()
+        {
+            var document = Document(
+                With(FakeCloudflareAccess.Jwk("long-exponent", keys.Signer), "e", Base64Url.EncodeToString(Enumerable.Repeat((byte)0xFF, 300).ToArray())),
+                With(FakeCloudflareAccess.Jwk("exponent-one", keys.Signer), "e", Base64Url.EncodeToString([1])),
+                FakeCloudflareAccess.Jwk("good", keys.Next));
+
+            Assert.Contains("good", Parse(Encoding.UTF8.GetBytes(document)).Keys);
+
+            // And a fetch of that document is a good one
+            using var run = Start();
+            run.Access.Document = document;
+
+            Assert.Equal(KeyLookup.Found, await run.LookupAsync("good"));
+            Assert.DoesNotContain(run.Logs.Entries, entry => entry.Level == LogLevel.Warning);
+        }
+
+        // The app's own limits, as AddCloudflareAccess registers them, since every other test here passes its own. A request
+        // that finds a fetch running must wait longer than that whole fetch can take, or a second admin request during a
+        // slow first fetch gets the 503.
+        [Fact]
+        public void AppLimitsAreTheDesignedOnes()
+        {
+            using var provider = new ServiceCollection().AddLogging().AddCloudflareAccess().BuildServiceProvider();
+            var limits = provider.GetRequiredService<CloudflareAccessLimits>();
+
+            Assert.Equal(TimeSpan.FromSeconds(10), limits.FetchLimit);
+            Assert.Equal(TimeSpan.FromSeconds(12), limits.WaitLimit);
+            Assert.Equal(TimeSpan.FromHours(1), limits.FreshFor);
+            Assert.Equal(TimeSpan.FromHours(24), limits.UsableFor);
+            Assert.Equal(TimeSpan.FromSeconds(30), limits.MinRefetch);
+            Assert.Equal(64 * 1024, limits.MaxResponseBytes);
+            Assert.True(limits.WaitLimit > limits.FetchLimit, $"A request waits {limits.WaitLimit} for a fetch that may take {limits.FetchLimit}");
         }
 
         // Only to Cloudflare: no redirects, no proxy and no cookies, and a short connect limit

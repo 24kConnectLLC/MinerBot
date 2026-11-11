@@ -1,20 +1,30 @@
 #!/usr/bin/env bash
 # A stand-in for curl, for scripts-test.sh. It answers the four addresses the scripts ask:
-#   http://127.0.0.1:5080/health/ready   Healthy while the dashboard's container runs, Unhealthy when its image is in
-#                                        FAKE_UNREADY (dashboard@<rev>), and no connection when it doesn't run
+#   http://localhost/health/ready        through --unix-socket /run/minerbot-dashboard/dashboard.sock: Healthy while the
+#                                        dashboard's container runs and its socket is there; Unhealthy when its image is
+#                                        in FAKE_UNREADY (dashboard@<rev>) or its health is "starting"; no connection
+#                                        without the socket
 #   https://bot.murderminershub.com/     200 while the dashboard runs (502 when its image is in FAKE_PUBLIC_FAIL), and
 #                                        503, nginx's page, when it doesn't. With --resolve to 127.0.0.1, the request
 #                                        comes from this server: 403 while MinerBot's nginx file is in conf.d, or
-#                                        FAKE_LOCAL_ANSWER
+#                                        FAKE_LOCAL_ANSWER. FAKE_PUBLIC_ANSWER changes what the running dashboard's page
+#                                        answers: a status such as 404, the same with -once (only the first time, as
+#                                        /fake/nginx/public-once remembers), or challenge (403 with cf-mitigated:
+#                                        challenge, as Cloudflare's Bot Fight Mode answers)
 #   https://<team>/cdn-cgi/access/certs  one RSA key, unless the team is in FAKE_ACCESS_DOWN
+# With -D -, the response's header lines come first, as curl prints them.
 # shellcheck source=record.sh
 source /usr/local/lib/mbtest/record.sh
 record curl "$@"
+sync_socket
 
 url=''
 write_out=no
 resolve=no
 local_host=no
+headers=no
+socket=''
+prev=''
 for arg in "$@"; do
     case $arg in
         http://* | https://*) url=$arg ;;
@@ -22,9 +32,25 @@ for arg in "$@"; do
         bot.murderminershub.com:443:127.0.0.1) resolve=yes ;;
         "Host: localhost") local_host=yes ;;
     esac
+    if [ "$prev" = --unix-socket ]; then
+        socket=$arg
+    fi
+    if [ "$prev" = -D ] && [ "$arg" = - ]; then
+        headers=yes
+    fi
+    prev=$arg
 done
 
-answer() {   # answer <HTTP status> [<body>]: what curl prints with or without -w '%{http_code}'
+# answer <HTTP status> [<body>] [<header line>]: what curl prints with or without -w '%{http_code}', after the header
+# lines with -D -, which a status of 000, nothing answering, has none of
+answer() {
+    if [ "$headers" = yes ] && [ "$1" != 000 ]; then
+        printf 'HTTP/2 %s\r\ncontent-type: text/html\r\n' "$1"
+        if [ -n "${3:-}" ]; then
+            printf '%s\r\n' "$3"
+        fi
+        printf '\r\n'
+    fi
     if [ "$write_out" = yes ]; then
         printf '%s' "$1"
     else
@@ -33,12 +59,17 @@ answer() {   # answer <HTTP status> [<body>]: what curl prints with or without -
 }
 
 case $url in
-    http://127.0.0.1:5080/health/ready)
-        running dashboard || { echo "curl: (7) Failed to connect to 127.0.0.1 port 5080: Connection refused" >&2; exit 7; }
+    http://localhost/health/ready)
+        if [ "$socket" != /run/minerbot-dashboard/dashboard.sock ] || [ ! -S "$socket" ] || ! running dashboard; then
+            echo "curl: (7) Couldn't connect to server" >&2
+            exit 7
+        fi
+        health=''
+        read -r _ _ _ _ health _ < "$D/ctr/minerbot-dashboard" || true
         if [ "$local_host" != yes ]; then
             # Without Host: localhost, the dashboard wants the proxy key, which the probe never has
             answer 404 ""
-        elif listed "${FAKE_UNREADY:-}" "$(running_key dashboard)"; then
+        elif [ "$health" = starting ] || listed "${FAKE_UNREADY:-}" "$(running_key dashboard)"; then
             answer 503 Unhealthy
         else
             answer 200 Healthy
@@ -58,7 +89,21 @@ case $url in
         elif listed "${FAKE_PUBLIC_FAIL:-}" "$(running_key dashboard)"; then
             answer 502
         else
-            answer 200 "<!DOCTYPE html>"
+            public=${FAKE_PUBLIC_ANSWER:-200}
+            if [[ $public == *-once ]]; then
+                if [ -e "$fake/nginx/public-once" ]; then
+                    public=200
+                else
+                    mkdir -p "$fake/nginx"
+                    : > "$fake/nginx/public-once"
+                    public=${public%-once}
+                fi
+            fi
+            case $public in
+                200) answer 200 "<!DOCTYPE html>" ;;
+                challenge) answer 403 "<!DOCTYPE html><title>Just a moment...</title>" "cf-mitigated: challenge" ;;
+                *) answer "$public" "" ;;
+            esac
         fi
         ;;
     https://*/cdn-cgi/access/certs)

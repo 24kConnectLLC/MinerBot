@@ -1,20 +1,39 @@
 #!/usr/bin/env bash
-# A stand-in for cPanel's /scripts/restartsrv_nginx, for scripts-test.sh. A reload makes nginx serve the certificate
-# that's in MinerBot's folder at that moment: /fake/nginx/served-cert.pem is what the stand-in openssl s_client shows.
-# FAKE_RELOAD=fail makes the reload fail.
+# A stand-in for cPanel's /scripts/restartsrv_nginx, for scripts-test.sh. A reload nginx takes makes nginx run
+# MinerBot's files as they are at that moment: /fake/nginx/served-cert.pem is the certificate the stand-in openssl
+# s_client shows, and /fake/nginx/loaded-proxy-key.conf the proxy key nginx sends the dashboard. When the stand-in master
+# that scripts-test.sh's nginx_workers starts runs, it also gets USR1, which starts a new worker under it, as a reload
+# does. FAKE_RELOAD=fail makes the reload fail; FAKE_RELOAD=not-taken makes it exit 0 while nginx keeps its workers and
+# its old files, as nginx's master does when it can't apply a new configuration.
 # shellcheck source=record.sh
 source /usr/local/lib/mbtest/record.sh
 record restartsrv_nginx "$@"
 
 [ "${1:-}" = --reload ] || { echo "The stand-in only knows --reload." >&2; exit 2; }
-if [ "${FAKE_RELOAD:-}" = fail ]; then
-    echo "Waiting for nginx to restart gracefully ...failed (made up)." >&2
-    exit 1
-fi
+case ${FAKE_RELOAD:-} in
+    fail)
+        echo "Waiting for nginx to restart gracefully ...failed (made up)." >&2
+        exit 1
+        ;;
+    not-taken)
+        echo "Waiting for nginx to restart gracefully ...finished."
+        exit 0
+        ;;
+esac
 mkdir -p "$fake/nginx"
 if [ -f /etc/nginx/conf.d/minerbot-dashboard.conf ] && [ -f /etc/nginx/minerbot/origin-cert.pem ]; then
     cp /etc/nginx/minerbot/origin-cert.pem "$fake/nginx/served-cert.pem"
 else
     rm -f "$fake/nginx/served-cert.pem"
+fi
+if [ -f /etc/nginx/conf.d/minerbot-dashboard.conf ] && [ -f /etc/nginx/minerbot/proxy-key.conf ]; then
+    cp /etc/nginx/minerbot/proxy-key.conf "$fake/nginx/loaded-proxy-key.conf"
+else
+    rm -f "$fake/nginx/loaded-proxy-key.conf"
+fi
+master=''
+{ read -r master < /var/run/nginx.pid; } 2> /dev/null || master=''
+if [[ $master =~ ^[0-9]+$ ]] && grep -q '^nginx: master process' "/proc/$master/cmdline" 2> /dev/null; then
+    kill -USR1 "$master" 2> /dev/null || true
 fi
 echo "Waiting for nginx to restart gracefully ...finished."

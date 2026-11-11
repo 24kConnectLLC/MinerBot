@@ -4,7 +4,8 @@
 # reach it, and it refuses a second unit of the same name while one runs. At RuntimeMaxSec it ends every process of the
 # session, as systemd ends a unit's whole cgroup: TERM, then KILL after TimeoutStopSec. FAKE_UNIT_LIMIT replaces every
 # RuntimeMaxSec, and no unit runs longer than FAKE_UNIT_CAP seconds (300 by default). /fake/units/<unit>.pid names the
-# unit's process for the stand-in systemctl, and the unit's own output goes to /fake/units/<unit>.out.
+# unit's process for the stand-in systemctl, and the unit's own output goes to /fake/units/<unit>.out. For a command with
+# --apply <folder>, /fake/units/<unit>.answers gets the modes of that folder and of its answers file as the unit starts.
 # shellcheck source=record.sh
 source /usr/local/lib/mbtest/record.sh
 units=$fake/units
@@ -105,6 +106,13 @@ if [ -f "$units/$unit.pid" ] && alive "$(cat "$units/$unit.pid")" \
     echo "Failed to start transient service unit: Unit $unit.service was already loaded or has a fragment file." >&2
     exit 1
 fi
+prev=''
+for arg in "$@"; do
+    if [ "$prev" = --apply ] && [ -d "$arg" ]; then
+        printf '%s %s\n' "$(stat -c %a "$arg" 2> /dev/null)" "$(stat -c %a "$arg/answers" 2> /dev/null)" > "$units/$unit.answers"
+    fi
+    prev=$arg
+done
 limit=${FAKE_UNIT_LIMIT:-${limit:-${FAKE_UNIT_CAP:-300}}}
 if [ "$limit" -gt "${FAKE_UNIT_CAP:-300}" ]; then
     limit=${FAKE_UNIT_CAP:-300}

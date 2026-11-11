@@ -2,6 +2,7 @@ using System.Net;
 using System.Text.RegularExpressions;
 using DataAccessLibrary;
 using Microsoft.Extensions.Options;
+using MinerBot.Dashboard.Hosting;
 
 // The settings rule, also in deploy/README.md: rollback.sh keeps the current dashboard.env, so the previous image must
 // still start with it. A setting is never renamed or removed in the pull request that stops using it: the old name stays
@@ -51,6 +52,9 @@ namespace MinerBot.Dashboard.Settings
 
             if (DashboardSettings.ListenPort(options.Port) == null)
                 problems.Add("Dashboard:Port must be a whole number from 1 to 65535.");
+
+            if (UnixSocketProblem(options.UnixSocket) is { } unixSocket)
+                problems.Add(unixSocket);
 
             // Read here rather than through options, because DataAccessLibrary reads them as the app starts
             ConnectionStringProblem("DefaultConnection", "the website's database, which holds the armor, the blacklist and each server's channels", problems);
@@ -163,6 +167,23 @@ namespace MinerBot.Dashboard.Settings
             }
         }
 
+        // Empty means the TCP address, as it does for Kestrel and the healthcheck command. A socket that's already there was
+        // left by a dashboard that was killed, and the start replaces it, so only another kind of file stops it here. The
+        // folder isn't checked: compose.yml won't start the container without it, and check-settings runs without it.
+        static string? UnixSocketProblem(string? path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                return null;
+
+            if (!DashboardSettings.IsUnixSocketPath(path))
+                return $"Dashboard:UnixSocket must be the full path of the socket file, such as /run/minerbot-dashboard/dashboard.sock, with no spaces and at most {DashboardSettings.MaxUnixSocketBytes} bytes.";
+
+            if (Path.Exists(path) && !UnixSockets.IsSocket(path))
+                return "Dashboard:UnixSocket names a file or folder that isn't a socket, so the dashboard can't listen there. It never deletes one, so point the setting at a path that's free.";
+
+            return null;
+        }
+
         // Data Protection writes each new key to the system's temporary folder first, off Windows, and then moves it into
         // the keys folder. A read-only container without a /tmp of its own would start and pass its health check, then
         // fail every sign-in once it needed a new key, possibly months later.
@@ -215,8 +236,8 @@ namespace MinerBot.Dashboard.Settings
         }
     }
 
-    // Both empty leaves the Cloudflare Access check off. With both set, each must have the one form setup-dashboard.sh
-    // writes, so a typo stops the dashboard here instead of refusing every admin page later.
+    // Both empty leaves the Cloudflare Access check off, and one without the other is refused. Each one that's set must have
+    // the one form setup-dashboard.sh writes, so a typo stops the dashboard here instead of refusing every admin page later.
     internal sealed partial class CloudflareAccessOptionsValidator : IValidateOptions<CloudflareAccessOptions>
     {
         public ValidateOptionsResult Validate(string? name, CloudflareAccessOptions options)

@@ -5,7 +5,8 @@
 # It prints nothing when it works. When it fails it prints one line, which cron mails to root, and backup.log says
 # which step failed. A run stopped at the cron line's limit is mailed by the line's echo; the server's bash 5.1 also runs
 # the EXIT trap then, so backup.log says failed. A run killed outright, by a restart say, runs no trap and leaves its
-# "started" line with nothing after it, which the nightly check reports once it's 2 hours old.
+# "started" line with nothing after it, which the nightly check reports once it's 2 hours old. The check runs at 05:47,
+# after the nightly run's limit, so a nightly run cut off is reported that same morning.
 # Usage: ./backup.sh nightly|pre-deploy|manual
 #   nightly and manual wait up to 15 minutes for the deploy lock, so a dump never runs during a migration;
 #   pre-deploy comes only from deploy.sh, which holds that lock already.
@@ -89,9 +90,10 @@ install -d -m 700 "$home/state" "$home/state/tmp"
 errors=$(mktemp "$home/state/tmp/backup-errors.XXXXXX")
 # The inner timeout puts the dump in a process group of its own, so its limit ends the dump and this script lives on to
 # report it. A consistent InnoDB snapshot without locks; BINARY columns as hex; utf8mb4 for emoji; no --databases, so a
-# restore can go into a scratch database.
+# restore can go into a scratch database. No triggers, routines or events, which MinerBot's database never has and
+# apply_rights refuses: a restore would replay their text unchecked, with the rights of whoever restores it.
 if ! run_for "$limit" mariadb-dump --single-transaction --quick --hex-blob --skip-dump-date \
-    --default-character-set=utf8mb4 --routines --events \
+    --default-character-set=utf8mb4 --skip-triggers \
     --ignore-table-data="$BOT_DB.dashboard_sessions" "$BOT_DB" 2> "$errors" | gzip -6 > "$partial"; then
     die "the dump failed or took more than $limit seconds"
 fi

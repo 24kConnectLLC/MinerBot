@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
@@ -102,8 +103,11 @@ namespace MinerBot.Dashboard.Tests
             Assert.Equal(StatusCodes.Status403Forbidden, result.Context.Response.StatusCode);
             Assert.Equal("text/plain; charset=utf-8", result.Context.Response.ContentType);
             Assert.Equal("This part of the dashboard is behind Cloudflare Access, and this request didn't come through it. Open https://dashboard.test/admin and sign in with Cloudflare first.", result.Body);
+
+            // The whole line, so one that leaves out the request's ID, or logs another value in its place, fails
+            Assert.False(string.IsNullOrEmpty(result.Context.TraceIdentifier));
             Assert.Contains(result.Logs.Entries, entry => entry.Level == LogLevel.Information
-                && entry.Message.StartsWith("A request for an admin page was refused by the Cloudflare Access check: bad signature (request ", StringComparison.Ordinal));
+                && entry.Message == $"A request for an admin page was refused by the Cloudflare Access check: bad signature (request {result.Context.TraceIdentifier})");
         }
 
         // Exactly one header value
@@ -159,7 +163,53 @@ namespace MinerBot.Dashboard.Tests
             Assert.Equal("60", result.Context.Response.Headers.RetryAfter);
             Assert.Equal("text/plain; charset=utf-8", result.Context.Response.ContentType);
             Assert.Equal("Cloudflare Access couldn't be checked just now, so this page isn't shown. Try again in a minute.", result.Body);
-            Assert.Contains(result.Logs.Entries, entry => entry.Message.StartsWith("A request for an admin page wasn't shown, because the Cloudflare Access check has no usable keys", StringComparison.Ordinal));
+
+            // At Information, as a refusal is, and the whole line with the request's ID
+            Assert.Contains(result.Logs.Entries, entry => entry.Level == LogLevel.Information
+                && entry.Message == $"A request for an admin page wasn't shown, because the Cloudflare Access check has no usable keys (request {result.Context.TraceIdentifier})");
+
+            // The failed fetch is the one Warning, at most one every 30 s, and the line each request gets never adds another
+            Assert.Equal(["Cloudflare Access's signing keys couldn't be fetched: HttpRequestException"],
+                result.Logs.Entries.Where(entry => entry.Level >= LogLevel.Warning).Select(entry => entry.Message));
+        }
+
+        // The ID is matched exactly, letter case included, as RFC 7515 has it. Cloudflare's IDs are small hex, so only an ID
+        // with capitals tells an exact match from one that changes or ignores case.
+        [Fact]
+        public async Task KeyIdIsMatchedExactly()
+        {
+            var access = NewAccess();
+            access.Document = JsonSerializer.Serialize(new Dictionary<string, object> { ["keys"] = new[] { FakeCloudflareAccess.Jwk("Key-In-Capitals", keys.Signer) } });
+
+            var exact = await RunAsync(access, true, "/admin", tokens: access.Mint(header: head => head["kid"] = "Key-In-Capitals"));
+            var otherCase = await RunAsync(access, true, "/admin", tokens: access.Mint(header: head => head["kid"] = "key-in-capitals"));
+
+            Assert.True(exact.Next.Ran, "A token naming a key with capitals in its ID was refused");
+            Assert.False(otherCase.Next.Ran);
+            Assert.Contains(otherCase.Logs.Entries, entry => entry.Message.Contains("check: unknown key (", StringComparison.Ordinal));
+        }
+
+        // A character that isn't base64url's is refused before Cloudflare's keys are needed: the reason is unreadable,
+        // nothing is fetched, and with Cloudflare unreachable it's still the 403, not the 503
+        [Theory]
+        [InlineData('+', 1)]
+        [InlineData('/', 2)]
+        [InlineData('=', 1)]
+        [InlineData('é', 1)]
+        [InlineData('٣', 2)]
+        public async Task OtherCharacterIsRefusedBeforeAnyKeyIsLookedUp(char c, int part)
+        {
+            var access = NewAccess();
+            var result = await RunAsync(access, true, "/admin", tokens: AccessTokenTests.WithCharacter(access.Mint(), part, c));
+
+            Assert.False(result.Next.Ran);
+            Assert.Equal(StatusCodes.Status403Forbidden, result.Context.Response.StatusCode);
+            Assert.Contains(result.Logs.Entries, entry => entry.Message.Contains("check: unreadable (", StringComparison.Ordinal));
+            Assert.Equal(0, access.Fetches);
+
+            var down = NewAccess();
+            down.FailWith(AccessFailure.Throw);
+            Assert.Equal(StatusCodes.Status403Forbidden, (await RunAsync(down, true, "/admin", tokens: AccessTokenTests.WithCharacter(down.Mint(), part, c))).Context.Response.StatusCode);
         }
 
         // The path segment /admin in any letter case, and nothing that only starts with the same letters
@@ -181,7 +231,9 @@ namespace MinerBot.Dashboard.Tests
             Assert.Equal(guarded, CloudflareAccessCheck.Guards(context));
         }
 
-        // Wherever a page is, the Admin and Owner policies need the token. Another policy, or none, doesn't.
+        // Wherever a page is, the Admin and Owner policies need the token. Another policy, or none, doesn't. The endpoint is set
+        // by hand here, so this can't see where the check runs: in the app it sees one only after routing, which
+        // CloudflareAccessTests.AdminPageAtAnotherAddressStillNeedsTheToken pins.
         [Theory]
         [InlineData(Policies.Admin, true)]
         [InlineData(Policies.Owner, true)]

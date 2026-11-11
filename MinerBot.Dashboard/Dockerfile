@@ -3,7 +3,8 @@
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS base
 # The image would otherwise listen on 8080 on every address, which with host networking is the server's public address.
-# The dashboard sets its own in code: 127.0.0.1:5080, unless Dashboard__ListenAddress and Dashboard__Port say otherwise.
+# The dashboard sets its own in code: 127.0.0.1:5080, unless Dashboard__ListenAddress and Dashboard__Port say otherwise,
+# or only the Unix socket Dashboard__UnixSocket names, which compose.yml sets on the server.
 ENV ASPNETCORE_HTTP_PORTS=
 ENV Dashboard__KeysFolder=/app/keys
 # No diagnostics socket in /tmp and no debugger or profiler attach: nothing in the container needs them
@@ -34,7 +35,7 @@ RUN dotnet publish "./MinerBot.Dashboard.csproj" -c $BUILD_CONFIGURATION -o /app
 FROM base AS final
 WORKDIR /app
 COPY --from=publish /app/publish .
-# The runtime image has no curl, so the dashboard checks itself: it asks /health/live on its own address. Every 2 seconds
-# while it starts, so Docker reports it healthy within seconds, and every 30 after.
+# The runtime image has no curl, so the dashboard checks itself: it asks /health/live on its own socket or address. Every
+# 2 seconds while it starts, so Docker reports it healthy within seconds, and every 30 after.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --start-interval=2s --retries=3 CMD ["dotnet", "MinerBot.Dashboard.dll", "healthcheck"]
 ENTRYPOINT ["dotnet", "MinerBot.Dashboard.dll"]

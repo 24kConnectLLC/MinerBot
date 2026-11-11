@@ -6,9 +6,9 @@ using MinerBot.Dashboard.Tests.Support;
 
 namespace MinerBot.Dashboard.Tests
 {
-    // "check-settings", which deploy.sh and setup-dashboard.sh run before they change anything: the same check a start
-    // makes, every section's included, and then an exit, without listening, connecting or making a sign-in key. The built
-    // program, run as the container runs it.
+    // "check-settings", which deploy.sh runs on a new image before the rights and the swap, and setup-dashboard.sh on the
+    // dashboard.env it's about to write: the same check a start makes, every section's included, and then an exit, without
+    // listening, connecting or making a sign-in key. The built program, run as the container runs it.
     public class CheckSettingsCommandTests
     {
         const string Command = "check-settings";
@@ -116,6 +116,43 @@ namespace MinerBot.Dashboard.Tests
                 Assert.False(database.Pending(), "check-settings connected to the database");
                 Assert.True(Directory.Exists(keys));
                 Assert.Empty(Directory.EnumerateFileSystemEntries(keys));
+            }
+            finally
+            {
+                DashboardFactory.DeleteFolder(keys);
+            }
+        }
+
+        // Settings after the command count, as a start's do, and the command still only checks. The proxy key is given only
+        // after it, and the port is taken, so a start would fail to bind it instead of saying the settings are fine.
+        [Fact]
+        public async Task SettingsAfterTheCommandAreCheckedWithoutStarting()
+        {
+            using var taken = new TcpListener(IPAddress.Loopback, 0);
+            taken.Start();
+            var port = ((IPEndPoint)taken.LocalEndpoint).Port;
+            var keys = DashboardFactory.NewKeysFolder();
+
+            try
+            {
+                var settings = CommandModeProcessTests.GoodSettings(keys);
+                var proxyKey = settings["Dashboard__ProxyKey"];
+                settings.Remove("Dashboard__ProxyKey");
+                settings["Dashboard__Port"] = port.ToString(CultureInfo.InvariantCulture);
+
+                var run = await CommandModeProcessTests.RunAsync(settings, Command, $"--Dashboard:ProxyKey={proxyKey}");
+
+                Assert.True(run.ExitCode == 0, $"check-settings exited {run.ExitCode}: {run.Output} {run.Errors}");
+                Assert.Equal("The dashboard's settings are fine.", run.Output.Trim());
+                Assert.Equal("", run.Errors.Trim());
+
+                // A wrong one there is the one reported, never its value
+                const string wrongKey = "made-up-proxy-key-$host-0123456789abcdef0123456789";
+                var wrong = await CommandModeProcessTests.RunAsync(settings, Command, $"--Dashboard:ProxyKey={wrongKey}");
+
+                Assert.Equal(1, wrong.ExitCode);
+                Assert.Contains("- Dashboard:ProxyKey may only hold", wrong.Errors);
+                Assert.DoesNotContain(wrongKey, wrong.Errors + wrong.Output);
             }
             finally
             {

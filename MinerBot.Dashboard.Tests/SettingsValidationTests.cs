@@ -289,6 +289,124 @@ namespace MinerBot.Dashboard.Tests
             Assert.Null(DashboardSettings.ListenEndpoint(configuration));
         }
 
+        // A full path on this system with this much after the root, such as /run/minerbot-dashboard/dashboard.sock off Windows
+        static string FullPath(string rest) => Path.GetPathRoot(Path.GetTempPath()) + rest;
+
+        // A full path of exactly this many bytes, ending in .sock
+        static string FullPathOfBytes(int bytes) => FullPath(new string('s', bytes - FullPath(".sock").Length) + ".sock");
+
+        const string UnixSocketProblem = "Dashboard:UnixSocket must be the full path of the socket file, such as /run/minerbot-dashboard/dashboard.sock, with no spaces and at most 100 bytes.";
+
+        // Empty, or only white space, leaves the dashboard on its address and port, and a full path of up to 100 bytes puts
+        // it on a socket. Nothing has to be there yet.
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData(" ")]
+        [InlineData("run/minerbot-dashboard/dashboard.sock")]
+        [InlineData("100 bytes")]
+        public void UnixSocketThatPasses(string? which)
+        {
+            var settings = Valid();
+            settings["Dashboard:UnixSocket"] = which switch
+            {
+                "100 bytes" => FullPathOfBytes(DashboardSettings.MaxUnixSocketBytes),
+                "run/minerbot-dashboard/dashboard.sock" => FullPath(which),
+                _ => which
+            };
+
+            Assert.Empty(Problems(settings));
+        }
+
+        public static TheoryData<string> BadUnixSockets => new()
+        {
+            "a relative path",
+            "a space",
+            "a tab",
+            "a line feed",
+            "a folder's path",
+            "101 bytes",
+            "over 100 bytes in fewer letters"
+        };
+
+        // A path Kestrel couldn't bind, or that a socket's address can't hold, stops the start with the one message, which
+        // never repeats the value. The bytes are what count, not the letters.
+        [Theory]
+        [MemberData(nameof(BadUnixSockets))]
+        public void BadUnixSocketIsRefused(string which)
+        {
+            var path = which switch
+            {
+                "a relative path" => "minerbot-dashboard/dashboard.sock",
+                "a space" => FullPath("minerbot dashboard/dashboard.sock"),
+                "a tab" => FullPath("minerbot-dashboard/dashboard.sock\t"),
+                "a line feed" => FullPath("minerbot-dashboard/dashboard.sock\n"),
+                "a folder's path" => FullPath("minerbot-dashboard") + Path.DirectorySeparatorChar,
+                "101 bytes" => FullPathOfBytes(DashboardSettings.MaxUnixSocketBytes + 1),
+                "over 100 bytes in fewer letters" => FullPath(new string('é', 48) + ".sock"),
+                _ => throw new ArgumentOutOfRangeException(nameof(which))
+            };
+
+            var settings = Valid();
+            settings["Dashboard:UnixSocket"] = path;
+
+            Assert.Equal(UnixSocketProblem, Assert.Single(Problems(settings)));
+
+            if (which == "over 100 bytes in fewer letters")
+                Assert.True(path.Length < DashboardSettings.MaxUnixSocketBytes);
+        }
+
+        // Something at the path that isn't a socket is never deleted, so the start can't listen there and stops at once
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void FileOrFolderAtTheSocketsPathIsRefused(bool folder)
+        {
+            using var sockets = new TestSockets();
+            var path = sockets.PathOf("dashboard.sock");
+
+            if (folder)
+                Directory.CreateDirectory(path);
+            else
+                File.WriteAllText(path, "not a socket");
+
+            var settings = Valid();
+            settings["Dashboard:UnixSocket"] = path;
+
+            Assert.Equal("Dashboard:UnixSocket names a file or folder that isn't a socket, so the dashboard can't listen there. It never deletes one, so point the setting at a path that's free.",
+                Assert.Single(Problems(settings)));
+            Assert.True(folder ? Directory.Exists(path) : File.Exists(path));
+        }
+
+        // A socket a killed dashboard left behind passes, and is still there: the start replaces it, not the check
+        [Fact]
+        public void SocketLeftBehindPasses()
+        {
+            using var sockets = new TestSockets();
+            var path = sockets.PathOf("dashboard.sock");
+            TestSockets.LeaveSocket(path);
+
+            var settings = Valid();
+            settings["Dashboard:UnixSocket"] = path;
+
+            Assert.Empty(Problems(settings));
+            Assert.True(UnixSockets.IsSocket(path));
+        }
+
+        // Kestrel and the healthcheck command read it straight from the configuration, as they read the address
+        [Theory]
+        [InlineData(null, null)]
+        [InlineData("", null)]
+        [InlineData("  ", null)]
+        [InlineData("/run/minerbot-dashboard/dashboard.sock", "/run/minerbot-dashboard/dashboard.sock")]
+        [InlineData("not a full path", "not a full path")]
+        public void UnixSocketComesFromTheSettings(string? setting, string? read)
+        {
+            var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Dashboard:UnixSocket"] = setting }).Build();
+
+            Assert.Equal(read, DashboardSettings.UnixSocket(configuration));
+        }
+
         // Made up, as setup-dashboard.sh writes them
         const string TeamDomain = "made-up-team.cloudflareaccess.com";
         const string Audience = "4714c1358e65fe4b408ad6d432a5f878f08194bdb4752441fd56faefa9b2b6f2";
@@ -347,7 +465,11 @@ namespace MinerBot.Dashboard.Tests
             "made up team.cloudflareaccess.com",
             "made-up-team",
             "cloudflareaccess.com",
-            "team.made-up.cloudflareaccess.com"
+            "team.made-up.cloudflareaccess.com",
+            // Look-alikes that differ from a good one only at the dot, which anyone could register
+            "made-up-teamcloudflareaccess.com",
+            "made-up-team-cloudflareaccess.com",
+            "made-up-teamxcloudflareaccess.com"
         };
 
         // Each says what's wrong without repeating it
@@ -368,7 +490,9 @@ namespace MinerBot.Dashboard.Tests
             Audience.ToUpperInvariant(),
             Audience[..63] + "g",
             " " + Audience[..63],
-            Audience[..62] + "\n"
+            Audience[..62] + "\n",
+            // A whole tag with a line feed after it, which a $ at the end of the pattern would let through
+            Audience + "\n"
         };
 
         [Theory]
@@ -391,6 +515,20 @@ namespace MinerBot.Dashboard.Tests
             Assert.Contains(problems, problem => problem.Contains("go together", StringComparison.Ordinal));
             Assert.Contains(problems, problem => problem.StartsWith("CloudflareAccess:TeamDomain must be", StringComparison.Ordinal));
             Assert.All(problems, problem => Assert.DoesNotContain(TeamDomain, problem));
+        }
+
+        // The same the other way round: an AUD tag in the wrong form without a team
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        public void BadAudienceWithoutTeamDomainReportsBoth(string? teamDomain)
+        {
+            var problems = Problems(WithAccess(teamDomain, "not-an-aud-tag"));
+
+            Assert.Equal(2, problems.Count);
+            Assert.Contains(problems, problem => problem.Contains("go together", StringComparison.Ordinal));
+            Assert.Contains("CloudflareAccess:Audience must be the Access application's AUD tag: 64 characters, 0-9 and a-f.", problems);
+            Assert.All(problems, problem => Assert.DoesNotContain("not-an-aud-tag", problem));
         }
 
         // The Access section is checked with the other two, so a start, and check-settings, report all three

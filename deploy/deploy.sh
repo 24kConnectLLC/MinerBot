@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # Builds a commit of MinerBot from GitHub and swaps it in, the dashboard first, then the bot. Before any swap it installs
 # the commit's deploy files, dumps and migrates MinerBot's database when the commit has new migrations, checks the
-# dashboard's settings with its own validator, and applies the dashboard's database rights. A service that isn't ready
-# after its swap goes back to the exact image it ran, and the deploy stops there.
+# dashboard's settings with its own validator, and applies the dashboard's database rights: for a commit older than the
+# installed deploy files, the rights the last apply used and the GRANTs of its own dashboard-rights.sql that they lack,
+# so both its dashboard and the one it replaces keep what they use. A service that isn't ready after its swap goes back
+# to the exact image it ran, under the compose.yml it was last ready under, and the deploy stops there.
 # Usage: ./deploy.sh [branch, tag or commit] [--only bot|dashboard] [--no-start]   (main and both services by default)
 #   --only bot|dashboard  swaps only that one. The dashboard's image is still built when migrations are due: it runs them.
 #   --no-start            stops after the build and the migrations, and swaps nothing.
-# Only commits merged into main are deployed. The part that changes things runs as the systemd unit minerbot-deploy, for
-# 90 minutes at most, and this terminal follows its log; closing the terminal doesn't stop it.
+# Only commits main itself pointed at on GitHub are deployed: the ones git log --first-parent refs/remotes/origin/main
+# lists in src. A commit inside a merged pull request never is. The part that changes things runs as the systemd unit
+# minerbot-deploy, for 90 minutes at most, and this terminal follows its log; closing the terminal doesn't stop it.
 # Exit code: 0 done; 1 refused or stopped, with the reason.
 set -Eeuo pipefail
 umask 077
@@ -98,6 +101,9 @@ cleanup() {
     if [ -n "${deploy_stage:-}" ]; then
         rm -rf "$deploy_stage"
     fi
+    if [ -n "${rights_dir:-}" ]; then
+        rm -rf "$rights_dir"
+    fi
     if [ "${rights_check_made:-}" = yes ]; then
         drop_rights_check
     fi
@@ -123,10 +129,13 @@ preflight() {
 }
 
 # The commit to deploy. Only from GitHub's MinerBot, as src's git config writes the address, since remote get-url would
-# follow an insteadOf rule, and only commits merged into main. A run started again after installing new deploy files
-# fetches nothing and builds exactly the commit whose files it installed.
+# follow an insteadOf rule. The fetch takes GitHub's tags as they are now, moved and deleted ones too. The ref is looked
+# up by its full name, a branch on GitHub first, then a tag, then a commit ID, so a tag can never stand in for a branch,
+# and the commit must be one main itself pointed at: one on its first-parent line, which a commit inside a merged pull
+# request never is. A run started again after installing new deploy files fetches nothing and builds exactly the commit
+# whose files it installed.
 choose_commit() {
-    local url status=0 head
+    local url head chain
     url=$(run_for 5 git -C "$home/src" config --get remote.origin.url) || url=
     case $url in
         "$repository_url" | "$repository_url.git") ;;
@@ -139,17 +148,18 @@ choose_commit() {
         [ "$head" = "$commit" ] \
             || die "This deploy ran again for ${commit:0:12}, but src is at ${head:0:12}. Nothing more was changed: deploy again."
     else
-        run_for 120 git -C "$home/src" fetch --quiet --prune --tags origin \
-            || die "Couldn't fetch from GitHub within 2 minutes (above). Check the server's network, then deploy again. Nothing was changed."
-        commit=$(run_for 10 git -C "$home/src" rev-parse --verify --quiet "origin/$ref^{commit}") \
-            || commit=$(run_for 10 git -C "$home/src" rev-parse --verify --quiet "$ref^{commit}") \
+        run_for 120 git -C "$home/src" fetch --prune --prune-tags --force --tags origin \
+            || die "Couldn't fetch from GitHub within 2 minutes; git's reason is above. Nothing was changed."
+        commit=$(run_for 10 git -C "$home/src" rev-parse --verify --quiet "refs/remotes/origin/$ref^{commit}") \
+            || commit=$(run_for 10 git -C "$home/src" rev-parse --verify --quiet "refs/tags/$ref^{commit}") \
+            || { [[ $ref =~ ^[0-9a-fA-F]{4,40}$ ]] \
+                && commit=$(run_for 10 git -C "$home/src" rev-parse --verify --quiet "$ref^{commit}") \
+                && [[ $commit == "${ref,,}"* ]]; } \
             || die "There's no branch, tag or commit called $ref on GitHub. Nothing was changed."
-        run_for 10 git -C "$home/src" merge-base --is-ancestor "$commit" origin/main || status=$?
-        case $status in
-            0) ;;
-            1) die "${commit:0:12} ($ref) isn't merged into main, and deploy.sh deploys only commits on main, because root's scripts come from them. Nothing was changed." ;;
-            *) die "git couldn't check whether $ref is on main (above). Nothing was changed." ;;
-        esac
+        chain=$(run_for 30 git -C "$home/src" rev-list --first-parent refs/remotes/origin/main) \
+            || die "git couldn't list main's commits (above). Nothing was changed."
+        grep -qxF -- "$commit" <<< "$chain" \
+            || die "${commit:0:12} ($ref) isn't one of main's own commits: it isn't merged into main, or it's inside a merged pull request, where it was never reviewed on its own. deploy.sh deploys only commits main itself pointed at, because root's scripts come from them. git -C $home/src log --first-parent --oneline refs/remotes/origin/main lists them. Nothing was changed."
     fi
     run_for 60 git -C "$home/src" checkout --quiet --force --detach "$commit" \
         || die "Couldn't check out ${commit:0:12} in src (above). Nothing was swapped."
@@ -188,11 +198,36 @@ save_failed_log() {   # save_failed_log bot|dashboard
     chmod 600 "$failed_log"
 }
 
-# Swaps a service onto minerbot-<service>:new by image ID. :previous moves only when the image really changes. When the
-# new image isn't ready, the service goes back to the exact image it ran, the tags go back to what they were (the new
-# image is tagged :failed), and the deploy stops.
+# After a failed swap: when compose.yml changed the service's settings since it was last ready (compose_changed), the
+# compose.yml it was ready under goes back in place, a copy beside it renamed over it, so the image it goes back to runs
+# as it did. The next deploy installs the new one again. Sets compose_note to the sentences for the messages, or nothing.
+put_back_compose() {   # put_back_compose bot|dashboard
+    local service=$1 other=bot kept=$home/state/compose-ready-$1.yml tmp now was
+    compose_note=
+    compose_changed "$service" || return 0
+    if [ "$service" = bot ]; then
+        other=dashboard
+    fi
+    now=$(run_for 30 docker compose -f "$home/compose.yml" --project-directory "$home" config --hash "$other" 2> /dev/null) || now=
+    was=$(run_for 30 docker compose -f "$kept" --project-directory "$home" config --hash "$other" 2> /dev/null) || was=
+    tmp=$(mktemp "$home/.minerbot-install.XXXXXX")
+    cp "$kept" "$tmp"
+    chmod 600 "$tmp"
+    mv -f "$tmp" "$home/compose.yml"
+    echo "compose.yml changed the $service's settings since it was last ready, so the compose.yml it was ready under is back in place."
+    compose_note=" compose.yml changed the $service's settings since it was last ready, so the compose.yml it was ready under is back in place, until the next deploy installs the new one again."
+    if [ "$now" != "$was" ]; then
+        compose_note+=" That one gives the $other other settings too: its container keeps the ones it started with, until it's recreated."
+    fi
+}
+
+# Swaps a service onto minerbot-<service>:new by image ID. :previous moves only when the image really changes. When
+# Compose fails, or the container doesn't then run the new image, or it isn't ready, the service goes back to the exact
+# image it ran, under the compose.yml it was last ready under (put_back_compose), the tags go back to what they were (the
+# new image is tagged :failed), and the deploy stops. A service that is ready keeps a copy of the compose.yml it's ready
+# under (note_ready).
 swap() {   # swap bot|dashboard
-    local service=$1 image=minerbot-$1 container new before prev public_before='' base
+    local service=$1 image=minerbot-$1 container new before prev public_before='' base up=ok what word
     container=$(container_of "$service")
     new=$(image_id "$image:new")
     [ -n "$new" ] || die "There's no $image:new to swap in. Nothing was swapped."
@@ -204,16 +239,32 @@ swap() {   # swap bot|dashboard
 
     if [ "$new" = "$before" ]; then
         echo "The $service is already on $(revision "$new"). Making sure it runs and is ready."
-        start_service "$service" || true
+        start_service "$service" || up=failed
         # Counted once Compose is done: a container it started or recreated begins again at 0, and one it left running
         # keeps its earlier restarts, which aren't this deploy's
         base=$(restart_count "$container")
-        if ! ready_service "$service" "" "$base"; then
-            save_failed_log "$service"
-            die "The $service is already on $(revision "$new"), but it isn't ready (above). No tag was moved. Its last log lines are in ${failed_log#"$home"/}."
+        if [ "$up" = ok ] && ready_service "$service" "" "$base" "$new"; then
+            note_ready "$service"
+            log_history deploy "$service" "$(revision "$new")" ok "already on it"
+            return 0
         fi
-        log_history deploy "$service" "$(revision "$new")" ok "already on it"
-        return 0
+        what="The $service is already on $(revision "$new"), but it isn't ready (above)"
+        if [ "$up" = failed ]; then
+            what="The $service is already on $(revision "$new"), but Compose couldn't start or recreate it (above)"
+        fi
+        save_failed_log "$service"
+        put_back_compose "$service"
+        if [ -n "$compose_note" ]; then
+            start_service "$service" || true
+            base=$(restart_count "$container")
+            if ready_service "$service" "" "$base" "$new"; then
+                note_ready "$service"
+                log_history deploy "$service" "$(revision "$new")" "not ready" "already on it, ready again under the earlier compose.yml"
+                die "$what.$compose_note It's ready again with that one. No tag was moved, and the deploy stopped here. Its last log lines are in ${failed_log#"$home"/}."
+            fi
+        fi
+        log_history deploy "$service" "$(revision "$new")" "not ready" "already on it"
+        die "$what.$compose_note No tag was moved. Its last log lines are in ${failed_log#"$home"/}."
     fi
 
     if [ -n "$before" ]; then
@@ -229,20 +280,29 @@ swap() {   # swap bot|dashboard
         public_before=$(public_status)
         echo "The public home page answers $public_before before the swap."
     fi
-    start_service "$service" || true
-    if ready_service "$service" "$public_before" 0; then
+    # A run cut off here leaves the tags moved and the container on the image before: rollback.sh finishes such a swap
+    cut_point "tags-$service"
+    start_service "$service" || up=failed
+    if [ "$up" = ok ] && ready_service "$service" "$public_before" 0 "$new"; then
+        note_ready "$service"
         log_history deploy "$service" "$(revision "$new")" ok "was $(revision "$before")"
         return 0
     fi
 
+    what="The $service on $(revision "$new") wasn't ready"
+    word="not ready"
+    if [ "$up" = failed ]; then
+        what="Compose couldn't recreate the $service on $(revision "$new") (above)"
+        word="compose failed"
+    fi
     save_failed_log "$service"
     tag_id "$new" "$image:failed"
     if [ -z "$before" ]; then
         compose 60 stop "$service" || true
         compose 30 rm -f "$service" || true
         untag "$image:current"
-        log_history deploy "$service" "$(revision "$new")" "not ready" "stopped, with no earlier image"
-        die "The $service on $(revision "$new") wasn't ready, and there's no earlier image to go back to, so it's stopped and removed. Its last log lines are in ${failed_log#"$home"/}, and the image is tagged $image:failed."
+        log_history deploy "$service" "$(revision "$new")" "$word" "stopped, with no earlier image"
+        die "$what, and there's no earlier image to go back to, so it's stopped and removed. Its container's last log lines are in ${failed_log#"$home"/}, and the image is tagged $image:failed."
     fi
     tag_id "$before" "$image:current"
     if [ -n "$prev" ]; then
@@ -250,14 +310,17 @@ swap() {   # swap bot|dashboard
     else
         untag "$image:previous"
     fi
+    put_back_compose "$service"
     echo "Putting the $service back on $(revision "$before")."
     start_service "$service" || true
-    if ready_service "$service" "" 0; then
-        log_history deploy "$service" "$(revision "$new")" "not ready" "back on $(revision "$before")"
-        die "The $service on $(revision "$new") wasn't ready, so it's back on $(revision "$before"), which is. The deploy stopped here. The failed run's last log lines are in ${failed_log#"$home"/}, and its image is tagged $image:failed."
+    base=$(restart_count "$container")
+    if ready_service "$service" "" "$base" "$before"; then
+        note_ready "$service"
+        log_history deploy "$service" "$(revision "$new")" "$word" "back on $(revision "$before")${compose_note:+, under the earlier compose.yml}"
+        die "$what, so it's back on $(revision "$before"), which is ready.$compose_note The deploy stopped here. Its container's last log lines are in ${failed_log#"$home"/}, and $(revision "$new") is tagged $image:failed."
     fi
-    log_history deploy "$service" "$(revision "$new")" "not ready" "nor on $(revision "$before")"
-    die "The $service on $(revision "$new") wasn't ready, and it isn't ready on the image before it, $(revision "$before"), either, so the problem is outside the image: settings, database or server. It runs on $(revision "$before") now. Logs: ${failed_log#"$home"/}, and: docker logs --tail 50 $container"
+    log_history deploy "$service" "$(revision "$new")" "$word" "nor on $(revision "$before")"
+    die "$what, and it isn't ready on the image before it, $(revision "$before"), either, so the problem is outside the image: settings, compose.yml, database or server.$compose_note It's left on $(revision "$before"). Logs: ${failed_log#"$home"/}, and: docker logs --tail 50 $container"
 }
 
 prune_run_logs() {   # keeps the newest 60 run logs
@@ -274,8 +337,63 @@ nginx_note() {
     fi
 }
 
+# The statements of a rights file on stdin, one per line, as MariaDB runs them: blank lines and lines that start with --
+# are left out, a statement's lines are joined, and each run of spaces becomes one. A semicolon at the end of a line
+# ends a statement, as the file's own rules say.
+rights_statements() {
+    awk '
+        { sub(/\r$/, "") }
+        /^[ \t]*--/ || /^[ \t]*$/ { next }
+        { gsub(/[ \t]+/, " "); sub(/^ /, ""); sub(/ $/, "")
+          statement = (statement == "") ? $0 : (statement " " $0)
+          if ($0 ~ /;$/) { print statement; statement = "" } }
+        END { if (statement != "") print statement }'
+}
+
+# The rights for the dashboard of a commit older than the installed deploy files, which install_deploy_files kept. A
+# pull request after that commit may have removed a right its dashboard still uses, as the rule for removing one allows,
+# so the installed dashboard-rights.sql isn't enough for it. It gets the rights the last apply used, which the dashboard
+# that runs now has (state/dashboard-rights.applied.sql, or the installed file before any apply kept a copy), and every
+# GRANT statement of its own dashboard-rights.sql they lack: so the older dashboard and the one it replaces, which
+# becomes :previous, both keep what they use. apply_rights keeps that as the copy setup applies, and the next deploy of
+# a dashboard as new as the installed files applies the installed file alone again. Sets rights_file, the file to apply.
+older_rights() {
+    local installed='' base what own missing
+    rights_file=$home/dashboard-rights.sql
+    if [ -f "$home/state/deploy-files.commit" ]; then
+        IFS= read -r -t 5 installed < "$home/state/deploy-files.commit" || true
+    fi
+    if [ -z "$installed" ] || [ "$installed" = "$commit" ]; then
+        return 0
+    fi
+    base=$home/state/dashboard-rights.applied.sql
+    what="the rights the last apply used, from state/dashboard-rights.applied.sql"
+    if [ ! -f "$base" ]; then
+        base=$home/dashboard-rights.sql
+        what="the installed dashboard-rights.sql, since no apply has kept a copy yet"
+    fi
+    rights_file=$base
+    own=$(run_for 30 git -C "$home/src" show "$commit:deploy/dashboard-rights.sql") \
+        || die "git couldn't read the dashboard-rights.sql of $tag12 (above). Nothing was swapped."
+    missing=$(rights_statements <<< "$own" | grep -E '^GRANT ' | grep -vxF -f <(rights_statements < "$base")) || missing=
+    if [ -z "$missing" ]; then
+        echo "The deploy files stay those of ${installed:0:12} (above), so the dashboard of $tag12 gets $what. Its own dashboard-rights.sql gives no right they lack."
+        return 0
+    fi
+    install -d -m 700 "$home/state" "$home/state/tmp"
+    rights_dir=$(mktemp -d "$home/state/tmp/deploy.rights.XXXXXX")
+    rights_file=$rights_dir/dashboard-rights.with-$tag12.sql
+    {
+        cat "$base"
+        printf '\n%s\n' "-- Added by deploy.sh: the GRANT statements of $tag12's own dashboard-rights.sql that the rights above lack"
+        printf '%s\n' "$missing"
+    } > "$rights_file"
+    echo "The deploy files stay those of ${installed:0:12} (above), so the dashboard of $tag12 gets $what, and these GRANT statements of its own dashboard-rights.sql, which they lack and its code may still use:"
+    sed 's/^/  /' <<< "$missing"
+}
+
 detached_part() {
-    local due hosts
+    local due hosts rights_file
     local -a built=()
     exec >> "$MINERBOT_LOG" 2>&1
     run_mode=detached
@@ -360,7 +478,8 @@ detached_part() {
             || die "MariaDB didn't answer (above). Nothing was swapped."
         [ "$hosts" = 2 ] \
             || die "The dashboard's database login doesn't exist yet. Run ./setup-dashboard.sh, which creates it, then deploy again. Nothing was swapped."
-        apply_rights "$home/dashboard-rights.sql" || die "The dashboard's database rights didn't apply (above). Nothing was swapped."
+        older_rights
+        apply_rights "$rights_file" || die "The dashboard's database rights didn't apply (above). Nothing was swapped."
 
         step="swapping the dashboard"
         [ "$(time_left)" -ge 600 ] \

@@ -2,7 +2,9 @@
 # Checks the database rights procedure in deploy/common.sh against a real MariaDB at the server's version, before it
 # reaches the server: apply_rights, with render and rights_of, as deploy.sh and setup-dashboard.sh run it. It fills in
 # the real deploy/dashboard-rights.sql, rehearses it on a locked throwaway login, applies it to the dashboard's login on
-# both its hosts, and compares the two through the real deploy/rights-list.sql.
+# both its hosts, and compares the two through the real deploy/rights-list.sql. Once that passes, apply_rights keeps a
+# copy of the file it applied as state/dashboard-rights.applied.sql, which setup-dashboard.sh applies. It refuses first
+# while MinerBot's database holds a trigger, an event or a stored routine, which no migration makes.
 #
 # MariaDB runs in a throwaway container without a network, with latin1 as the server's default character set and root
 # reached through /root/.my.cnf, as on the server. It gets the website's three tables from
@@ -23,7 +25,7 @@ umask 077
 # The server's MariaDB version. Change it with the server's.
 image=mariadb:11.4
 name=mbtest-rights-$$
-checks=15   # how many checks this script makes
+checks=19   # how many checks this script makes
 made=0
 passed=0
 notes=""
@@ -165,6 +167,36 @@ audit_adds() {
     [ "$out" = 1 ] || problem "adding an audit row failed" "$out"
 }
 
+# A trigger made in MinerBot's database by another login with rights there, as the bot's own login could make one: it
+# rewrites every audit row the dashboard's login adds, with its maker's rights, and no rights file takes it away. So do
+# an event and a stored routine, which no migration makes either. apply_rights refuses before it touches the login,
+# naming them, and passes again once they're dropped.
+extras_refused() {
+    local out before
+    out=$(sql "CREATE TRIGGER $bot.mbtest_stamp BEFORE INSERT ON $bot.audit_log FOR EACH ROW SET NEW.actor_name = 'nobody';
+        CREATE EVENT $bot.mbtest_sweep ON SCHEDULE EVERY 1 DAY DISABLE DO DELETE FROM $bot.audit_log;
+        CREATE PROCEDURE $bot.mbtest_rewrite() UPDATE $bot.audit_log SET detail = 'changed';") \
+        || problem "couldn't make the trigger, the event and the procedure" "$out"
+    out=$(as_login "$bot" "
+        INSERT INTO $bot.audit_log (at, actor_id, actor_name, actor_role, action, outcome)
+            VALUES (UTC_TIMESTAMP(3), 42, 'admin-a', 'admin', 'test.stamp', 'ok');") \
+        || problem "the dashboard's login couldn't add an audit row" "$out"
+    [ "$(sql "SELECT actor_name FROM $bot.audit_log WHERE action = 'test.stamp'")" = nobody ] \
+        || problem "the trigger didn't rewrite the dashboard's row, so this check proves nothing"
+    before=$(login_rights)
+    run_common apply_rights /opt/minerbot/dashboard-rights.sql
+    [ "$status" != 0 ] || problem "apply_rights passed with a trigger, an event and a procedure in MinerBot's database" "$said"
+    expect "holds what no migration makes: event mbtest_sweep, procedure mbtest_rewrite, trigger mbtest_stamp." "$said" \
+        "apply_rights' message"
+    [ "$(login_rights)" = "$before" ] || problem "apply_rights changed the login's rights though it refused" \
+        "$(differs "$before" "$(login_rights)")"
+    [ "$(throwaway_count)" = 0 ] || problem "apply_rights made its throwaway login though it refused"
+    out=$(sql "DROP TRIGGER $bot.mbtest_stamp; DROP EVENT $bot.mbtest_sweep; DROP PROCEDURE $bot.mbtest_rewrite;") \
+        || problem "couldn't drop the trigger, the event and the procedure" "$out"
+    run_common apply_rights /opt/minerbot/dashboard-rights.sql
+    [ "$status" = 0 ] || problem "apply_rights failed once they were dropped (exit code $status)" "$said"
+}
+
 forbidden_refused() {
     local statement out
     for statement in "SELECT * FROM $bot.audit_log" "UPDATE $bot.audit_log SET outcome = 'x'" \
@@ -273,6 +305,61 @@ wrong_password() {
     expect "ERROR 1045" "$out" "a wrong password"
 }
 
+# MariaDB lists one login's rights in an order of its own, which can differ between two logins with the same rights, so
+# common.sh's listing must come sorted, or the comparison would find a difference where there is none
+rights_sorted() {
+    run_common rights_of "$login" localhost
+    [ "$status" = 0 ] || problem "rights_of failed (exit code $status)" "$said"
+    [ "$said" = "$(rights "$login" localhost)" ] \
+        || problem "rights_of's listing isn't the login's rights, sorted" "$(differs "$(rights "$login" localhost)" "$said")"
+}
+
+# The file gives no right with the grant option, which rights-list.sql shows as "grantable" (and a role's as "admin"), so
+# the login can pass none of its rights on: each GRANT of the file, made out to another login, is refused
+no_grant_option() {
+    local now statement out tried=0
+    now=$(login_rights)
+    if grep -E ' (grantable|admin)$' <<< "$now" > /dev/null; then
+        problem "the login holds a right with the grant option" "$now"
+    fi
+    while IFS= read -r statement; do
+        tried=$((tried + 1))
+        out=$(as_login "$bot" "$statement")
+        case $out in
+            *"ERROR 1142"* | *"ERROR 1143"* | *"ERROR 1044"*) ;;
+            *) problem "the login could pass a right on: $statement" "$out" ;;
+        esac
+    done < <(sed -n -e "s/{{SITE_DB}}/$site/g" -e "s/{{BOT_DB}}/$bot/g" -e "s/{{GRANTEES}}/'someone'@'localhost'/g" \
+        -e '/^GRANT /p' /opt/minerbot/dashboard-rights.sql)
+    [ "$tried" -gt 0 ] || problem "the rights file has no GRANT line to try"
+}
+
+# The copy setup-dashboard.sh applies is the file the last apply that passed used, byte for byte and root's alone. An
+# apply that fails leaves it as it was.
+applied_copy_kept() {
+    local copy=/opt/minerbot/state/dashboard-rights.applied.sql out
+    cmp -s "$copy" /opt/minerbot/dashboard-rights.sql \
+        || problem "the copy isn't the file the last apply used" "$(ls -l "$copy" 2>&1)"
+    [ "$(stat -c '%a %U' "$copy" 2>&1)" = "600 root" ] || problem "the copy isn't root's alone, 600" "$(ls -l "$copy" 2>&1)"
+    { cat /opt/minerbot/dashboard-rights.sql; echo '-- As a newer commit has it'; } > /work/rights-newer.sql
+    # A rehearsal that fails, and a comparison that fails
+    run_common apply_rights /work/rights-missing.sql
+    [ "$status" != 0 ] || problem "apply_rights passed a right on a table that doesn't exist" "$said"
+    out=$(sql "GRANT PROXY ON 'someone'@'localhost' TO '$login'@'localhost';") || problem "couldn't add a PROXY grant" "$out"
+    run_common apply_rights /work/rights-newer.sql
+    [ "$status" != 0 ] || problem "apply_rights passed while the login holds a PROXY grant added by hand" "$said"
+    cmp -s "$copy" /opt/minerbot/dashboard-rights.sql || problem "an apply that failed changed the copy"
+    out=$(sql "REVOKE PROXY ON 'someone'@'localhost' FROM '$login'@'localhost';") || problem "couldn't remove the PROXY grant" "$out"
+    # An apply that passes takes its file's place, and setup's apply of the copy itself passes
+    run_common apply_rights /work/rights-newer.sql
+    [ "$status" = 0 ] || problem "apply_rights failed (exit code $status)" "$said"
+    cmp -s "$copy" /work/rights-newer.sql || problem "the copy isn't the file the last apply that passed used"
+    run_common apply_rights "$copy"
+    [ "$status" = 0 ] || problem "applying the copy itself failed (exit code $status)" "$said"
+    cmp -s "$copy" /work/rights-newer.sql || problem "applying the copy itself changed it"
+    [ "$(stat -c '%a %U' "$copy" 2>&1)" = "600 root" ] || problem "the copy isn't root's alone, 600" "$(ls -l "$copy" 2>&1)"
+}
+
 # ---------- In the container: the databases, then the checks
 
 inside_container() {
@@ -353,6 +440,14 @@ inside_container() {
     verdict "14. CURRENT_USER() is $login@127.0.0.1, with the password read from stdin."
     wrong_password || true
     verdict "15. A wrong password gives 1045."
+    rights_sorted || true
+    verdict "16. common.sh's rights_of lists the login's rights sorted, so two logins with the same rights compare equal."
+    no_grant_option || true
+    verdict "17. The login holds no right with the grant option, and can pass none of the file's rights on to another login."
+    applied_copy_kept || true
+    verdict "18. The last apply that passed leaves a copy of its file, root's alone, which applies again; an apply that fails leaves the copy as it was."
+    extras_refused || true
+    verdict "19. A trigger that rewrites the dashboard's audit rows, an event and a procedure in MinerBot's database, which no migration makes, stop apply_rights before it touches the login, each named; once they're dropped, it passes."
 
     echo "$passed of $checks passed"
     if [ "$made" != "$checks" ]; then

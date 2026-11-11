@@ -17,6 +17,26 @@ namespace MinerBot.Dashboard.Tests
 
         internal static async Task<Run> RunAsync(IReadOnlyDictionary<string, string> environment, params string[] args)
         {
+            using var process = Start(environment, args);
+            var output = process.StandardOutput.ReadToEndAsync();
+            var errors = process.StandardError.ReadToEndAsync();
+
+            try
+            {
+                await process.WaitForExitAsync(TestContext.Current.CancellationToken).WaitAsync(Limit, TestContext.Current.CancellationToken);
+            }
+            finally
+            {
+                if (!process.HasExited)
+                    process.Kill(entireProcessTree: true);
+            }
+
+            return new Run(process.ExitCode, await output.WaitAsync(Limit), await errors.WaitAsync(Limit));
+        }
+
+        // The program started with only these settings, its output and errors redirected
+        internal static Process Start(IReadOnlyDictionary<string, string> environment, params string[] args)
+        {
             var start = new ProcessStartInfo(Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") is { Length: > 0 } host ? host : "dotnet")
             {
                 RedirectStandardOutput = true,
@@ -37,21 +57,7 @@ namespace MinerBot.Dashboard.Tests
             foreach (var (name, value) in environment)
                 start.Environment[name] = value;
 
-            using var process = Process.Start(start)!;
-            var output = process.StandardOutput.ReadToEndAsync();
-            var errors = process.StandardError.ReadToEndAsync();
-
-            try
-            {
-                await process.WaitForExitAsync(TestContext.Current.CancellationToken).WaitAsync(Limit, TestContext.Current.CancellationToken);
-            }
-            finally
-            {
-                if (!process.HasExited)
-                    process.Kill(entireProcessTree: true);
-            }
-
-            return new Run(process.ExitCode, await output.WaitAsync(Limit), await errors.WaitAsync(Limit));
+            return Process.Start(start)!;
         }
 
         // A web host would have stopped on its settings with its plain message instead, so this shows the command ran

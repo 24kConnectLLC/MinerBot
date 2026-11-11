@@ -85,3 +85,21 @@ running() {   # running bot|dashboard: true when that container exists and runs
     { read -r image state rest < "$D/ctr/minerbot-$1"; } 2> /dev/null || return 1
     [ "$state" = true ]
 }
+
+# The dashboard's socket, as its Kestrel keeps it: a real socket file, made as uid 1654 makes it in the setgid folder
+# (owner 1654, group nobody, mode 660), there while the dashboard's container runs, unless its image is in FAKE_NO_SOCKET
+# (dashboard@<rev>), and gone once it doesn't run. The folder is systemd-tmpfiles' to make; without it there's no socket.
+# The stand-ins docker and curl call this first, so the scripts always see the socket as the container left it.
+sync_socket() {
+    local dir=/run/minerbot-dashboard sock=/run/minerbot-dashboard/dashboard.sock
+    [ -d "$dir" ] || return 0
+    if running dashboard && ! listed "${FAKE_NO_SOCKET:-}" "$(running_key dashboard)"; then
+        if [ ! -e "$sock" ]; then
+            python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$sock" 2> /dev/null \
+                && chown 1654 "$sock" && chmod 660 "$sock"
+        fi
+    elif [ -S "$sock" ]; then
+        rm -f "$sock"
+    fi
+    return 0
+}

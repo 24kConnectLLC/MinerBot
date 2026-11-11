@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# A thin wrapper around the real pgrep, for scripts-test.sh: it records the call and passes it on. The nginx it asks
+# about is the stand-in master scripts-test.sh's nginx_workers starts, with its workers, all real processes.
+# shellcheck source=record.sh
+source /usr/local/lib/mbtest/record.sh
+record pgrep "$@"
+exec /usr/bin/pgrep "$@"

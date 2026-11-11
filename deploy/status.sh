@@ -3,7 +3,8 @@
 # has a limit of 30 seconds or less.
 # Usage:
 #   ./status.sh               the containers, images, recent deploys, a running action, backups, the certificate,
-#                             nginx, the disk and the move's leftovers
+#                             nginx, the dashboard's socket and proxy key, the public home page, the disk and the move's
+#                             leftovers
 #   ./status.sh --check       the nightly check from /etc/cron.d/minerbot: one line per problem and exit 1, so cron mails
 #                             it; nothing and exit 0 when all is well
 #   ./status.sh --mail-test   sends one message to root, to prove that cron's mail about failures reaches you
@@ -29,6 +30,88 @@ fi
 
 gib() {   # gib <KiB>: whole GiB
     echo $(($1 / 1048576))
+}
+
+# ---- The public path: the proxy key nginx sends, and the public home page
+
+# The proxy key the dashboard runs with, from its container's environment, or dashboard.env's when there's no container
+# or Docker doesn't say. It's only ever compared, never printed.
+dashboard_key() {
+    local vars line key=''
+    vars=$(run_for 30 docker container inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$dashboard_container" 2> /dev/null) \
+        || vars=
+    while IFS= read -r -t 5 line; do
+        case $line in
+            Dashboard__ProxyKey=*) key=${line#Dashboard__ProxyKey=} ;;
+        esac
+    done <<< "$vars"
+    if [ -z "$key" ]; then
+        key=$(env_value "$home/dashboard.env" Dashboard__ProxyKey 2> /dev/null) || key=
+    fi
+    printf '%s\n' "$key"
+}
+
+# What's wrong with the proxy key nginx sends, as one clause, or nothing: proxy-key.conf must be the one line setup writes
+# for the dashboard's key. The dashboard answers every request without that key with 404, and nginx -t passes without the
+# file, since its include is a pattern.
+proxy_key_problem() {
+    if [ ! -f "$nginx_secrets/proxy-key.conf" ]; then
+        echo "nginx's $nginx_secrets/proxy-key.conf is missing"
+    elif [ "$(< "$nginx_secrets/proxy-key.conf")" != "$(proxy_key_line "$(dashboard_key)")" ]; then
+        echo "nginx's $nginx_secrets/proxy-key.conf doesn't hold the dashboard's proxy key"
+    fi
+}
+
+# nginx reads its files only when it starts or reloads, and each reload starts new workers while the ones before finish
+# their requests as "worker process is shutting down". So a worker that isn't shutting down and started before
+# proxy-key.conf last changed means nginx hasn't loaded that file since. Prints that as one clause, or nothing, also when
+# no nginx runs to ask. ps reads every process's command line, which can hang on a process stuck in the kernel, so it
+# has a limit too.
+nginx_load_problem() {
+    local master='' age title oldest='' changed now
+    [ -f "$nginx_secrets/proxy-key.conf" ] || return 0
+    { IFS= read -r -t 5 master < "$nginx_pid_file"; } 2> /dev/null || true
+    [[ $master =~ ^[0-9]+$ ]] || return 0
+    while read -r -t 5 age title; do
+        if [[ $age =~ ^[0-9]+$ && $title == "nginx: worker process"* && $title != *"shutting down"* ]]; then
+            if [ -z "$oldest" ] || [ "$age" -gt "$oldest" ]; then
+                oldest=$age
+            fi
+        fi
+    done < <(run_for 10 ps -o etimes=,args= --ppid "$master" 2> /dev/null)
+    [ -n "$oldest" ] || return 0
+    changed=$(stat -c %Z "$nginx_secrets/proxy-key.conf" 2> /dev/null) || return 0
+    now=$(date +%s)
+    # A second of leeway, since ps counts whole seconds
+    if [ $((now - oldest + 1)) -lt "$changed" ]; then
+        echo "nginx's workers started before $nginx_secrets/proxy-key.conf last changed, so nginx hasn't loaded it and may send an older proxy key"
+    fi
+}
+
+# The public home page through Cloudflare, as a visitor gets it: its HTTP status; 000 when nothing answered; or challenge
+# when Cloudflare answered with a challenge (cf-mitigated: challenge), as Bot Fight Mode may for a request from a server,
+# which says nothing about the dashboard
+public_answer() {
+    local out re=$'(^|\n)cf-mitigated:[ \t]*challenge'
+    out=$(run_for 15 curl -s -o /dev/null -D - -w '%{http_code}' --max-time 10 "https://$public_host/" 2> /dev/null) || true
+    if [[ ${out,,} =~ $re ]]; then
+        echo challenge
+        return 0
+    fi
+    out=${out##*$'\n'}
+    if [[ $out =~ ^[0-9]{3}$ ]]; then
+        printf '%s\n' "$out"
+    else
+        echo 000
+    fi
+}
+
+public_problem() {   # public_problem <status>: the nightly check's line for a home page that answered it twice
+    case $1 in
+        404) echo "The public home page, https://$public_host/, answered 404 twice, a minute apart, where 200 is expected. The dashboard answers 404 to a request without its proxy key, so nginx likely sends another key than the one the dashboard runs with. Run ./setup-dashboard.sh --no-questions --rotate-proxy-key, which gives nginx and the dashboard a new key together." ;;
+        000) echo "The public home page, https://$public_host/, didn't answer within 10 seconds, twice, a minute apart, so visitors may not reach the dashboard." ;;
+        *) echo "The public home page, https://$public_host/, answered $1 twice, a minute apart, where 200 is expected, so visitors may not reach the dashboard." ;;
+    esac
 }
 
 # ---- The look
@@ -57,7 +140,7 @@ show_images() {   # show_images bot|dashboard
 }
 
 show() {
-    local service newest hours ends days out n avail commit user group old
+    local service newest hours ends days out n avail commit user group old why answer
     echo "MinerBot on this server, $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo
     echo "Containers"
@@ -118,6 +201,23 @@ show() {
     else
         echo "nginx change marker: none"
     fi
+    why=$(socket_problem)
+    echo "Dashboard socket: ${why:-$dashboard_socket, as nginx needs it}"
+    if [ -f "$home/dashboard.env" ] && [ -f "$nginx_conf" ]; then
+        why=$(proxy_key_problem) || why=
+        if [ -z "$why" ]; then
+            why=$(nginx_load_problem) || why=
+        fi
+        echo "Proxy key: ${why:-nginx's proxy-key.conf holds the dashboard's key}"
+    fi
+    if [ -f "$home/dashboard.env" ]; then
+        answer=$(public_answer) || answer=000
+        case $answer in
+            challenge) echo "Public home page: unknown, since Cloudflare challenged this server's request (cf-mitigated: challenge), as Bot Fight Mode may" ;;
+            000) echo "Public home page: no answer within 10 seconds (https://$public_host/)" ;;
+            *) echo "Public home page: $answer (https://$public_host/)" ;;
+        esac
+    fi
 
     avail=$(free_kib /) || avail=0
     n=$(free_kib /srv) || n=0
@@ -150,7 +250,7 @@ show() {
 # ---- The nightly check
 
 check() {
-    local line out running health pid listeners n avail ends wait=60
+    local line out running health why n avail ends answer extras wait=60
     local -a problems=()
     if test_fast; then
         wait=1
@@ -183,22 +283,51 @@ check() {
         *) problems+=("Docker didn't answer about the bot: ${out%%$'\n'*}") ;;
     esac
 
-    pid=0
     if [ -f "$home/dashboard.env" ]; then
         out=$(run_for 30 docker container inspect \
-            -f '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.State.Pid}}' \
+            -f '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
             "$dashboard_container" 2>&1) || true
-        running='' health='' pid=''
-        read -r -t 5 running health pid <<< "$out" || true
+        running='' health=''
+        read -r -t 5 running health <<< "$out" || true
         if [ "$running" != true ]; then
             problems+=("The dashboard isn't running. Its log: docker logs --tail 50 $dashboard_container")
         elif [ "$health" = unhealthy ]; then
             problems+=("The dashboard is unhealthy. Its log: docker logs --tail 50 $dashboard_container")
         fi
-    fi
-    listeners=$(run_for 10 ss -Hltnp 'sport = :5080' 2> /dev/null) || listeners=
-    if [ -n "$listeners" ] && ! listener_is "${pid:-0}" "$listeners"; then
-        problems+=("Something other than the dashboard's container listens on port 5080, where nginx sends the dashboard's visitors: ${listeners%%$'\n'*}")
+        # nginx sends the visitors to the dashboard's socket, which socket_problem checks as the deploy's readiness check
+        # does. While the dashboard doesn't run, its socket is rightly gone, so then only a missing folder, or something
+        # at the socket's place, is a problem.
+        if [ "$running" = true ] || [ -e "$dashboard_socket" ] || [ -L "$dashboard_socket" ] || [ ! -d "$socket_dir" ]; then
+            why=$(socket_problem)
+            if [ -n "$why" ]; then
+                problems+=("The dashboard's socket isn't as nginx needs it: $why. Its log: docker logs --tail 50 $dashboard_container")
+            fi
+        fi
+        # The proxy key nginx sends: its file, then whether nginx has loaded it. Only a file that holds the dashboard's key
+        # is worth a reload, and while an nginx change is cut off, the undo in setup-dashboard.sh is the way instead.
+        if [ -f "$nginx_conf" ]; then
+            why=$(proxy_key_problem) || why=
+            if [ -n "$why" ]; then
+                problems+=("$why, so the dashboard answers every visitor with 404. Run ./setup-dashboard.sh --no-questions --rotate-proxy-key, which gives nginx and the dashboard a new key together.")
+            elif [ ! -e "$home/state/nginx-change" ]; then
+                why=$(nginx_load_problem) || why=
+                if [ -n "$why" ]; then
+                    problems+=("$why. Run /scripts/restartsrv_nginx --reload, which loads it.")
+                fi
+            fi
+        fi
+        # The public home page as a visitor gets it, while the dashboard runs: once, then again a minute later, so a deploy
+        # or setup in progress isn't reported. A Cloudflare challenge says nothing about the dashboard either way.
+        if [ "$running" = true ]; then
+            answer=$(public_answer) || answer=000
+            if [ "$answer" != 200 ] && [ "$answer" != challenge ]; then
+                sleep "$wait"
+                answer=$(public_answer) || answer=000
+                if [ "$answer" != 200 ] && [ "$answer" != challenge ]; then
+                    problems+=("$(public_problem "$answer")")
+                fi
+            fi
+        fi
     fi
 
     if [ ! -f "$cloudflare_list" ]; then
@@ -212,6 +341,25 @@ check() {
 
     if [ -e "$home/state/nginx-change" ]; then
         problems+=("An nginx change was cut off. Run ./setup-dashboard.sh, which undoes it first.")
+    fi
+
+    # pipelog.conf follows cPanel's pipelog module, as cPanel's hook keeps it: "pipelog off;" while the module loads,
+    # so the dashboard's requests stay out of cPanel's piped logs, and nothing while it doesn't, since nginx would then
+    # refuse it
+    if [ -f "$nginx_conf" ]; then
+        if [ "$(cat "$nginx_secrets/pipelog.conf" 2> /dev/null)" != "$(pipelog_text)" ]; then
+            problems+=("$nginx_secrets/pipelog.conf doesn't match cPanel's pipelog module, so nginx refuses MinerBot's file at its next test, or cPanel's piped logs get the dashboard's requests. Run $pipelog_hook, and after it /scripts/restartsrv_nginx --reload.")
+        fi
+        if [ -d "${pipelog_hook%/*}" ] && [ ! -x "$pipelog_hook" ]; then
+            problems+=("cPanel's hook $pipelog_hook is missing, so pipelog.conf won't follow WHM's piped logging. ./setup-dashboard.sh --no-questions puts it back.")
+        fi
+    fi
+
+    # What no migration makes in MinerBot's database stops the next deploy and setup (apply_rights), so it's reported
+    # the night it appears. Nothing is said when MariaDB doesn't answer: the deploy and setup say so themselves.
+    BOT_DB=$(conf_value BOT_DB)
+    if [[ $BOT_DB =~ ^[A-Za-z0-9_]{1,64}$ ]] && extras=$(bot_db_extras 2> /dev/null) && [ -n "$extras" ]; then
+        problems+=("MinerBot's database, $BOT_DB, holds what no migration makes: ${extras//$'\n'/, }. The next deploy and setup refuse until it's dropped: look at each one, as in SHOW CREATE TRIGGER \`$BOT_DB\`.\`<name>\`, and find out who made it.")
     fi
 
     avail=$(free_kib /srv) || avail=0
