@@ -1286,8 +1286,9 @@ on_host() {
         timeout -k 10 300 docker pull -q "$image" > /dev/null || stop "Couldn't pull $image within 5 minutes."
     fi
     # Its main process is sleep 420, so even a run killed before it can clean up leaves nothing running after 7
-    # minutes. IPv6 is on, as the server's blocks listen on [::] too.
-    out=$(timeout -k 10 120 docker run -d --rm --name "$name" --network none \
+    # minutes. Docker's init runs it, and reaps nginx's master once it stops, as a server's init does: sleep wouldn't,
+    # and the stopped master would stay in /proc as a zombie. IPv6 is on, as the server's blocks listen on [::] too.
+    out=$(timeout -k 10 120 docker run -d --rm --init --name "$name" --network none \
         --sysctl net.ipv6.conf.all.disable_ipv6=0 "$image" sleep 420 2>&1) \
         || stop "Couldn't start the container $name: $out"
     copy_in "$0" /work/nginx-procedure-test.sh
