@@ -29,7 +29,7 @@ umask 077
 # The server's nginx version, in nginx's Debian image, which has bash, curl and openssl. Change it with the server's.
 image=nginx:1.31.8
 name=mbtest-nginxproc-$$
-checks=22   # how many checks this script makes
+checks=23   # how many checks this script makes
 made=0
 passed=0
 notes=""
@@ -43,12 +43,16 @@ key2=2222222222222222222222222222222222222222222222222222222222222222
 key3=3333333333333333333333333333333333333333333333333333333333333333
 # Made-up secrets in a root-only include, like cPanel's cpanel-proxy-xt.conf. The second one's line names nothing
 # nginx_look filters by name, so only the file's mode keeps it out. So do the others, in root-only includes whose paths
-# nginx_look must read whole: one with a space in it, one outside /etc/nginx, and one nginx -T names with "..".
+# nginx_look must read whole: one with a space in it, one outside /etc/nginx, and one nginx -T names with "..". The last
+# two are in world-readable files inside a folder only root can enter, which only that folder keeps out: one the include
+# names, and one it names through a world-readable link outside the folder.
 cpanel_secret="made-up-cpanel-secret-4d1c"
 other_secret="made-up-second-secret-82be"
 spaced_secret="made-up-spaced-secret-3a7e"
 outside_secret="made-up-outside-secret-5e0a"
 spelled_secret="made-up-spelled-secret-a71f"
+foldered_secret="made-up-foldered-secret-77c2"
+linked_secret="made-up-linked-secret-9d40"
 # nginx.conf's main context as the server has it, which the test on its own must copy first, in this order
 main_lines="include /etc/nginx/conf.d/modules/*.conf;
 user nobody;"
@@ -298,12 +302,13 @@ nothing_in_place() {
 }
 
 # The next mv into that path kills the run that called it, as a crash or a power loss would: this mv comes before the
-# real one on common.sh's PATH. With "restore", only the mv of a copy nginx_restore made beside its target.
-cut_at() {   # cut_at <path> [restore]
+# real one on common.sh's PATH. With "restore", only the mv of a copy nginx_restore made beside its target; with
+# "pipelog", only nginx_pipelog_conf's mv of the text cPanel's setting needs.
+cut_at() {   # cut_at <path> [restore | pipelog]
     local when="[ \"\$last\" = $1 ]"
-    if [ "${2:-}" = restore ]; then
+    if [ -n "${2:-}" ]; then
         # shellcheck disable=SC2016 # the $ are for the stand-in's shell
-        when+=' && case "$*" in *.minerbot-restore.*) true ;; *) false ;; esac'
+        when+=' && case "$*" in *.minerbot-'"$2"'.*) true ;; *) false ;; esac'
     fi
     # shellcheck disable=SC2016 # the $ are for the stand-in's shell
     printf '#!/bin/sh\nfor last; do :; done\nif %s; then\n    kill -KILL "$PPID"\n    exit 1\nfi\nexec /usr/bin/mv "$@"\n' \
@@ -537,11 +542,22 @@ look_keeps_secrets() {
     printf 'proxy_set_header X-Outside-Made-Up "%s";\n' "$outside_secret" | put_file 600 /srv/outside/private.conf
     printf 'proxy_set_header X-Spelled-Made-Up "%s";\n' "$spelled_secret" | put_file 600 /etc/nginx/spelled/private.conf
     printf 'client_body_timeout 33s;\n' | put_file 644 "/etc/nginx/conf.d/includes-optional/open extra.conf"
+    # World-readable files in a folder only root can enter, which only root can read whatever their own modes: one the
+    # include names, in a folder open to anyone inside it, so the look must check every folder above a file and not only
+    # its own; and one it names through a world-readable link outside that folder
+    install -d -m 700 /srv/private-only
+    install -d -m 755 /srv/private-only/open
+    printf 'proxy_set_header X-Foldered-Made-Up "%s";\n' "$foldered_secret" \
+        | put_file 644 /srv/private-only/open/headers.conf
+    printf 'proxy_set_header X-Linked-Made-Up "%s";\n' "$linked_secret" | put_file 644 /srv/private-only/linked.conf
+    ln -sfn /srv/private-only/linked.conf /etc/nginx/conf.d/includes-optional/linked.conf
     put_file 644 /etc/nginx/conf.d/zz-look.conf << 'EOF'
 include "/etc/nginx/conf.d/includes-optional/cp extra.conf";
 include /srv/outside/private.conf;
 include /etc/nginx/conf.d/../spelled/private.conf;
 include "/etc/nginx/conf.d/includes-optional/open extra.conf";
+include /srv/private-only/open/headers.conf;
+include /etc/nginx/conf.d/includes-optional/linked.conf;
 EOF
     out=$(nginx_test) || problem "nginx -t refused the includes" "$out"
     # nginx -T runs as root and prints every included file, root-only ones too
@@ -552,10 +568,15 @@ EOF
     expect "$spaced_secret" "$out" "nginx -T itself, which prints the root-only include with a space in its path"
     expect "$outside_secret" "$out" "nginx -T itself, which prints the root-only include outside /etc/nginx"
     expect "$spelled_secret" "$out" "nginx -T itself, which prints the root-only include named with .."
+    expect "$foldered_secret" "$out" "nginx -T itself, which prints the world-readable include in a root-only folder"
+    expect "# configuration file /etc/nginx/conf.d/includes-optional/linked.conf:" "$out" \
+        "nginx -T itself, which names the link, not the file in the root-only folder it points to"
+    expect "$linked_secret" "$out" "nginx -T itself, which prints the file the link points to"
     expect "# configuration file /etc/nginx/mime.types:" "$out" "nginx -T itself, which prints mime.types' types block"
     run_common nginx_look
     outcome "" 0
-    for secret in "$cpanel_secret" "$other_secret" "$key2" "$spaced_secret" "$outside_secret" "$spelled_secret"; do
+    for secret in "$cpanel_secret" "$other_secret" "$key2" "$spaced_secret" "$outside_secret" "$spelled_secret" \
+        "$foldered_secret" "$linked_secret"; do
         refuse "$secret" "$said" "nginx_look"
     done
     expect "/etc/nginx/conf.d/ea-nginx.conf: client_max_body_size 128m;" "$said" "nginx_look's http-level lines"
@@ -565,16 +586,19 @@ EOF
     # Every line the look prints starts with its file and ": ", so this is any line of mime.types' types block
     refuse "/etc/nginx/mime.types: " "$said" "nginx_look, which leaves out types blocks"
     # /etc/nginx/minerbot is left out by its path alone: a world-readable proxy-key.conf whose key sits on a line of its
-    # own, which names nothing the look filters by name, still stays out
+    # own, which names nothing the look filters by name, still stays out, with the folder opened to anyone
+    chmod 755 /etc/nginx/minerbot
     printf 'proxy_set_header X-MinerBot-Proxy-Key\n    "%s";\n' "$key2" | put_file 644 /etc/nginx/minerbot/proxy-key.conf
     out=$(nginx_test) || problem "nginx -t refused the two-line proxy-key.conf" "$out"
     out=$(timeout -k 5 30 /usr/sbin/nginx -T 2>&1)
     expect "    \"$key2\";" "$out" "nginx -T itself, which prints the world-readable two-line proxy-key.conf"
     run_common nginx_look
     outcome "" 0
-    refuse "$key2" "$said" "nginx_look, with a world-readable file in /etc/nginx/minerbot"
+    refuse "$key2" "$said" "nginx_look, with a world-readable file in /etc/nginx/minerbot, opened to anyone"
+    chmod 700 /etc/nginx/minerbot
     rm -rf /etc/nginx/conf.d/zz-look.conf "/etc/nginx/conf.d/includes-optional/cp extra.conf" \
-        "/etc/nginx/conf.d/includes-optional/open extra.conf" /srv/outside /etc/nginx/spelled
+        "/etc/nginx/conf.d/includes-optional/open extra.conf" /srv/outside /etc/nginx/spelled /srv/private-only \
+        /etc/nginx/conf.d/includes-optional/linked.conf
 }
 
 # A put-back cut off as it renames the old key back, after the test with every site refused a change with a new
@@ -707,6 +731,10 @@ cut_off_first_install_removed() {
     run_common nginx_remove
     outcome absent 0
     expect "An nginx change was cut off earlier. Its files are back as they were before it" "$said" "the message"
+    # The undo changed files, so the message names it and never says that nothing was changed
+    expect "MinerBot's file isn't in nginx once the cut-off change is undone (above), so nothing else was changed." "$said" \
+        "the message after the undo"
+    refuse "Nothing was changed." "$said" "the message after the undo"
     [ ! -e /etc/nginx/conf.d/minerbot-dashboard.conf ] || problem "our conf.d file is there"
     [ -z "$(find /etc/nginx/minerbot -mindepth 1 2>&1)" ] \
         || problem "/etc/nginx/minerbot still holds files of the cut-off install" "$(ls -lA /etc/nginx/minerbot 2>&1)"
@@ -741,7 +769,7 @@ EOF
 }
 
 # A marker whose backup was cut off mid-copy, before its "complete" file: no nginx file had changed yet, so nothing is
-# put back, nginx isn't tested or reloaded, and the marker goes
+# put back, nginx isn't tested or reloaded, the marker goes, and the result is none, so no later message claims an undo
 cut_off_backup_ignored() {
     local before dir=/opt/minerbot/state/nginx-backup/20261106T000000Z
     put_in_place /work/replaced
@@ -753,7 +781,7 @@ cut_off_backup_ignored() {
     printf '%s\n' "$dir" > "$marker"
     : > /work/nginx-calls
     run_common nginx_undo_cut_off
-    outcome undone 0
+    outcome none 0
     expect "so there was nothing to undo" "$said" "the message"
     same_as "$before"
     calls_were "none"
@@ -761,14 +789,14 @@ cut_off_backup_ignored() {
     # --remove-nginx's first step
     printf '%s\n' "$dir" > "$marker"
     run_common nginx_undo_cut_off --no-reload
-    outcome undone 0
+    outcome none 0
     same_as "$before"
     # Cut off before the backup's folder was made
     rm -rf "$dir"
     printf '%s\n' "$dir" > "$marker"
     : > /work/nginx-calls
     run_common nginx_undo_cut_off
-    outcome undone 0
+    outcome none 0
     calls_were "none, for a marker whose folder was never made"
     same_as "$before"
     [ ! -e "$marker" ] || problem "the marker state/nginx-change is still there"
@@ -953,6 +981,49 @@ pipelog_follows_cpanel() {
     out=$(nginx_test) || problem "nginx -t fails at the end of the check" "$out"
 }
 
+# An undo whose backup is older than WHM's piped logging setting: the cut-off change began while cPanel loaded its
+# pipelog module, so the backup's pipelog.conf says "pipelog off;", and piped logging went off before the undo. The undo
+# writes pipelog.conf for cPanel's setting before our conf.d file comes back, so one cut off in between never leaves
+# nginx a live "pipelog off;" without the module, which fails nginx -t for every site. This nginx has no pipelog module,
+# so it refuses the line whatever the module's file holds, and that file holds only a comment here.
+pipelog_undo_cut_off() {
+    local before out answer module=/etc/nginx/conf.d/modules/ngx_http_pipelog_module.conf
+    put_in_place /work/second
+    # The files as the undo must leave them, pipelog.conf as cPanel's setting will need it by then
+    printf '' | put_file 600 /etc/nginx/minerbot/pipelog.conf
+    before=$(snapshot)
+    # Piped logging is on as the change begins, so its backup keeps "pipelog off;". It's cut off at the new key's rename.
+    printf '# made up: this image has no pipelog module\n' | put_file 644 "$module"
+    printf 'pipelog off;\n' | put_file 600 /etc/nginx/minerbot/pipelog.conf
+    cut_at /etc/nginx/minerbot/origin-key.pem
+    run_common nginx_change /work/replaced
+    rm -f /usr/local/bin/mv
+    [ "$status" = 137 ] || problem "nginx_change wasn't cut off (exit code $status)" "$said"
+    # Then piped logging goes off: cPanel deletes the module's file, and the hook empties pipelog.conf
+    rm -f "$module"
+    printf '' | put_file 600 /etc/nginx/minerbot/pipelog.conf
+    out=$(nginx_test) || problem "nginx -t fails before the undo" "$out"
+    # The undo, cut off as it writes pipelog.conf for cPanel's setting over the backup's "pipelog off;"
+    cut_at /etc/nginx/minerbot/pipelog.conf pipelog
+    run_common nginx_undo_cut_off
+    rm -f /usr/local/bin/mv
+    [ "$status" = 137 ] || problem "the undo wasn't cut off as it wrote pipelog.conf (exit code $status)" "$said"
+    [ ! -e /etc/nginx/conf.d/minerbot-dashboard.conf ] \
+        || problem "our conf.d file was back while pipelog.conf still said \"pipelog off;\" without the module"
+    out=$(nginx_test) || problem "nginx -t fails after the undo was cut off" "$out"
+    # A crash or a power loss is followed by a boot: nginx must start, and the other sites answer
+    restart_nginx
+    answer=$(request https://other.example/)
+    expect "account site" "$answer" "the account's own site, after nginx started again"
+    run_common nginx_undo_cut_off
+    outcome undone 1
+    same_as "$before"
+    [ ! -e "$marker" ] || problem "the marker state/nginx-change is still there"
+    answer=$(as_cloudflare /admin)
+    expect "key=$key2 " "$answer" "the proxy key from before the change, at the stand-in dashboard"
+    nginx_running
+}
+
 # ---------- In the container: the layout, then the checks
 
 inside_container() {
@@ -1132,7 +1203,7 @@ EOF
     cut_off_undone || true
     verdict "8. A change cut off between two renames (the new certificate beside the old key) leaves our conf.d file out, so nginx -t passes and nginx starts again as after a reboot; the undo puts every file back byte for byte, with one reload, and the marker goes."
     look_keeps_secrets || true
-    verdict "9. nginx_look prints the http-level lines, under each file's whole path, but not what server or types blocks hold, nor the proxy key, nor any root-only include's secrets, which nginx -T itself prints, whether its path has a space, lies outside /etc/nginx or has a \"..\", nor anything in /etc/nginx/minerbot, even a world-readable file there."
+    verdict "9. nginx_look prints the http-level lines, under each file's whole path, but not what server or types blocks hold, nor the proxy key, nor any root-only include's secrets, which nginx -T itself prints, whether its path has a space, lies outside /etc/nginx or has a \"..\", nor a world-readable include in a folder only root can enter, even through a link, nor anything in /etc/nginx/minerbot, even a world-readable file there with the folder open to anyone."
     put_back_cut_off || true
     verdict "10. A put-back cut off as it renames the old key back leaves our conf.d file out, so nginx -t passes; the undo puts every file back byte for byte, with no copy of the old key left beside it."
     reload_fails_after_loading || true
@@ -1142,7 +1213,7 @@ EOF
     first_install_cut_off || true
     verdict "13. A first install cut off as the key, then as the conf.d file, is renamed in: our conf.d file is out until every file it names is in place, nginx -t passes, and the undo takes the new files away again with one reload."
     cut_off_first_install_removed || true
-    verdict "14. --remove-nginx after a first install that was cut off: the new files go, the result is absent with no reload, and the marker is gone."
+    verdict "14. --remove-nginx after a first install that was cut off: the new files go, the result is absent with no reload, the message names the undo, and the marker is gone."
     term_during_change || true
     verdict "15. TERM at the key's rename doesn't cut the change: the new files, one test with every site, one reload, no marker."
     cut_off_backup_ignored || true
@@ -1162,6 +1233,8 @@ EOF
     verdict "21. A proxy key alone changes while another block listens on an address another program holds: nginx -t passes, nginx's master refuses the reload and keeps its workers while cPanel's reload exits 0, so the old files go back byte for byte, nginx still sends the old key, its error log says why, the marker stays, and once the address is free the undo loads the files on disk."
     pipelog_follows_cpanel || true
     verdict "22. nginx_change installs cPanel's hook and an empty pipelog.conf, as this nginx has no pipelog module; a \"pipelog off;\" line without the module fails nginx -t, the hook empties it, and nginx -t passes and nginx reloads; with the module's file there, the hook writes the line again."
+    pipelog_undo_cut_off || true
+    verdict "23. An undo whose backup says \"pipelog off;\", from before WHM's piped logging went off, cut off as it writes pipelog.conf for cPanel's setting: our conf.d file is still out, so nginx -t passes and nginx starts again as after a reboot; the next undo puts every file back byte for byte, pipelog.conf as cPanel's setting needs, with one reload."
 
     echo "$passed of $checks passed"
     if [ "$made" != "$checks" ]; then

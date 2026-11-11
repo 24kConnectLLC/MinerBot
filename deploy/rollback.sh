@@ -2,7 +2,8 @@
 # Swaps one service between the image it runs and its :previous image, by image ID: run it again and it goes forward
 # again, so both images stay one command away. It never touches the database, the rights, nginx or the other service.
 # When the container has another image than :current, a deploy's or rollback's swap was cut off after it moved the tags,
-# by a restart of the server or a stop of its unit: then a run finishes that swap on :current first, and moves no tag.
+# by a restart of the server or a stop of its unit, or Compose didn't put a deploy's failed swap back: then a run
+# finishes that swap on :current first, and moves no tag.
 # Migrations only add, and an older image works with a newer database, so going back is safe. dashboard.env stays as it
 # is, which is why a setting is never renamed or removed in the pull request that stops using it (deploy/README.md).
 # Usage: ./rollback.sh bot|dashboard
@@ -44,16 +45,18 @@ foreground_part() {
 # or running again after a restart, while :current names the image the swap went to. This finishes that swap: the
 # service's containers go first, the half-made replacement Compose leaves under a temporary name among them, since a
 # plain up could start that one under its temporary name; the volumes stay. Then the service starts on :current, and no
-# tag moves, so the next run goes back to :previous as usual.
+# tag moves, so the next run goes back to :previous as usual. A deploy's failed swap that Compose didn't put back leaves
+# the same state, with the container on the new image, and is finished the same way.
 finish_cut_off() {
-    local was back=''
+    local was back='' id
     was=$(revision "$cur")
     rev=$(revision "$current")
-    if [ -n "$(image_id "$image:previous")" ]; then
+    id=$(image_id "$image:previous")
+    if [ -n "$id" ]; then
         back=$(revision "$image:previous")
     fi
     step="finishing a swap that was cut off"
-    echo "The $service's container has $was, but $image:current is $rev: a deploy or rollback was cut off after it moved the tags, before Compose swapped the container. This run finishes that swap on $rev, and moves no tag."
+    echo "The $service's container has $was, but $image:current is $rev: a deploy or rollback was cut off after it moved the tags, before Compose swapped the container, or Compose didn't put a failed swap back. This run finishes that swap on $rev, and moves no tag."
     if ! compose 90 rm -s -f "$service"; then
         echo "Compose couldn't remove the $service's containers (above). No tag was moved. Run ./rollback.sh $service again once Docker answers."
         finish failed "compose failed, finishing a cut-off swap"
@@ -73,7 +76,7 @@ finish_cut_off() {
 }
 
 detached_part() {
-    local image=minerbot-$service container cur current prev up=ok
+    local image=minerbot-$service container cur current prev up=ok runs
     exec >> "$MINERBOT_LOG" 2>&1
     run_mode=detached
     step="taking the lock"
@@ -116,7 +119,8 @@ detached_part() {
         echo "The $service runs $rev and is ready. Run ./rollback.sh $service again to go forward again."
         finish ok "was $(revision "$cur")"
     fi
-    if [ -n "$cur" ] && [ "$(container_image "$container")" = "$cur" ]; then
+    runs=$(container_image "$container")
+    if [ -n "$cur" ] && [ "$runs" = "$cur" ]; then
         # Compose never replaced the container, so nothing changed, and the tags go back too
         tag_id "$cur" "$image:current"
         tag_id "$prev" "$image:previous"

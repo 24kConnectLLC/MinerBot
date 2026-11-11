@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using MinerBot.Dashboard.Hosting;
 using MinerBot.Dashboard.Settings;
@@ -356,6 +357,8 @@ namespace MinerBot.Dashboard.Tests
                 Assert.True(path.Length < DashboardSettings.MaxUnixSocketBytes);
         }
 
+        const string NotASocketProblem = "Dashboard:UnixSocket names a file or folder that isn't a socket, so the dashboard can't listen there. It never deletes one, so point the setting at a path that's free.";
+
         // Something at the path that isn't a socket is never deleted, so the start can't listen there and stops at once
         [Theory]
         [InlineData(false)]
@@ -373,9 +376,79 @@ namespace MinerBot.Dashboard.Tests
             var settings = Valid();
             settings["Dashboard:UnixSocket"] = path;
 
-            Assert.Equal("Dashboard:UnixSocket names a file or folder that isn't a socket, so the dashboard can't listen there. It never deletes one, so point the setting at a path that's free.",
-                Assert.Single(Problems(settings)));
+            Assert.Equal(NotASocketProblem, Assert.Single(Problems(settings)));
             Assert.True(folder ? Directory.Exists(path) : File.Exists(path));
+        }
+
+        // A link to a socket is another kind of file, even when the socket it names is one a killed dashboard left: the check
+        // refuses it, and the start's clean-up never deletes it. Fails if the kernel is asked about the file the link names
+        // instead of the link. Off Linux, only where the system lets the test make a link.
+        [Fact]
+        public async Task LinkToASocketIsRefusedAndKept()
+        {
+            using var sockets = new TestSockets();
+            var target = sockets.PathOf("elsewhere.sock");
+            TestSockets.LeaveSocket(target);
+            var path = sockets.PathOf("dashboard.sock");
+            Assert.SkipUnless(TestSockets.TryLink(path, target), "This system doesn't let the tests make a link");
+
+            Assert.True(UnixSockets.IsSocket(target), "The socket left behind didn't count as one");
+            Assert.False(UnixSockets.IsSocket(path), "A link to a socket counted as a socket");
+
+            var settings = Valid();
+            settings["Dashboard:UnixSocket"] = path;
+            Assert.Equal(NotASocketProblem, Assert.Single(Problems(settings)));
+
+            await UnixSocketFile.RemoveLeftoverAsync(path, NullLogger.Instance, TestContext.Current.CancellationToken);
+            Assert.Equal(target, new FileInfo(path).LinkTarget);
+        }
+
+        // On Windows a socket is a reparse point with the AF_UNIX tag. A reparse point with another tag that isn't a link,
+        // such as an app execution alias, is another kind of file: the check refuses it, and the start's clean-up never
+        // deletes it.
+        [Fact]
+        public async Task ReparsePointThatIsntASocketIsRefusedAndKept()
+        {
+            Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows only");
+            using var sockets = new TestSockets();
+            var path = sockets.PathOf("dashboard.sock");
+            File.WriteAllText(path, "not a socket");
+            TestSockets.Tag(path, TestSockets.AppExecutionAliasTag);
+
+            Assert.True(File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint));
+            Assert.Null(new FileInfo(path).LinkTarget);
+            Assert.False(UnixSockets.IsSocket(path), "A reparse point that isn't a socket counted as one");
+
+            var settings = Valid();
+            settings["Dashboard:UnixSocket"] = path;
+            Assert.Equal(NotASocketProblem, Assert.Single(Problems(settings)));
+
+            await UnixSocketFile.RemoveLeftoverAsync(path, NullLogger.Instance, TestContext.Current.CancellationToken);
+            Assert.True(Path.Exists(path), "The start's clean-up deleted it");
+        }
+
+        // The ? of an extended path's \\?\ is no wildcard: a socket a killed dashboard left on such a path still counts as one,
+        // so the check passes and the start's clean-up replaces it. A ? in the file's own name never finds it. Windows only,
+        // where that prefix is.
+        [Fact]
+        public async Task SocketLeftBehindOnAnExtendedPathIsReplaced()
+        {
+            Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows only");
+            using var sockets = new TestSockets();
+            var path = sockets.PathOf("dashboard.sock");
+            TestSockets.LeaveSocket(path);
+            var extended = @"\\?\" + path;
+
+            Assert.True(UnixSockets.IsSocket(extended), "A socket on an extended path didn't count as one");
+            Assert.False(UnixSockets.IsSocket(sockets.PathOf("dashboard.so?k")), "A ? in the file's name found the socket");
+            Assert.False(UnixSockets.IsSocket(@"\\?\" + sockets.PathOf("dashboard.so?k")), "A ? in the file's name found the socket");
+
+            var settings = Valid();
+            settings["Dashboard:UnixSocket"] = extended;
+            Assert.Empty(Problems(settings));
+
+            await UnixSocketFile.RemoveLeftoverAsync(extended, NullLogger.Instance, TestContext.Current.CancellationToken);
+            Assert.False(Path.Exists(path), "The start's clean-up kept the socket left behind");
         }
 
         // A socket a killed dashboard left behind passes, and is still there: the start replaces it, not the check

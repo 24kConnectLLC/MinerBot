@@ -1,6 +1,6 @@
 # The folder of MinerBot's dashboard's socket. From deploy/minerbot-dashboard.tmpfiles in the MinerBot repository;
 # deploy.sh installs it as /etc/tmpfiles.d/minerbot-dashboard.conf, so change it there. /run is emptied at every boot, and
 # systemd-tmpfiles makes the folder again before Docker starts: mode 2750, owned by 1654, the dashboard's user, and the
-# group nobody, nginx's workers. Only the dashboard can make its socket there, and only nginx's group can reach it. The
-# setgid bit gives the socket the group nobody.
+# group nobody, nginx's workers. Only the dashboard can make its socket there, and only processes in the group nobody,
+# nginx's workers and cPanel's Apache among them, can reach it. The setgid bit gives the socket the group nobody.
 d /run/minerbot-dashboard 2750 1654 nobody -

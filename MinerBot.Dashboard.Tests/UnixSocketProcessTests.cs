@@ -18,7 +18,7 @@ namespace MinerBot.Dashboard.Tests
         // The proxy key in CommandModeProcessTests.GoodSettings, which nginx would send
         const string ProxyKey = "made-up-proxy-key-for-the-process-test-0123456789abcdef";
 
-        // The dashboard, started and answering on its socket, until it's killed
+        // The dashboard, started and answering, until it's killed
         sealed class Running : IAsyncDisposable
         {
             readonly Process process;
@@ -27,9 +27,15 @@ namespace MinerBot.Dashboard.Tests
 
             public static async Task<Running> StartAsync(IReadOnlyDictionary<string, string> settings, string socket)
             {
+                using var client = TestSockets.Client(socket);
+                return await StartAsync(settings, client);
+            }
+
+            // Started and answering through the client, which goes where the dashboard should listen
+            public static async Task<Running> StartAsync(IReadOnlyDictionary<string, string> settings, HttpClient client)
+            {
                 var running = new Running(CommandModeProcessTests.Start(settings));
                 var waited = Stopwatch.StartNew();
-                using var client = TestSockets.Client(socket);
 
                 while (true)
                 {
@@ -49,8 +55,10 @@ namespace MinerBot.Dashboard.Tests
 
                     if (waited.Elapsed > Limit)
                     {
+                        await running.KillAsync();
+                        var said = $"{await running.process.StandardOutput.ReadToEndAsync(Token)} {await running.process.StandardError.ReadToEndAsync(Token)}";
                         await running.DisposeAsync();
-                        Assert.Fail("The dashboard didn't answer on its socket within the limit");
+                        Assert.Fail($"The dashboard didn't answer where it should listen within the limit: {said}");
                     }
 
                     await Task.Delay(100, Token);
@@ -159,6 +167,39 @@ namespace MinerBot.Dashboard.Tests
 
                 await using var second = await Running.StartAsync(settings, socket);
                 Assert.Equal("Healthy", (await CommandModeProcessTests.RunAsync(settings, "healthcheck")).Output.Trim());
+            }
+            finally
+            {
+                DashboardFactory.DeleteFolder(keys);
+            }
+        }
+
+        // A hand-edited dashboard.env with ASPNETCORE_PREFERHOSTINGURLS=true and ASPNETCORE_URLS never moves the dashboard: it
+        // answers on its socket, or on its port when there's none, and nothing listens at the URL. Fails if the environment
+        // can turn PreferHostingUrls on, when Kestrel would listen at the URL instead and, on Linux, then stop on the missing
+        // socket.
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task HostingUrlsInTheEnvironmentDontMoveIt(bool withSocket)
+        {
+            var keys = DashboardFactory.NewKeysFolder();
+            using var sockets = new TestSockets();
+            var socket = sockets.PathOf("dashboard.sock");
+            var settings = withSocket ? Settings(keys, socket) : CommandModeProcessTests.GoodSettings(keys);
+            var url = DeadDatabase.ClosedPort();
+            settings["ASPNETCORE_PREFERHOSTINGURLS"] = "true";
+            settings["ASPNETCORE_URLS"] = $"http://127.0.0.1:{url}";
+
+            try
+            {
+                using var client = withSocket
+                    ? TestSockets.Client(socket)
+                    : new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{settings["Dashboard__Port"]}"), Timeout = Limit, DefaultRequestHeaders = { Host = "localhost" } };
+
+                await using var dashboard = await Running.StartAsync(settings, client);
+
+                Assert.False(await TestSockets.TcpAnswersAsync(url, Token), "The dashboard listens at ASPNETCORE_URLS");
             }
             finally
             {

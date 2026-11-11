@@ -20,9 +20,12 @@ trap 'stopped $? $LINENO' ERR
 usage="Usage: bash <staging folder>/deploy/bootstrap.sh <commit> <staging folder>"
 # Today's files, kept once in old/ before anything new is installed
 old_files=(compose.yml deploy.sh rollback.sh fill-secrets.sh setup-login.sh move-docker-storage.sh README.txt)
-# The commands the scripts use, checked before the move: cmp and diff come from diffutils, which a minimal AlmaLinux lacks
+# The commands the scripts use, checked before the move. cmp and diff come from diffutils, which a minimal AlmaLinux
+# lacks, and pgrep and ps from procps-ng: without pgrep, setup couldn't prove that nginx took a reload, and without ps,
+# the nightly check couldn't see that nginx never loaded proxy-key.conf.
 needed=(awk cmp curl cut date df diff docker du find flock getent git grep groupadd gzip install jq mariadb mariadb-dump
-    mktemp nginx openssl readlink sed sort stat systemctl systemd-run systemd-tmpfiles tail tar timeout tr useradd)
+    mktemp nginx openssl pgrep ps readlink sed sort stat systemctl systemd-run systemd-tmpfiles tail tar timeout tr
+    useradd)
 
 apply=no
 if [ "${1:-}" = --apply ]; then
@@ -51,15 +54,24 @@ foreground_cleanup() {
 }
 
 self_test() {   # systemd must end a unit at its time limit here, or the detached runs can't be trusted
-    local started=$SECONDS
+    local started=$SECONDS state=0 silent=no
     step="testing systemd's time limit"
     echo "Testing that systemd ends a unit at its time limit here."
     run_for 20 systemd-run --quiet --collect --unit=minerbot-selftest -p RuntimeMaxSec=2 -p TimeoutStopSec=2 sleep 60 \
         || die "systemd-run couldn't start the self-test unit (above), so the detached runs can't be trusted. Nothing was changed."
-    while unit_running minerbot-selftest && [ $((SECONDS - started)) -lt 20 ]; do
+    # Only systemd's answer that the unit doesn't run counts: a systemctl that answers nothing proves nothing, and after a
+    # silent answer, an answer past the 10 seconds can't tell when the unit ended
+    while [ $((SECONDS - started)) -lt 20 ]; do
+        state=0
+        unit_running minerbot-selftest || state=$?
+        [ "$state" != 2 ] || silent=yes
+        [ "$state" != 1 ] || break
         sleep 1
     done
-    if unit_running minerbot-selftest || [ $((SECONDS - started)) -gt 10 ]; then
+    if [ "$state" = 2 ] || { [ "$silent" = yes ] && [ $((SECONDS - started)) -gt 10 ]; }; then
+        die "systemctl didn't answer in time whether the self-test unit still runs, so the detached runs can't be trusted. Nothing was changed."
+    fi
+    if [ "$state" != 1 ] || [ $((SECONDS - started)) -gt 10 ]; then
         die "systemd doesn't enforce time limits here, so the detached runs can't be trusted. Nothing was changed."
     fi
     echo "It does: the self-test unit was gone within $((SECONDS - started)) seconds."

@@ -653,6 +653,7 @@ while :; do
 done
 EOF
     (exec -a "nginx: master process" bash /tmp/mbtest-nginx-master.sh "$@") > /dev/null 2>&1 &
+    # shellcheck disable=SC2009 # pgrep is the stand-in here, so ps counts the stand-in nginx's workers
     for n in $(seq 1 50); do
         { read -r master < /var/run/nginx.pid; } 2> /dev/null || master=''
         if [ -n "$master" ] && [ "$(ps -o args= --ppid "$master" | grep -c '^nginx: ')" = "$#" ]; then
@@ -663,6 +664,7 @@ EOF
     problem "the stand-in nginx's master and $# worker(s) didn't start (after $n tries)"
 }
 
+# shellcheck disable=SC2009 # pgrep is the stand-in here, so ps counts the stand-in nginx's workers
 nginx_reload() {   # nginx_reload: one more worker under the stand-in master, as a reload starts; returns once it runs
     local master='' before n
     { read -r master < /var/run/nginx.pid; } 2> /dev/null || master=''
@@ -1208,7 +1210,7 @@ case_4() {
 }
 
 case_5() {
-    begin 5 "the same commit again: both services are already on it, and no tag moves, :previous included; restarts from before the deploy don't count, whether Compose leaves the container running or starts it"
+    begin 5 "the same commit again: both services are already on it, and no tag moves, :previous included; restarts from before the deploy don't count, whether Compose leaves the container running or starts it, and Docker not answering about the count stops the deploy instead of counting 0"
     local before what="the same commit again after earlier restarts"
     restore deployed
     before=$(fingerprint /fake/docker/tags/minerbot-*@current /fake/docker/tags/minerbot-*@previous /fake/docker/ctr)
@@ -1235,6 +1237,31 @@ case_5() {
     expect_said "The bot is ready, and still runs." "$what"
     ! said "its container restarted" || problem "$what: a restart from before the deploy counted as one" "$(excerpt)"
     [ "$(cut -d' ' -f2,3 /fake/docker/ctr/minerbot-dashboard)" = "true 0" ] || problem "$what: the dashboard wasn't started"
+
+    # Docker doesn't answer the one look at the bot's restart count, as at its 30 seconds under load: the deploy stops
+    # on that, and never takes the restarts from before for one during the deploy
+    what="the same commit again while Docker doesn't answer about the bot's restarts"
+    restore deployed
+    awk '{ $3 = 2; print }' /fake/docker/ctr/minerbot-bot > /tmp/mbtest-ctr && mv /tmp/mbtest-ctr /fake/docker/ctr/minerbot-bot
+    trap 'if [ -e /usr/local/bin/docker.mbtest-5 ]; then mv -f /usr/local/bin/docker.mbtest-5 /usr/local/bin/docker; fi' EXIT
+    if mv /usr/local/bin/docker /usr/local/bin/docker.mbtest-5; then
+        cat > /usr/local/bin/docker << 'EOF'
+#!/usr/bin/env bash
+if [ "${1:-} ${2:-} ${3:-} ${4:-} ${5:-}" = "container inspect -f {{.RestartCount}} minerbot-bot" ]; then
+    echo "Error response from daemon: a made-up timeout" >&2
+    exit 124
+fi
+exec /usr/local/bin/docker.mbtest-5 "$@"
+EOF
+        chmod 755 /usr/local/bin/docker
+        in_home restarts-unknown 120 ./deploy.sh --only bot
+        mv -f /usr/local/bin/docker.mbtest-5 /usr/local/bin/docker
+        expect_exit 1 "$what"
+        expect_said "Docker didn't answer about the container minerbot-bot (above). Nothing more was changed." "$what"
+        ! said "its container restarted" || problem "$what: a restart from before the deploy counted as one" "$(excerpt)"
+    else
+        problem "the test couldn't set the stand-in docker aside"
+    fi
     verdict
 }
 
@@ -1311,7 +1338,7 @@ case_8() {
 }
 
 case_9() {
-    begin 9 "the first dashboard swap not ready: the dashboard is stopped and removed, :current taken away and :failed set"
+    begin 9 "the first dashboard swap not ready: the dashboard is stopped and removed, :current taken away and :failed set; and when Compose can't stop it, the deploy says it's left running instead"
     local log
     restore setup
     in_home first 120 env FAKE_UNREADY="dashboard@${c1:0:12}" ./deploy.sh --only dashboard
@@ -1322,6 +1349,38 @@ case_9() {
     [ -z "$(tag_of minerbot-dashboard:current)" ] || problem "minerbot-dashboard:current is still there"
     [ "$(tag_of minerbot-dashboard:failed)" = "$(image_of "$c1" dashboard)" ] || problem ":failed isn't the image that wasn't ready"
     in_order "stopped, then removed" ' compose .* stop dashboard$' ' compose .* rm -f dashboard$'
+
+    # Compose can't stop it: its stop fails, and its rm -f, like the real one's without -s, leaves a running container
+    # where it is ("No stopped containers"). The deploy looks before it says the dashboard is stopped and removed.
+    restore setup
+    trap 'if [ -e /usr/local/bin/docker.mbtest-9 ]; then mv -f /usr/local/bin/docker.mbtest-9 /usr/local/bin/docker; fi' EXIT
+    if mv /usr/local/bin/docker /usr/local/bin/docker.mbtest-9; then
+        cat > /usr/local/bin/docker << 'EOF'
+#!/usr/bin/env bash
+if [ "${1:-} ${2:-}" = "compose -f" ] && [[ " $* " == *" rm -f dashboard "* ]]; then
+    read -r _ running _ < /fake/docker/ctr/minerbot-dashboard 2> /dev/null || running=''
+    if [ "$running" = true ]; then
+        echo "No stopped containers" >&2
+        exit 0
+    fi
+fi
+exec /usr/local/bin/docker.mbtest-9 "$@"
+EOF
+        chmod 755 /usr/local/bin/docker
+        in_home first-not-stopped 120 env FAKE_UNREADY="dashboard@${c1:0:12}" FAKE_STOP=fail ./deploy.sh --only dashboard
+        mv -f /usr/local/bin/docker.mbtest-9 /usr/local/bin/docker
+        expect_exit 1 "the first unready swap that Compose couldn't stop"
+        log=$(last_log deploy)
+        expect_said "there's no earlier image to go back to, but Compose couldn't stop and remove it (above), so it's left on ${c1:0:12}. Stop and remove it with: docker compose rm -s -f dashboard." \
+            "the first unready swap that Compose couldn't stop" "$log"
+        ! said "so it's stopped and removed" "$log" \
+            || problem "the deploy said the dashboard is stopped and removed while its container still runs"
+        [ -e /fake/docker/ctr/minerbot-dashboard ] || problem "the test's start: the dashboard's container is gone"
+        grep -qP "\tdeploy\tdashboard\t${c1:0:12}\tnot ready\tnot stopped, with no earlier image(\t|$)" "$home/logs/history.log" \
+            || problem "no history line that says the dashboard wasn't stopped" "$(tail -n 2 "$home/logs/history.log")"
+    else
+        problem "the test couldn't set the stand-in docker aside"
+    fi
     verdict
 }
 
@@ -1660,6 +1719,7 @@ case_28() {
     begin 28 "the dashboard's socket: common.sh, compose.yml and the tmpfiles line name the same folder and socket, bind-mounted without being made; the deploy puts a wrong folder right; socket_problem finds a wrong folder, a socket that isn't the dashboard's or one nginx can't write to; a rollback onto a wrong folder isn't ready; a failing systemd-tmpfiles stops the deploy before any build"
     local names
     restore deployed
+    # shellcheck source=/dev/null disable=SC2154 # common.sh, as the box has it, sets the three
     names=$(source /repo/deploy/common.sh && printf '%s %s %s' "$socket_dir" "$dashboard_socket" "$tmpfiles_conf")
     [ "$names" = "/run/minerbot-dashboard /run/minerbot-dashboard/dashboard.sock /etc/tmpfiles.d/minerbot-dashboard.conf" ] \
         || problem "common.sh's names for the socket aren't the designed ones" "$names"
@@ -1672,7 +1732,9 @@ case_28() {
         || problem "compose.yml doesn't bind-mount the folder at the same path without making it"
 
     # socket_problem, which the readiness check and status.sh use, on each way the socket can be wrong
+    # shellcheck source=/dev/null
     sp() { (source /repo/deploy/common.sh && socket_problem); }
+    # shellcheck source=/dev/null
     (source /usr/local/lib/mbtest/record.sh && sync_socket)
     [ -z "$(sp)" ] || problem "socket_problem finds something wrong with the dashboard's own socket" "$(sp)"
     chmod 600 /run/minerbot-dashboard/dashboard.sock
@@ -1920,14 +1982,23 @@ case_37() {
 }
 
 case_38() {
-    begin 38 "Docker failing to answer about an image or a container stops the swap with its own message, and nothing is swapped"
+    begin 38 "Docker failing to answer about an image or a container stops the swap with its own message, and nothing is swapped; for the dashboard, the deploy stops before its rights, which need the commits of the dashboard images there"
     local before
     restore deployed
     set_main "$c5"
     before=$(docker_state | grep -v '@new$')
-    in_home image-down 120 env FAKE_DOCKER_DOWN=image-inspect ./deploy.sh --only dashboard
-    expect_exit 1 "the deploy where Docker doesn't answer about images"
-    expect_said "Docker didn't answer about the image minerbot-dashboard:new (above)." "the deploy where Docker doesn't answer about images"
+    in_home image-down 120 env FAKE_DOCKER_DOWN=image-inspect ./deploy.sh --only bot
+    expect_exit 1 "the bot's deploy where Docker doesn't answer about images"
+    expect_said "Docker didn't answer about the image minerbot-bot:new (above)." "the bot's deploy where Docker doesn't answer about images"
+    same_state "a container or a tag changed" "$before" "$(docker_state | grep -v '@new$')"
+    restore deployed
+    set_main "$c5"
+    before=$(docker_state | grep -v '@new$')
+    in_home image-down-dashboard 120 env FAKE_DOCKER_DOWN=image-inspect ./deploy.sh --only dashboard
+    expect_exit 1 "the dashboard's deploy where Docker doesn't answer about images"
+    expect_said "Docker didn't answer about the image minerbot-dashboard:current (above). Nothing was swapped." \
+        "the dashboard's deploy where Docker doesn't answer about images"
+    ! run_calls | grep -qF '{stdin: apply}' || problem "the rights were applied though Docker didn't answer about the dashboard's images"
     same_state "a container or a tag changed" "$before" "$(docker_state | grep -v '@new$')"
     restore deployed
     set_main "$c5"
@@ -1935,6 +2006,7 @@ case_38() {
     in_home container-down 120 env FAKE_DOCKER_DOWN=container-inspect ./deploy.sh --only dashboard
     expect_exit 1 "the deploy where Docker doesn't answer about containers"
     expect_said "Docker didn't answer about the container minerbot-dashboard (above)." "the deploy where Docker doesn't answer about containers"
+    ! run_calls | grep -qF '{stdin: apply}' || problem "the rights were applied though Docker didn't answer about the dashboard's container"
     same_state "a container or a tag changed" "$before" "$(docker_state | grep -v '@new$')"
     verdict
 }
@@ -1965,7 +2037,7 @@ case_39() {
 
 # shellcheck disable=SC2016 # the backticks are the rights file's own text, never run
 case_60() {
-    begin 60 "a dashboard older than the installed deploy files keeps its rights: it gets the rights the last apply used and each GRANT of its own dashboard-rights.sql they lack, named in the log, and that is the copy setup applies; run again, nothing more is added; the next deploy of the newer dashboard applies the installed file alone; before any apply kept a copy, the installed file is the base"
+    begin 60 "a dashboard older than the installed deploy files keeps its rights: it gets the rights the last apply used and each GRANT of its own dashboard-rights.sql they lack, named in the log, and that is the copy setup applies; run again, nothing more is added; the next deploy of the newer dashboard applies the installed file and the GRANTs of the older dashboard's own file, since it replaces that one, and drops a right only the last apply had; before any apply kept a copy, the installed file is the base"
     local dropped line copy=$home/state/dashboard-rights.applied.sql applied=/fake/db/applied.sql
     local who="'minerbot-dashboard'@'localhost', 'minerbot-dashboard'@'127.0.0.1'" grant marker
     rendered() { sed -e 's/{{SITE_DB}}/website_db/g' -e 's/{{BOT_DB}}/minerbot_db/g' -e "s/{{GRANTEES}}/$who/g"; }
@@ -1981,6 +2053,11 @@ case_60() {
     set_main "$dropped"
     in_home newer 120 ./deploy.sh --only dashboard
     expect_exit 0 "the deploy of the newer dashboard"
+    # c1's dashboard, which it replaced, keeps INSERT on audit_log while rollback.sh can put it back (case 64). Long
+    # after, no image of c1's dashboard is left, and the newer dashboard deployed again applies its file alone.
+    cp /fake/docker/tags/minerbot-dashboard@current /fake/docker/tags/minerbot-dashboard@previous
+    in_home newer-alone 120 ./deploy.sh --only dashboard
+    expect_exit 0 "the newer dashboard again, with no image of c1's dashboard left"
     ! grep -qxF "$grant" "$applied" 2> /dev/null || problem "the newer dashboard's deploy gave INSERT on audit_log"
     cmp -s "$home/dashboard-rights.sql" "$copy" || problem "after the newer dashboard's deploy, the copy setup applies isn't the installed file"
     # The last apply used a right more than the installed file gives, which the dashboard that runs may use, as after a
@@ -2016,11 +2093,15 @@ case_60() {
     expect_said "Its own dashboard-rights.sql gives no right they lack." "c1's dashboard again"
     grep -qxF "$grant" "$applied" 2> /dev/null || problem "c1's dashboard lost INSERT on audit_log when it was deployed again"
 
-    # The newer dashboard again: the installed file alone, so both rights it doesn't give go
+    # The newer dashboard again: the installed file, and the GRANTs of c1's own file, since c1's dashboard, which it
+    # replaces, becomes :previous; the right only the last apply had goes
     in_home newer-again 120 ./deploy.sh --only dashboard
     expect_exit 0 "the newer dashboard again"
-    ! grep -qF -e "$grant" -e "$marker" "$applied" 2> /dev/null || problem "the newer dashboard's deploy kept a right its file doesn't give"
-    cmp -s "$home/dashboard-rights.sql" "$copy" || problem "the copy isn't the installed file again"
+    ! grep -qF -e "$marker" "$applied" 2> /dev/null || problem "the newer dashboard's deploy kept a right no dashboard's own file gives"
+    grep -qxF "$grant" "$applied" 2> /dev/null \
+        || problem "the newer dashboard's deploy took INSERT on audit_log from c1's dashboard, which it replaced"
+    grep -qF '`audit_log`' "$copy" 2> /dev/null && ! grep -qF mbtest_marker "$copy" 2> /dev/null \
+        || problem "the copy setup applies isn't the installed file and c1's GRANT"
 
     # Before any apply kept a copy: a --only bot deploy installs the newer files, and c1's dashboard gets the installed
     # file and the right it lacks. The restore rebuilds GitHub's stand-in without the commit above, so it's made again.
@@ -2101,6 +2182,247 @@ case_61() {
     in_home deploy-back 60 ./rollback.sh dashboard
     expect_exit 0 "the rollback after that"
     [ "$(ctr_image minerbot-dashboard)" = "$c1_dash" ] || problem "the rollback after that didn't go back to c1's image"
+    verdict
+}
+
+case_62() {
+    begin 62 "the terminal follows a run to its end while systemctl answers nothing, as one that hit its 10 seconds under load would: two such answers in a row while the unit runs don't end the wait, and the run's own result is the exit code"
+    restore deployed
+    # The stand-in systemctl, but its 2nd and 3rd is-active of a unit that runs answer nothing: no line, exit code 1.
+    # The case puts the stand-in back when it ends, however it ends.
+    trap 'if [ -e /usr/local/bin/systemctl.mbtest-62 ]; then mv -f /usr/local/bin/systemctl.mbtest-62 /usr/local/bin/systemctl; fi' EXIT
+    if mv /usr/local/bin/systemctl /usr/local/bin/systemctl.mbtest-62; then
+        cat > /usr/local/bin/systemctl << 'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = is-active ]; then
+    pid=''
+    { read -r pid < "/fake/units/$2.pid"; } 2> /dev/null || pid=''
+    if [ -n "$pid" ] && kill -0 "$pid" 2> /dev/null; then
+        n=$(($(cat /fake/units/mbtest-alive 2> /dev/null || echo 0) + 1))
+        echo "$n" > /fake/units/mbtest-alive
+        if [ "$n" = 2 ] || [ "$n" = 3 ]; then
+            echo "$n" >> /fake/units/mbtest-silent
+            exit 1
+        fi
+    fi
+fi
+exec /usr/local/bin/systemctl.mbtest-62 "$@"
+EOF
+        chmod 755 /usr/local/bin/systemctl
+    else
+        problem "the test couldn't set the stand-in systemctl aside"
+    fi
+    in_home silent 60 ./rollback.sh bot
+    mv -f /usr/local/bin/systemctl.mbtest-62 /usr/local/bin/systemctl
+    [ "$(grep -c . /fake/units/mbtest-silent 2> /dev/null)" = 2 ] \
+        || problem "the test's premise: systemctl didn't answer nothing twice while the rollback's unit ran" "$(cat /fake/units/mbtest-alive 2>&1)"
+    expect_exit 0 "the rollback the terminal followed through two silent answers"
+    ! said "It still runs after" && ! said "It ended without a result" \
+        || problem "the terminal stopped following while the run went on" "$(excerpt)"
+    expect_said "RESULT ok" "the rollback the terminal followed through two silent answers"
+    [ "$(ctr_image minerbot-bot)" = "$old_bot" ] || problem "the rollback didn't go back to the bot's image before"
+    verdict
+}
+
+# Case 63's stand-in docker: Compose's second up of the bot, which is a failed swap's way back to the image before,
+# fails as FAKE_UP_FAIL makes it fail; with MBTEST_GONE=1, Compose removed the bot's container first; with
+# MBTEST_KEEP=1, it exits 0 instead, but leaves the container as it was, as FAKE_UP_KEEP makes it
+wrap_docker_63() {
+    mv /usr/local/bin/docker /usr/local/bin/docker.mbtest-63 || return 1
+    cat > /usr/local/bin/docker << 'EOF'
+#!/usr/bin/env bash
+if [ "${1:-} ${2:-}" = "compose -f" ] && [[ " $* " == *" up -d --no-build --no-deps bot "* ]]; then
+    n=$(($(cat /fake/docker/mbtest-bot-ups 2> /dev/null || echo 0) + 1))
+    echo "$n" > /fake/docker/mbtest-bot-ups
+    if [ "$n" = 2 ]; then
+        if [ "${MBTEST_KEEP:-}" = 1 ]; then
+            FAKE_UP_KEEP=bot exec /usr/local/bin/docker.mbtest-63 "$@"
+        fi
+        if [ "${MBTEST_GONE:-}" = 1 ]; then
+            rm -f /fake/docker/ctr/minerbot-bot
+        fi
+        FAKE_UP_FAIL=bot exec /usr/local/bin/docker.mbtest-63 "$@"
+    fi
+fi
+exec /usr/local/bin/docker.mbtest-63 "$@"
+EOF
+    chmod 755 /usr/local/bin/docker
+}
+
+unwrap_docker_63() {
+    if [ -e /usr/local/bin/docker.mbtest-63 ]; then mv -f /usr/local/bin/docker.mbtest-63 /usr/local/bin/docker; fi
+}
+
+case_63() {
+    begin 63 "a swap that fails where Compose doesn't put the image before back, whether it fails or exits 0 without recreating the container: the deploy says what runs, the new image or, once the container is gone, nothing, and never that the service is back or that the problem is outside the image; the history line says so; and rollback.sh then finishes the swap back"
+    local log c1_bot c5_bot
+    c1_bot=$(image_of "$c1" bot)
+    c5_bot=$(image_of "$c5" bot)
+    trap unwrap_docker_63 EXIT
+    restore deployed
+    set_main "$c5"
+    wrap_docker_63 || problem "the test couldn't set the stand-in docker aside"
+    in_home back-fails 120 env FAKE_UNREADY="bot@${c5:0:12}" ./deploy.sh --only bot
+    unwrap_docker_63
+    expect_exit 1 "the deploy whose way back Compose doesn't take"
+    log=$(last_log deploy)
+    expect_said "The bot on ${c5:0:12} wasn't ready, and Compose didn't put it back on ${c1:0:12} (above), so it's left on ${c5:0:12}, while minerbot-bot:current names ${c1:0:12}. Run ./rollback.sh bot once Docker answers: it finishes the swap back." \
+        "the deploy whose way back Compose doesn't take" "$log"
+    ! said "outside the image" "$log" && ! said "It's left on ${c1:0:12}" "$log" \
+        || problem "the deploy said the bot is left on the image before, or blamed something outside the image" "$(excerpt "$log")"
+    [ "$(ctr_image minerbot-bot)" = "$c5_bot" ] && [ "$(tag_of minerbot-bot:current)" = "$c1_bot" ] \
+        && [ "$(tag_of minerbot-bot:previous)" = "$old_bot" ] && [ "$(tag_of minerbot-bot:failed)" = "$c5_bot" ] \
+        || problem "the bot's container and tags aren't what the deploy said: c5's image runs, and :current is c1's"
+    grep -qP "\tdeploy\tbot\t${c5:0:12}\tnot ready\tnot put back on ${c1:0:12}, left on ${c5:0:12}\t" "$home/logs/history.log" \
+        || problem "no history line that says the bot wasn't put back" "$(tail -n 3 "$home/logs/history.log")"
+    # What the deploy says to do: rollback.sh puts the bot back on :current, and moves no tag
+    in_home finish 60 ./rollback.sh bot
+    expect_exit 0 "rollback.sh after the deploy whose way back Compose didn't take"
+    expect_said "or Compose didn't put a failed swap back. This run finishes that swap on ${c1:0:12}, and moves no tag." \
+        "rollback.sh after the deploy whose way back Compose didn't take"
+    [ "$(ctr_image minerbot-bot)" = "$c1_bot" ] && [ "$(tag_of minerbot-bot:current)" = "$c1_bot" ] \
+        && [ "$(tag_of minerbot-bot:previous)" = "$old_bot" ] \
+        || problem "rollback.sh didn't finish the swap back onto c1's image, with the tags as they were" "$(excerpt)"
+
+    # Compose removed the bot's container before it failed: the deploy says it doesn't run, and how to start it
+    restore deployed
+    set_main "$c5"
+    wrap_docker_63 || problem "the test couldn't set the stand-in docker aside"
+    in_home gone 120 env FAKE_UNREADY="bot@${c5:0:12}" MBTEST_GONE=1 ./deploy.sh --only bot
+    unwrap_docker_63
+    expect_exit 1 "the deploy whose way back left no container"
+    log=$(last_log deploy)
+    expect_said "The bot on ${c5:0:12} wasn't ready, and Compose didn't put it back on ${c1:0:12} (above), and its container is gone, so it doesn't run. Start it on ${c1:0:12}, which minerbot-bot:current names, with: docker compose up -d --no-build --no-deps bot." \
+        "the deploy whose way back left no container" "$log"
+    grep -qP "\tdeploy\tbot\t${c5:0:12}\tnot ready\tnot put back on ${c1:0:12}, not running\t" "$home/logs/history.log" \
+        || problem "no history line that says the bot doesn't run" "$(tail -n 3 "$home/logs/history.log")"
+
+    # Compose exits 0 on the way back but leaves the container on the new image: the deploy goes by the image the
+    # container runs, not by Compose's exit code, so it says the same as when Compose fails
+    restore deployed
+    set_main "$c5"
+    wrap_docker_63 || problem "the test couldn't set the stand-in docker aside"
+    in_home back-kept 120 env FAKE_UNREADY="bot@${c5:0:12}" MBTEST_KEEP=1 ./deploy.sh --only bot
+    unwrap_docker_63
+    expect_exit 1 "the deploy whose way back Compose exits 0 on without recreating the bot"
+    log=$(last_log deploy)
+    expect_said "The bot on ${c5:0:12} wasn't ready, and Compose didn't put it back on ${c1:0:12} (above), so it's left on ${c5:0:12}, while minerbot-bot:current names ${c1:0:12}." \
+        "the deploy whose way back Compose exits 0 on without recreating the bot" "$log"
+    ! said "outside the image" "$log" \
+        || problem "the deploy whose way back Compose exits 0 on blamed something outside the image" "$(excerpt "$log")"
+    [ "$(ctr_image minerbot-bot)" = "$c5_bot" ] && [ "$(tag_of minerbot-bot:current)" = "$c1_bot" ] \
+        || problem "the bot's container and tags aren't what the deploy said, after a way back Compose exited 0 on"
+    verdict
+}
+
+# shellcheck disable=SC2016 # the backticks are the rights file's own text, never run
+case_64() {
+    begin 64 "after going back two pull requests, every dashboard the swap or rollback.sh can put back keeps the GRANTs of its own dashboard-rights.sql: the one a forward deploy replaces, so a swap that fails goes back to it with its rights, and :previous, after a swap that works and when the same commit is deployed again; a right goes once no such dashboard has it in its own file; and on their own, :current after a deploy cut off once it moved the tags, and the image the container runs when a failed swap left it on one that neither tag names"
+    local dropped later c1_dash b c x y applied=/fake/db/applied.sql copy=$home/state/dashboard-rights.applied.sql
+    local who="'minerbot-dashboard'@'localhost', 'minerbot-dashboard'@'127.0.0.1'" grant
+    grant="GRANT INSERT ON \`minerbot_db\`.\`audit_log\` TO $who;"
+    c1_dash=$(image_of "$c1" dashboard)
+    restore deployed
+    # A later pull request removes INSERT on audit_log, which c1's dashboard uses, as after a pull request in between
+    # whose code stopped using it
+    dropped=$(new_commit "$c1" rights-dropped-64 sed -i '/^GRANT INSERT ON `{{BOT_DB}}`\.`audit_log` TO {{GRANTEES}};$/d' \
+        deploy/dashboard-rights.sql) || problem "couldn't make the commit that removes a right"
+    set_main "$dropped"
+    # The messages are checked in what the terminal followed, as in case 60
+    in_home newer 120 ./deploy.sh --only dashboard
+    expect_exit 0 "the deploy of the newer dashboard"
+    expect_said "The dashboard of ${c1:0:12}, which a failed swap or ./rollback.sh dashboard can put back, keeps these GRANT statements of its own dashboard-rights.sql, which the installed dashboard-rights.sql lacks:" \
+        "the deploy of the newer dashboard"
+    grep -qxF "$grant" "$applied" 2> /dev/null \
+        || problem "the newer dashboard's deploy took INSERT on audit_log from c1's dashboard, which it replaced" "$(grep -F GRANT "$applied" 2>&1)"
+    in_home older 120 ./deploy.sh "$c1" --only dashboard
+    expect_exit 0 "the deploy of c1's older dashboard"
+
+    # Forward again, and the newer dashboard isn't ready: the swap goes back to c1's, which keeps its rights
+    in_home forward-unready 120 env FAKE_UNREADY="dashboard@${dropped:0:12}" ./deploy.sh --only dashboard
+    expect_exit 1 "the forward deploy whose dashboard isn't ready"
+    expect_said "so it's back on ${c1:0:12}, which is ready." "the forward deploy whose dashboard isn't ready"
+    [ "$(ctr_image minerbot-dashboard)" = "$c1_dash" ] || problem "the dashboard isn't back on c1's image"
+    grep -qxF "$grant" "$applied" 2> /dev/null \
+        || problem "the swap went back to c1's dashboard, but the rights it left lack INSERT on audit_log, which c1's code uses"
+
+    # Forward again, ready: c1's dashboard is :previous and keeps its rights, also when the same commit is deployed
+    # again, as after a deploy whose bot didn't swap; rollback.sh, which never touches the rights, puts it back under
+    # them
+    in_home forward 120 ./deploy.sh --only dashboard
+    expect_exit 0 "the forward deploy that is ready"
+    [ "$(tag_of minerbot-dashboard:previous)" = "$c1_dash" ] || problem ":previous isn't c1's dashboard"
+    grep -qxF "$grant" "$applied" 2> /dev/null || problem "the forward deploy took INSERT on audit_log from c1's dashboard, now :previous"
+    in_home same-again 120 ./deploy.sh --only dashboard
+    expect_exit 0 "the same commit again"
+    expect_said "The dashboard is already on ${dropped:0:12}." "the same commit again"
+    grep -qxF "$grant" "$applied" 2> /dev/null \
+        || problem "the same commit deployed again took INSERT on audit_log from c1's dashboard, still :previous"
+    in_home back 60 ./rollback.sh dashboard
+    expect_exit 0 "rollback.sh back to c1's dashboard"
+    [ "$(ctr_image minerbot-dashboard)" = "$c1_dash" ] && grep -qxF "$grant" "$applied" 2> /dev/null \
+        || problem "rollback.sh didn't put c1's dashboard back under rights with INSERT on audit_log"
+    in_home forward-back 60 ./rollback.sh dashboard
+    expect_exit 0 "rollback.sh forward again"
+
+    # A later commit swapped in makes the newer dashboard :previous; deployed again, no dashboard here has c1's right in
+    # its own file any more, and the right goes
+    later=$(new_commit "$dropped" later-64 sh -c 'echo later > version.txt') || problem "couldn't make a later commit"
+    set_main "$later"
+    in_home later 120 ./deploy.sh --only dashboard
+    expect_exit 0 "the deploy of a later commit"
+    grep -qxF "$grant" "$applied" 2> /dev/null \
+        || problem "the later commit's deploy took INSERT on audit_log while c1's dashboard was still :previous"
+    in_home later-again 120 ./deploy.sh --only dashboard
+    expect_exit 0 "the later commit again"
+    ! grep -qxF "$grant" "$applied" 2> /dev/null \
+        || problem "INSERT on audit_log stayed though no dashboard that runs, :current or :previous has it in its own file"
+    cmp -s "$home/dashboard-rights.sql" "$copy" || problem "the copy setup applies isn't the installed file alone"
+
+    # :current on its own: a deploy of B, which adds a right, is cut off once it moved the tags, so :current names B's
+    # dashboard while c1's still runs and is :previous. The next deploy, of C, which takes B's right away, keeps it:
+    # ./rollback.sh dashboard would finish the cut-off swap onto B.
+    restore deployed
+    b=$(new_commit "$c1" grant-b-64 sh -c 'echo "GRANT SELECT ON \`{{BOT_DB}}\`.\`mbtest_b\` TO {{GRANTEES}};" >> deploy/dashboard-rights.sql') \
+        || problem "couldn't make the commit that adds a right"
+    set_main "$b"
+    in_home cut-at-tags 120 env MINERBOT_TEST_CUT_AFTER=tags-dashboard ./deploy.sh --only dashboard
+    [ "$(ctr_image minerbot-dashboard)" = "$c1_dash" ] && [ "$(tag_of minerbot-dashboard:current)" = "$(image_of "$b" dashboard)" ] \
+        && [ "$(tag_of minerbot-dashboard:previous)" = "$c1_dash" ] \
+        || problem "after the deploy cut off once it moved the tags, c1's dashboard doesn't run with :current on B's and :previous on c1's" "$(excerpt)"
+    c=$(new_commit "$b" ungrant-b-64 sed -i '/mbtest_b/d' deploy/dashboard-rights.sql) \
+        || problem "couldn't make the commit that takes the right away"
+    set_main "$c"
+    in_home after-cut 120 ./deploy.sh --only dashboard
+    expect_exit 0 "the deploy after the one cut off once it moved the tags"
+    expect_said "The dashboard of ${b:0:12}, which a failed swap or ./rollback.sh dashboard can put back, keeps these GRANT statements of its own dashboard-rights.sql, which the installed dashboard-rights.sql lacks:" \
+        "the deploy after the one cut off once it moved the tags"
+    grep -qF '`mbtest_b`' "$applied" 2> /dev/null \
+        || problem "the deploy after the cut-off one dropped the right of B's dashboard, which :current named"
+
+    # The image the container runs on its own: X's dashboard runs while :current names c1's and :previous the old one,
+    # as a failed swap that Compose didn't put back leaves it. The next deploy, of Y, which takes X's right away, keeps
+    # it: its swap goes back to X when it fails, and X becomes :previous when it works.
+    restore deployed
+    x=$(new_commit "$c1" grant-x-64 sh -c 'echo "GRANT SELECT ON \`{{BOT_DB}}\`.\`mbtest_x\` TO {{GRANTEES}};" >> deploy/dashboard-rights.sql') \
+        || problem "couldn't make the commit that adds a right"
+    set_main "$x"
+    in_home build-x 120 ./deploy.sh --only dashboard --no-start
+    expect_exit 0 "the build of the commit that adds a right"
+    awk -v id="$(image_of "$x" dashboard)" '{ $1 = id; print }' /fake/docker/ctr/minerbot-dashboard > /tmp/mbtest-ctr-64 \
+        && mv /tmp/mbtest-ctr-64 /fake/docker/ctr/minerbot-dashboard
+    [ "$(ctr_image minerbot-dashboard)" = "$(image_of "$x" dashboard)" ] && [ "$(tag_of minerbot-dashboard:current)" = "$c1_dash" ] \
+        && [ "$(tag_of minerbot-dashboard:previous)" != "$(image_of "$x" dashboard)" ] \
+        || problem "the test's start: X's dashboard doesn't run while :current names c1's and :previous another"
+    y=$(new_commit "$x" ungrant-x-64 sed -i '/mbtest_x/d' deploy/dashboard-rights.sql) \
+        || problem "couldn't make the commit that takes the right away"
+    set_main "$y"
+    in_home after-kept 120 ./deploy.sh --only dashboard
+    expect_exit 0 "the deploy after a failed swap left another image running"
+    grep -qF '`mbtest_x`' "$applied" 2> /dev/null \
+        || problem "the deploy dropped the right of X's dashboard, which ran while its rights applied"
+    [ "$(tag_of minerbot-dashboard:previous)" = "$(image_of "$x" dashboard)" ] \
+        || problem "X's dashboard, which ran before the swap, isn't :previous after it"
     verdict
 }
 
@@ -2974,6 +3296,86 @@ case_59() {
     verdict
 }
 
+# ---- What a setup run that stops says it changed: 75
+
+case_75() {
+    begin 75 "a setup run that undid a cut-off nginx change, then stopped at the dashboard's own check, names that undo and says nothing else was changed, never that nothing was: nginx's files are back as they were before the cut-off change, nginx reloaded once, and the login, its rights, dashboard.env and the dashboard stay as they were; the same refusal with no cut-off change still says nothing was changed; a stop at server.conf's check of the databases right after the undo names it too"
+    local backup=$home/state/nginx-backup/20261106T000000Z nginx_before env_before
+    # Cut off during nginx's change, as in case 57: the marker, a complete backup, and nginx on another proxy key
+    restore deployed
+    install -d -m 700 "$backup"
+    cp -p /etc/nginx/conf.d/minerbot-dashboard.conf /etc/nginx/minerbot/origin-cert.pem /etc/nginx/minerbot/origin-key.pem \
+        /etc/nginx/minerbot/proxy-key.conf "$backup/"
+    : > "$backup/missing"
+    : > "$backup/complete"
+    echo "$backup" > "$home/state/nginx-change"
+    nginx_before=$(nginx_files)
+    env_before=$(sha256sum < "$home/dashboard.env")
+    printf 'proxy_set_header X-MinerBot-Proxy-Key "%s";\n' "$(printf 'mbtest proxy key two' | sha256sum | cut -c1-64)" \
+        > /etc/nginx/minerbot/proxy-key.conf
+    in_home undone-refused 120 env FAKE_CHECK_SETTINGS=fail ./setup-dashboard.sh --no-questions --yes
+    expect_exit 1 "the run that undid a cut-off nginx change, then had its settings refused"
+    expect_said "An nginx change was cut off earlier. Its files are back as they were before it, and nginx reloaded." \
+        "the run that undid a cut-off nginx change, then had its settings refused"
+    expect_said "The dashboard's own check refused the new settings (above). The cut-off nginx change was undone (above), and nothing else was changed." \
+        "the run that undid a cut-off nginx change, then had its settings refused"
+    ! said "Nothing was changed." \
+        || problem "the run that undid a cut-off nginx change and reloaded nginx said that nothing was changed" "$(excerpt)"
+    same_state "the cut-off change wasn't undone byte for byte" "$nginx_before" "$(nginx_files)"
+    [ ! -e "$home/state/nginx-change" ] || problem "the cut-off change's marker is still there after its undo"
+    [ "$(run_calls | grep -c '^restartsrv_nginx ')" = 1 ] || problem "the undo didn't reload nginx exactly once"
+    ! run_calls | grep -qE '\{stdin: (login|rehearsal|apply)\}' || problem "the login or its rights changed after the dashboard's own check refused"
+    [ "$(sha256sum < "$home/dashboard.env")" = "$env_before" ] || problem "dashboard.env changed after the dashboard's own check refused"
+    ! run_calls | args_of | grep -qE ' compose .* (up|stop) ' || problem "the dashboard was stopped or recreated after its own check refused"
+
+    # No cut-off change: the same refusal changed nothing, and says so
+    restore deployed
+    in_home refused 120 env FAKE_CHECK_SETTINGS=fail ./setup-dashboard.sh --no-questions --yes
+    expect_exit 1 "the run whose settings the dashboard's own check refused"
+    expect_said "The dashboard's own check refused the new settings (above). Nothing was changed." \
+        "the run whose settings the dashboard's own check refused"
+    ! said "nothing else was changed" || problem "the run with no cut-off change spoke of one" "$(excerpt)"
+
+    # A stop in load_server_conf, right after the undo, names it too: MariaDB answers the foreground's checks, then not
+    # the unit's count of the two databases. The stand-in mariadb gets a wrapper for this one run, and the case puts it
+    # back however it ends.
+    restore deployed
+    install -d -m 700 "$backup"
+    cp -p /etc/nginx/conf.d/minerbot-dashboard.conf /etc/nginx/minerbot/origin-cert.pem /etc/nginx/minerbot/origin-key.pem \
+        /etc/nginx/minerbot/proxy-key.conf "$backup/"
+    : > "$backup/missing"
+    : > "$backup/complete"
+    echo "$backup" > "$home/state/nginx-change"
+    nginx_before=$(nginx_files)
+    printf 'proxy_set_header X-MinerBot-Proxy-Key "%s";\n' "$(printf 'mbtest proxy key two' | sha256sum | cut -c1-64)" \
+        > /etc/nginx/minerbot/proxy-key.conf
+    trap 'if [ -e /usr/local/bin/mariadb.mbtest-75 ]; then mv -f /usr/local/bin/mariadb.mbtest-75 /usr/local/bin/mariadb; fi' EXIT
+    if mv /usr/local/bin/mariadb /usr/local/bin/mariadb.mbtest-75; then
+        cat > /usr/local/bin/mariadb << 'EOF'
+#!/usr/bin/env bash
+if [ "${MINERBOT_DETACHED:-}" = 1 ] && [[ $* == *information_schema.schemata* ]]; then
+    echo "ERROR 2002 (HY000): Can't connect to local server through socket '/run/mysqld/mysqld.sock' (2)" >&2
+    exit 1
+fi
+exec /usr/local/bin/mariadb.mbtest-75 "$@"
+EOF
+        chmod 755 /usr/local/bin/mariadb
+        in_home undone-no-db 120 ./setup-dashboard.sh --no-questions --yes
+        mv -f /usr/local/bin/mariadb.mbtest-75 /usr/local/bin/mariadb
+        expect_exit 1 "the run that undid a cut-off nginx change, then lost MariaDB"
+        expect_said "An nginx change was cut off earlier. Its files are back as they were before it, and nginx reloaded." \
+            "the run that undid a cut-off nginx change, then lost MariaDB"
+        expect_said "MariaDB didn't answer as root within 30 seconds (above). The cut-off nginx change was undone (above), and nothing else was changed." \
+            "the run that undid a cut-off nginx change, then lost MariaDB"
+        ! said "Nothing was changed." \
+            || problem "the run that undid a cut-off nginx change, then lost MariaDB, said that nothing was changed" "$(excerpt)"
+        same_state "the cut-off change wasn't undone byte for byte before MariaDB was lost" "$nginx_before" "$(nginx_files)"
+    else
+        problem "the test couldn't set the stand-in mariadb aside"
+    fi
+    verdict
+}
+
 # ---- nginx's reload, pipelog.conf, and what MinerBot's database holds: 90 to 99
 
 case_90() {
@@ -3157,6 +3559,7 @@ case_17() {
     restore deployed
     backup_at=$(awk '!/^#/ && /backup\.sh nightly/ { print $2 * 60 + $1 }' /etc/cron.d/minerbot)
     check_at=$(awk '!/^#/ && /status\.sh --check/ { print $2 * 60 + $1 }' /etc/cron.d/minerbot)
+    # shellcheck disable=SC2016 # the $ is text that sed matches in backup.sh
     deploy_wait=$(sed -n 's/.*take_lock "backup \$reason" \([0-9][0-9]*\) .*/\1/p' /repo/deploy/backup.sh)
     backup_wait=$(sed -n 's/.*flock -w \([0-9][0-9]*\) 8 .*/\1/p' /repo/deploy/backup.sh)
     if [[ $backup_at =~ ^[0-9]+$ && $check_at =~ ^[0-9]+$ && $deploy_wait =~ ^[0-9]+$ && $backup_wait =~ ^[0-9]+$ ]]; then
@@ -3273,19 +3676,24 @@ case_19() {
 }
 
 # Every call of a command that must go through run_for, where it stands at a command position: a line's start; after |,
-# ;, &, (, {, !, $( or a backtick; after a case item's ")"; or after then, do, else, if, elif, while, until, exec, time,
-# command, env, nohup or xargs. Assignments before the command, as in LC_ALL=C mariadb, and a path, as in
-# /usr/sbin/sendmail, don't hide it, while a quoted message never passes for an assignment. bash -c counts as a listed
-# command, since that's how the scripts put a pipeline under one limit. Comment lines and run_for itself are left out.
-# Each line is matched as it is, so ^ is the line's own start. It stays a heuristic: a command named through a variable,
-# such as "$cmd", and a command on a continuation line are missed. Prints file:line: text.
+# ;, &, (, {, !, $( or a backtick; after a case item's ")"; after then, do, else, if, elif, while, until, exec, time,
+# command, env, nohup or xargs; or after time, env or xargs with options, each with or without one argument of its own,
+# as in time -p, xargs -n 1 or env -u HOME. Options after exec and command are left out: in run_for 30 docker exec -i
+# <container> mariadb, the limit covers mariadb, and command -v docker only looks docker up. Assignments before the
+# command, as in LC_ALL=C mariadb, and a path, as in /usr/sbin/sendmail, don't hide it, while a quoted message never
+# passes for an assignment. bash -c counts as a listed command, since that's how the scripts put a pipeline under one
+# limit. Comment lines and run_for itself are left out. Each line is matched as it is, so ^ is the line's own start. It
+# stays a heuristic: a command named through a variable, such as "$cmd", one after a prefix this list doesn't have, such
+# as nice or sudo, one after an option argument with a space in it, and one on a continuation line are missed. Prints
+# file:line: text.
 unlimited_calls() {   # unlimited_calls <file>...
     awk -v words='bash -c|docker|mariadb|mariadb-dump|curl|git|openssl|nginx|ss|sendmail|systemctl|systemd-run|systemd-tmpfiles|restartsrv_nginx|pgrep|ps' '
         BEGIN {
             q = "\047"
             assign = "([A-Za-z_][A-Za-z0-9_]*=(\"[^\"]*\"|" q "[^" q "]*" q "|[^[:space:]\"" q "()`]*)[[:space:]]+)*"
             pos = "(^|[|;&({!`]|^[[:space:]]*[^[:space:]()]+[)]|(^|[^A-Za-z0-9_])(then|do|else|if|elif|while|until|exec|time|command|env|nohup|xargs)[[:space:]])"
-            re = pos "[[:space:]]*" assign "([^[:space:]]*/)?(" words ")([[:space:]]|$)"
+            opts = "(^|[^A-Za-z0-9_])(time|env|xargs)([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:space:]][^[:space:]]*)?)+[[:space:]]"
+            re = "(" pos "|" opts ")[[:space:]]*" assign "([^[:space:]]*/)?(" words ")([[:space:]]|$)"
         }
         /^run_for\(\) \{/ { skip = 1 }
         skip && /^\}/ { skip = 0; next }
@@ -3298,8 +3706,8 @@ unlimited_calls() {   # unlimited_calls <file>...
 }
 
 case_20() {
-    begin 20 "static rules: set -Eeuo pipefail and umask 077 in every script, no tracing, every listed command and bash -c under run_for (a check that finds each kind of position in a copy of common.sh, after if, elif, until, exec, time, an assignment, a backtick or a case item too, and leaves quoted messages alone), every read with -t, every stty behind on_terminal; across every case, no call without a time limit and no password statement without --skip-print-query-on-error; every script and stand-in recorded as 100755"
-    local f found
+    begin 20 "static rules: set -Eeuo pipefail and umask 077 in every script, no tracing, every listed command and bash -c under run_for (a check that finds each kind of position in a copy of common.sh, after if, elif, until, exec, time, an assignment, a backtick, a case item, or time, env or xargs with options too, and leaves quoted messages alone), every command the scripts run under run_for checked for by bootstrap.sh before the move, every read with -t, every stty behind on_terminal; across every case, no call without a time limit and no password statement without --skip-print-query-on-error; every script and stand-in recorded as 100755"
+    local f found needed paths commands
     local -a probes
     for f in /repo/deploy/*.sh; do
         if [ "${f##*/}" != common.sh ]; then
@@ -3319,18 +3727,41 @@ case_20() {
         '    { systemctl status; }' 'if docker ps; then :; fi' 'elif curl -s x; then' 'until git status; do :; done'
         'while nginx -t -q; do :; done' 'exec docker ps' 'time openssl rand -hex 4' 'LC_ALL=C mariadb -e x' 'x=`ss -H`'
         '    bot) docker ps ;;' 'command docker ps' 'env FOO=1 curl -s x' 'nohup docker ps' 'a | xargs docker rm'
-        '    last=$(bash -c '\''gzip -t "$1"'\'' check-dump "$f")' 'x="a b" mariadb -e x' '    systemd-tmpfiles --create x')
+        '    last=$(bash -c '\''gzip -t "$1"'\'' check-dump "$f")' 'x="a b" mariadb -e x' '    systemd-tmpfiles --create x'
+        'time -p openssl rand -hex 4' 'env -i curl -s x' 'a | xargs -r docker rm' 'a | xargs -n 1 docker rm'
+        'env -u HOME curl -s x' 'a | xargs -I {} docker rm {}')
     { cat /repo/deploy/common.sh; printf '%s\n' "${probes[@]}"; } > /tmp/mbtest-calls.sh
     found=$(unlimited_calls /tmp/mbtest-calls.sh)
     [ "$(printf '%s' "$found" | grep -c .)" = "${#probes[@]}" ] \
         || problem "the check for calls outside run_for didn't find exactly the ${#probes[@]} added to a copy of common.sh" "$found"
+    # shellcheck disable=SC2016 # lines of text for the check, never run
     printf '%s\n' '    run_for 30 docker ps' '    echo "the docker ps above"' '    local docker_id=1' '    # docker ps' \
         '    git_url=x' '    x=$(f) || x="(unknown: openssl couldn'"'"'t parse it)"' 'X=$v run_for 180 docker ps' \
         '    if command -v docker > /dev/null; then' '    if ! run_for "$limit" mariadb-dump x; then' \
         '    last=$(run_for 300 bash -c '\''gzip -t "$1"'\'' check-dump "$f")' '    out=$(bash -n "$f" 2>&1)' \
-        '    time_left=$(time_left)' '    echo "Wait, then try again: git says so"' > /tmp/mbtest-calls.sh
+        '    time_left=$(time_left)' '    echo "Wait, then try again: git says so"' '    a | xargs -r -n 1 rm -f' \
+        '    run_for 30 docker exec -i minerbot-db mariadb -e x' > /tmp/mbtest-calls.sh
     found=$(unlimited_calls /tmp/mbtest-calls.sh)
     [ -z "$found" ] || problem "the check for calls outside run_for flags lines that are fine" "$found"
+    # Every command the scripts run under run_for is one bootstrap.sh checks for before the move: in its list needed,
+    # or, given by its path, in needed_commands. bash runs the scripts themselves, and a command given through a
+    # variable, such as "$home/backup.sh", is one of the scripts, so neither is looked for.
+    needed=" $(sed -n '/^needed=(/,/)$/p' /repo/deploy/bootstrap.sh | sed 's/^needed=(//; s/)$//' | tr -s '[:space:]' ' ') "
+    paths=" $(sed -n '/^needed_commands() {/,/^}/p' /repo/deploy/bootstrap.sh | tr -s '[:space:];' ' ') "
+    commands=$(grep -vhE '^[[:space:]]*#' /repo/deploy/*.sh \
+        | grep -oE '(^|[^A-Za-z0-9_])run_for( -k [0-9]+)? ([0-9]+|"\$[A-Za-z_]+") [^[:space:]"][^[:space:]]*' \
+        | awk '{ print $NF }' | sort -u)
+    printf '%s\n' "$commands" | grep -qx docker \
+        || problem "the search for the commands the scripts run under run_for didn't find docker, so it doesn't work" "$commands"
+    found=
+    while IFS= read -r f; do
+        case $f in
+            '' | bash) ;;
+            /*) [[ $paths == *" $f "* ]] || found+=" $f" ;;
+            *) [[ $needed == *" $f "* ]] || found+=" $f" ;;
+        esac
+    done <<< "$commands"
+    [ -z "$found" ] || problem "bootstrap.sh doesn't check for these commands, which the scripts run under run_for:$found"
     found=$(grep -nE '(^|[|;&({!]|(^|[^A-Za-z0-9_])(then|do|else|while|until|if|elif)[[:space:]])[[:space:]]*(IFS=[^[:space:]]*[[:space:]]+)?read[[:space:]]' \
         /repo/deploy/*.sh | grep -vE ':[0-9]+:[[:space:]]*#' | grep -vE 'read[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-[a-zA-Z]*t')
     [ -z "$found" ] || problem "a read without -t" "$found"
@@ -3529,8 +3960,9 @@ nothing_moved() {   # nothing_moved <what>: a refused bootstrap installed nothin
 }
 
 case_40() {
-    begin 40 "bootstrap.sh refuses with its own message and installs nothing: Compose's dry run failing, hanging or printing lines it doesn't know, none of them called a recreate; a config hash that differs; a database bot.env names that isn't on this server, until it is; /opt/minerbot not 700; a missing command; a systemd that doesn't end a unit at its limit"
-    local bot_before
+    begin 40 "bootstrap.sh refuses with its own message and installs nothing: Compose's dry run failing, hanging or printing lines it doesn't know, none of them called a recreate; a config hash that differs; a database bot.env names that isn't on this server, until it is; /opt/minerbot not 700; a missing command, cPanel's reload script or procps-ng's pgrep and ps; a systemd that doesn't end a unit at its limit, or a systemctl that answers nothing about it, or answers too late"
+    local bot_before f
+    local -a hidden
     bootstrap_commands
     restore today
     bot_before=$(cat /fake/docker/ctr/minerbot-bot)
@@ -3599,6 +4031,20 @@ case_40() {
         "the bootstrap without cPanel's reload script"
     ! run_calls | grep -q '^systemd-run ' || problem "the bootstrap without cPanel's reload script started a unit"
     nothing_moved "the bootstrap without cPanel's reload script"
+    # Without procps-ng's pgrep and ps, which setup's proof of a reload and the nightly check's look at nginx's workers
+    # use: every copy on the PATH is moved aside for this one run. Taking its x bits away isn't enough, since bash's
+    # command -v still names a file that isn't executable when it finds nothing else.
+    restore today
+    mapfile -t hidden < <(type -ap pgrep ps | while IFS= read -r p; do echo "$(readlink -f "${p%/*}")/${p##*/}"; done | sort -u)
+    [ ${#hidden[@]} -ge 2 ] || problem "pgrep and ps aren't both on the PATH to move aside" "${hidden[*]}"
+    for f in "${hidden[@]}"; do mv "$f" "$f.mbtest-away"; done
+    in_home no-procps 60 bash /fake/bootstrap-commands.sh
+    for f in "${hidden[@]}"; do mv "$f.mbtest-away" "$f" || problem "couldn't put $f back, so the cases after this one lack it"; done
+    expect_exit 1 "the bootstrap without pgrep and ps"
+    expect_said "These commands the scripts use are missing: pgrep ps. Install them first. Nothing was changed." \
+        "the bootstrap without pgrep and ps"
+    ! run_calls | grep -q '^systemd-run ' || problem "the bootstrap without pgrep and ps started a unit"
+    nothing_moved "the bootstrap without pgrep and ps"
     restore today
     in_home self-test 120 env FAKE_UNIT_LIMIT=40 bash /fake/bootstrap-commands.sh
     expect_exit 1 "the bootstrap where systemd lets a unit outlive its limit"
@@ -3606,6 +4052,52 @@ case_40() {
         "the bootstrap where systemd lets a unit outlive its limit"
     ! run_calls | grep -q -- '--unit=minerbot-bootstrap ' || problem "the failed self-test still started the move's unit"
     nothing_moved "the bootstrap where systemd lets a unit outlive its limit"
+    # A systemctl that answers nothing about the self-test unit, as one that hits its 10 seconds would, proves nothing.
+    # The stand-in systemctl gets a wrapper for this one run, and the case puts it back however it ends.
+    restore today
+    trap 'if [ -e /usr/local/bin/systemctl.mbtest-40 ]; then mv -f /usr/local/bin/systemctl.mbtest-40 /usr/local/bin/systemctl; fi' EXIT
+    if mv /usr/local/bin/systemctl /usr/local/bin/systemctl.mbtest-40; then
+        cat > /usr/local/bin/systemctl << 'EOF'
+#!/usr/bin/env bash
+if [ "${1:-} ${2:-}" = "is-active minerbot-selftest" ]; then
+    exit 1
+fi
+exec /usr/local/bin/systemctl.mbtest-40 "$@"
+EOF
+        chmod 755 /usr/local/bin/systemctl
+        in_home self-test-silent 120 bash /fake/bootstrap-commands.sh
+        expect_exit 1 "the bootstrap where systemctl answers nothing about the self-test unit"
+        expect_said "systemctl didn't answer in time whether the self-test unit still runs, so the detached runs can't be trusted. Nothing was changed." \
+            "the bootstrap where systemctl answers nothing about the self-test unit"
+        ! run_calls | grep -q -- '--unit=minerbot-bootstrap ' \
+            || problem "the self-test that systemctl answered nothing about still started the move's unit"
+        nothing_moved "the bootstrap where systemctl answers nothing about the self-test unit"
+        # Its first answer comes after run_for's 10 seconds, so it's silent, and the next says the unit is gone: when it
+        # ended is unknown, so that's no proof either, and systemd isn't blamed for it
+        restore today
+        rm -f /run/mbtest-40-slow-once
+        cat > /usr/local/bin/systemctl << 'EOF'
+#!/usr/bin/env bash
+if [ "${1:-} ${2:-}" = "is-active minerbot-selftest" ] && [ ! -e /run/mbtest-40-slow-once ]; then
+    : > /run/mbtest-40-slow-once
+    sleep 15
+fi
+exec /usr/local/bin/systemctl.mbtest-40 "$@"
+EOF
+        in_home self-test-late 120 bash /fake/bootstrap-commands.sh
+        mv -f /usr/local/bin/systemctl.mbtest-40 /usr/local/bin/systemctl
+        rm -f /run/mbtest-40-slow-once
+        expect_exit 1 "the bootstrap where systemctl's first answer about the self-test unit comes too late"
+        expect_said "systemctl didn't answer in time whether the self-test unit still runs, so the detached runs can't be trusted. Nothing was changed." \
+            "the bootstrap where systemctl's first answer about the self-test unit comes too late"
+        ! said "systemd doesn't enforce time limits here" \
+            || problem "the bootstrap blamed systemd when only systemctl's first answer came too late"
+        ! run_calls | grep -q -- '--unit=minerbot-bootstrap ' \
+            || problem "the self-test whose first answer came too late still started the move's unit"
+        nothing_moved "the bootstrap where systemctl's first answer about the self-test unit comes too late"
+    else
+        problem "the test couldn't set the stand-in systemctl aside"
+    fi
     verdict
 }
 
@@ -3692,11 +4184,12 @@ case_42() {
     backup_run edge 60 env FAKE_DF=/srv=1048576 ./backup.sh manual
     expect_exit 0 "the dump with exactly 1 GiB free"
 
-    # The exact dump command: one consistent snapshot without locks, no triggers, routines or events, and no session rows
+    # The exact dump command: one consistent snapshot without locks, no session rows, and no triggers, routines or
+    # events, each left out on the command line, which wins over root's option files, as do the rows, tables and drops
     restore deployed
     backup_run exact 60 ./backup.sh manual
     expect_exit 0 "the working dump"
-    expected="mariadb-dump [timeout -k 10 900] --single-transaction --quick --hex-blob --skip-dump-date --default-character-set=utf8mb4 --skip-triggers --ignore-table-data=minerbot_db.dashboard_sessions minerbot_db"
+    expected="mariadb-dump [timeout -k 10 900] --single-transaction --quick --hex-blob --skip-dump-date --default-character-set=utf8mb4 --skip-triggers --skip-routines --skip-events --skip-no-data --skip-no-create-info --add-drop-table --ignore-table-data=minerbot_db.dashboard_sessions minerbot_db"
     [ "$(run_calls | args_of | grep -E '^mariadb-dump ')" = "$expected" ] \
         || problem "the dump isn't exactly the designed command" "$(run_calls | args_of | grep -E '^mariadb-dump ')"
     restore deployed
@@ -3746,7 +4239,7 @@ case_42() {
 }
 
 case_43() {
-    begin 43 "status.sh, more: the dashboard's socket, with its folder open to others, its folder missing, the socket missing while the dashboard runs, and nothing to say while the dashboard is stopped and its socket rightly gone; an older dump beside newer ones is fine; 35 hours is fine and 37 isn't; nginx -t failing once, as during a reload, isn't reported; Docker not answering is; --mail-test sends with sendmail -t and says when the mail system refuses; the plain look shows the socket"
+    begin 43 "status.sh, more: the dashboard's socket, with its folder open to others whether the dashboard runs or not, its folder missing, a file at the socket's place while the dashboard is stopped, the socket missing while the dashboard runs, and nothing to say while the dashboard is stopped and its socket rightly gone; an older dump beside newer ones is fine; 35 hours is fine and 37 isn't; nginx -t failing once, as during a reload, isn't reported; Docker not answering is; --mail-test sends with sendmail -t and says when the mail system refuses; the plain look shows the socket"
     local f
     # The socket's folder open to every account, while the dashboard runs
     restore deployed
@@ -3765,6 +4258,29 @@ case_43() {
     expect_exit 1 "the nightly check without the socket's folder"
     [ "$(wc -l < "$last")" = 2 ] && said "The dashboard isn't running." && said "The dashboard's socket isn't as nginx needs it:" \
         || problem "the nightly check didn't name the stopped dashboard and the missing folder, and only those" "$(cat "$last")"
+
+    # The folder open to every account while the dashboard is stopped: any account could make dashboard.sock there
+    # before the dashboard starts again, so that's a problem too
+    restore deployed
+    socket_folder
+    chmod 2777 /run/minerbot-dashboard
+    sed -i 's/^\(\S* \)true /\1false /' /fake/docker/ctr/minerbot-dashboard
+    in_home open-stopped 60 ./status.sh --check
+    expect_exit 1 "the nightly check with the socket's folder open to others and the dashboard stopped"
+    [ "$(wc -l < "$last")" = 2 ] && said "The dashboard isn't running." \
+        && said "The dashboard's socket isn't as nginx needs it: its socket's folder /run/minerbot-dashboard is 2777 1654 nobody directory" \
+        || problem "the nightly check with the dashboard stopped didn't name the open socket folder too, and only those two" "$(cat "$last")"
+
+    # A file at the socket's place while the dashboard is stopped is a problem too
+    restore deployed
+    socket_folder
+    sed -i 's/^\(\S* \)true /\1false /' /fake/docker/ctr/minerbot-dashboard
+    install -m 660 -o 1654 -g nobody /dev/null /run/minerbot-dashboard/dashboard.sock
+    in_home file-stopped 60 ./status.sh --check
+    expect_exit 1 "the nightly check with a file at the socket's place and the dashboard stopped"
+    [ "$(wc -l < "$last")" = 2 ] && said "The dashboard isn't running." \
+        && said "/run/minerbot-dashboard/dashboard.sock isn't a socket owned by 1654 and the group nobody: it's a regular empty file" \
+        || problem "the nightly check with the dashboard stopped didn't name the file at the socket's place too, and only those two" "$(cat "$last")"
 
     # The folder as it should be and the dashboard stopped: its socket is rightly gone, so only the stop is a problem
     restore deployed

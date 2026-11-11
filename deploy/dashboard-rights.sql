@@ -2,7 +2,9 @@
 -- MinerBot repository; deploy.sh installs it as /opt/minerbot/dashboard-rights.sql.
 -- deploy.sh applies it as root before every dashboard swap, after the migrations; for a dashboard older than the
 -- installed files, it applies the rights the last apply used instead (the copy below, or this file before any apply
--- kept one), with the GRANT lines of that dashboard's own file they lack. Each apply that passes keeps a copy of what
+-- kept one), with the GRANT lines of that dashboard's own file they lack. Either way it also adds the GRANT lines that
+-- the dashboards a failed swap or rollback.sh can put back (the one that runs, :current and :previous) have in their
+-- own file and the rights lack. Each apply that passes keeps a copy of what
 -- it applied as /opt/minerbot/state/dashboard-rights.applied.sql, which every setup-dashboard.sh run applies again;
 -- setup applies this file only before any apply has kept one. They fill in {{SITE_DB}} and {{BOT_DB}} from
 -- /opt/minerbot/server.conf and {{GRANTEES}} with the login on both its hosts, after a rehearsal on a locked throwaway

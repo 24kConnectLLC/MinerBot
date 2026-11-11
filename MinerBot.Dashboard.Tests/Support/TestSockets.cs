@@ -1,9 +1,13 @@
+using System.ComponentModel;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 
 namespace MinerBot.Dashboard.Tests.Support
 {
-    // Real Unix sockets for the tests of Dashboard:UnixSocket, in a folder of the test's own. A socket's path holds at most
-    // 100 bytes, so the folder is in the system's temporary folder, which is short, rather than under the test output.
+    // Real Unix sockets for the tests of Dashboard:UnixSocket, and links and other files in their place, in a folder of the
+    // test's own. A socket's path holds at most 100 bytes, so the folder is in the system's temporary folder, which is
+    // short, rather than under the test output.
     internal sealed class TestSockets : IDisposable
     {
         public TestSockets() => Folder = Directory.CreateTempSubdirectory("mbsock-").FullName;
@@ -39,6 +43,45 @@ namespace MinerBot.Dashboard.Tests.Support
 
             Assert.True(Path.Exists(path), "The socket left behind isn't there");
             Assert.False(Path.Exists(bound));
+        }
+
+        // A link at the path to the target, or false where the system won't let the test make one: Windows lets only an
+        // administrator, or anyone in developer mode
+        public static bool TryLink(string path, string target)
+        {
+            try
+            {
+                File.CreateSymbolicLink(path, target);
+                return true;
+            }
+            catch (Exception e) when (OperatingSystem.IsWindows() && e is IOException or UnauthorizedAccessException)
+            {
+                return false;
+            }
+        }
+
+        // The tag of an app execution alias, such as the python3.exe Windows keeps in WindowsApps: a reparse point that's
+        // neither a link nor a socket, as a file that's only online or a deduplicated one is too
+        public const uint AppExecutionAliasTag = 0x8000001B;   // IO_REPARSE_TAG_APPEXECLINK
+
+        const uint SetReparsePoint = 0x000900A4;               // FSCTL_SET_REPARSE_POINT
+
+        [DllImport("kernel32", ExactSpelling = true, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        static extern bool DeviceIoControl(SafeFileHandle file, uint code, byte[] input, int inputBytes, nint output, int outputBytes, out int returned, nint overlapped);
+
+        // Makes the file a reparse point with this tag and four bytes of data, on Windows, where it needs no administrator
+        public static void Tag(string path, uint tag)
+        {
+            // The tag, the data's length and a reserved word, then the data
+            var buffer = new byte[12];
+            BitConverter.GetBytes(tag).CopyTo(buffer, 0);
+            BitConverter.GetBytes((ushort)4).CopyTo(buffer, 4);
+
+            using var file = File.OpenHandle(path, FileMode.Open, FileAccess.Write);
+
+            if (!DeviceIoControl(file, SetReparsePoint, buffer, buffer.Length, 0, 0, out _, 0))
+                throw new Win32Exception();
         }
 
         // A socket something listens on, which accepts connections and never answers

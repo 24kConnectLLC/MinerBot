@@ -56,8 +56,9 @@ namespace MinerBot.Dashboard.Hosting
             // settings say, whatever the environment holds.
             kestrel.Configure();
 
-            // An endpoint set in code wins over ASPNETCORE_HTTP_PORTS and ASPNETCORE_URLS, so the aspnet image's 8080 can
-            // never bind every address. nginx talks HTTP/1.1, so there's no reason to offer h2c.
+            // An endpoint set in code wins over ASPNETCORE_HTTP_PORTS and ASPNETCORE_URLS while PreferHostingUrls is off,
+            // which Program.cs makes sure of, so the aspnet image's 8080 can never bind every address. nginx talks
+            // HTTP/1.1, so there's no reason to offer h2c.
             if (unixSocket == null)
             {
                 kestrel.Listen(endpoint, listen => listen.Protocols = HttpProtocols.Http1);
@@ -68,9 +69,10 @@ namespace MinerBot.Dashboard.Hosting
             {
                 listen.Protocols = HttpProtocols.Http1;
 
-                // A connection on the socket has no address. Only nginx's group can open the socket's folder, so it counts as
-                // loopback, as nginx's connections did on TCP: the forwarded headers trust it for one hop, and the rate
-                // limits count each visitor by the address nginx sends.
+                // A connection on the socket has no address. Only processes in the group nobody, nginx's workers among them,
+                // can open the socket's folder, fewer than could reach loopback, so it counts as loopback, as nginx's
+                // connections did on TCP: the forwarded headers trust it for one hop after the proxy key, and the rate limits
+                // count each visitor by the address nginx sends.
                 listen.Use(next => connection =>
                 {
                     connection.RemoteEndPoint = new IPEndPoint(IPAddress.Loopback, 0);

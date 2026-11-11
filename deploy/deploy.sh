@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Builds a commit of MinerBot from GitHub and swaps it in, the dashboard first, then the bot. Before any swap it installs
 # the commit's deploy files, dumps and migrates MinerBot's database when the commit has new migrations, checks the
-# dashboard's settings with its own validator, and applies the dashboard's database rights: for a commit older than the
-# installed deploy files, the rights the last apply used and the GRANTs of its own dashboard-rights.sql that they lack,
-# so both its dashboard and the one it replaces keep what they use. A service that isn't ready after its swap goes back
-# to the exact image it ran, under the compose.yml it was last ready under, and the deploy stops there.
+# dashboard's settings with its own validator, and applies the dashboard's database rights: the installed file, or for a
+# commit older than the installed deploy files, the rights the last apply used and the GRANTs of its own
+# dashboard-rights.sql that they lack; and the GRANTs that the dashboard that runs, :current and :previous have in their
+# own dashboard-rights.sql, so every dashboard the swap or rollback.sh can put back keeps what it uses, unless its commit
+# is unknown here, which the log warns of. A service that isn't ready after its swap goes back to the exact image it ran,
+# under the compose.yml it was last ready under, and the deploy stops there; when Compose doesn't put it back, the
+# deploy says what runs instead and what to do.
 # Usage: ./deploy.sh [branch, tag or commit] [--only bot|dashboard] [--no-start]   (main and both services by default)
 #   --only bot|dashboard  swaps only that one. The dashboard's image is still built when migrations are due: it runs them.
 #   --no-start            stops after the build and the migrations, and swaps nothing.
@@ -183,11 +186,23 @@ build() {   # build bot|dashboard: minerbot-<service>:new from src, on two CPUs,
     echo "Built minerbot-$1:new."
 }
 
-restart_count() {   # restart_count <container>: Docker's restart count for it, 0 when there's no such container
-    local count
-    count=$(run_for 30 docker container inspect -f '{{.RestartCount}}' "$1" 2> /dev/null) || count=0
-    [[ $count =~ ^[0-9]+$ ]] || count=0
-    printf '%s\n' "$count"
+# Docker's restart count for the container, or 0 when there's no such container. Any other failure stops the deploy, as
+# in container_image: a 0 that only meant no answer would make a restart from before look like one during the deploy.
+restart_count() {   # restart_count <container>
+    local out status=0
+    out=$(run_for 30 docker container inspect -f '{{.RestartCount}}' "$1" 2>&1) || status=$?
+    if [ "$status" = 0 ] && [[ $out =~ ^[0-9]+$ ]]; then
+        printf '%s\n' "$out"
+        return 0
+    fi
+    case $out in
+        *"No such container"* | *"No such object"*)
+            echo 0
+            return 0
+            ;;
+    esac
+    printf '%s\n' "$out" >&2
+    die "Docker didn't answer about the container $1 (above). Nothing more was changed."
 }
 
 # The container's last 200 log lines, into logs/failed-<service>-<UTC>.log, which only root can open. Never on the
@@ -224,10 +239,11 @@ put_back_compose() {   # put_back_compose bot|dashboard
 # Swaps a service onto minerbot-<service>:new by image ID. :previous moves only when the image really changes. When
 # Compose fails, or the container doesn't then run the new image, or it isn't ready, the service goes back to the exact
 # image it ran, under the compose.yml it was last ready under (put_back_compose), the tags go back to what they were (the
-# new image is tagged :failed), and the deploy stops. A service that is ready keeps a copy of the compose.yml it's ready
-# under (note_ready).
+# new image is tagged :failed), and the deploy stops. When Compose doesn't put it back, the deploy says what runs: the
+# new image, which rollback.sh then puts back, or nothing. A service that is ready keeps a copy of the compose.yml it's
+# ready under (note_ready).
 swap() {   # swap bot|dashboard
-    local service=$1 image=minerbot-$1 container new before prev public_before='' base up=ok what word
+    local service=$1 image=minerbot-$1 container new before prev public_before='' base up=ok what word runs
     container=$(container_of "$service")
     new=$(image_id "$image:new")
     [ -n "$new" ] || die "There's no $image:new to swap in. Nothing was swapped."
@@ -301,6 +317,13 @@ swap() {   # swap bot|dashboard
         compose 60 stop "$service" || true
         compose 30 rm -f "$service" || true
         untag "$image:current"
+        # Compose's rm -f removes only a stopped container, so a stop that failed leaves it running. The assignment comes
+        # first, so Docker not answering stops the deploy here.
+        runs=$(container_image "$container")
+        if [ -n "$runs" ]; then
+            log_history deploy "$service" "$(revision "$new")" "$word" "not stopped, with no earlier image"
+            die "$what, and there's no earlier image to go back to, but Compose couldn't stop and remove it (above), so it's left on $(revision "$new"). Stop and remove it with: docker compose rm -s -f $service. Its container's last log lines are in ${failed_log#"$home"/}, and the image is tagged $image:failed."
+        fi
         log_history deploy "$service" "$(revision "$new")" "$word" "stopped, with no earlier image"
         die "$what, and there's no earlier image to go back to, so it's stopped and removed. Its container's last log lines are in ${failed_log#"$home"/}, and the image is tagged $image:failed."
     fi
@@ -313,6 +336,18 @@ swap() {   # swap bot|dashboard
     put_back_compose "$service"
     echo "Putting the $service back on $(revision "$before")."
     start_service "$service" || true
+    # When Compose failed, or returned without recreating it, the container doesn't run the image before, and its
+    # readiness would say nothing about that image. It still runs the new one, which rollback.sh takes for a swap cut
+    # off after the tags moved and puts back on :current, or it's gone.
+    runs=$(container_image "$container")
+    if [ "$runs" != "$before" ]; then
+        if [ -n "$runs" ]; then
+            log_history deploy "$service" "$(revision "$new")" "$word" "not put back on $(revision "$before"), left on $(revision "$runs")"
+            die "$what, and Compose didn't put it back on $(revision "$before") (above), so it's left on $(revision "$runs"), while $image:current names $(revision "$before").$compose_note Run ./rollback.sh $service once Docker answers: it finishes the swap back. Its container's last log lines are in ${failed_log#"$home"/}, and $(revision "$new") is tagged $image:failed."
+        fi
+        log_history deploy "$service" "$(revision "$new")" "$word" "not put back on $(revision "$before"), not running"
+        die "$what, and Compose didn't put it back on $(revision "$before") (above), and its container is gone, so it doesn't run.$compose_note Start it on $(revision "$before"), which $image:current names, with: docker compose up -d --no-build --no-deps $service. Its container's last log lines are in ${failed_log#"$home"/}, and $(revision "$new") is tagged $image:failed."
+    fi
     base=$(restart_count "$container")
     if ready_service "$service" "" "$base" "$before"; then
         note_ready "$service"
@@ -350,46 +385,117 @@ rights_statements() {
         END { if (statement != "") print statement }'
 }
 
-# The rights for the dashboard of a commit older than the installed deploy files, which install_deploy_files kept. A
-# pull request after that commit may have removed a right its dashboard still uses, as the rule for removing one allows,
-# so the installed dashboard-rights.sql isn't enough for it. It gets the rights the last apply used, which the dashboard
-# that runs now has (state/dashboard-rights.applied.sql, or the installed file before any apply kept a copy), and every
-# GRANT statement of its own dashboard-rights.sql they lack: so the older dashboard and the one it replaces, which
-# becomes :previous, both keep what they use. apply_rights keeps that as the copy setup applies, and the next deploy of
-# a dashboard as new as the installed files applies the installed file alone again. Sets rights_file, the file to apply.
-older_rights() {
-    local installed='' base what own missing
+# The full commit a dashboard image was built from, by its revision label, or nothing when there's no such image or it
+# has no such label. Docker not answering stops the deploy, before any right is applied.
+image_commit() {   # image_commit <image or ID>
+    local out status=0 label=''
+    out=$(run_for 30 docker image inspect \
+        -f '{{.Id}} {{with index .Config "Labels"}}{{with index . "org.opencontainers.image.revision"}}{{.}}{{end}}{{end}}' \
+        "$1" 2>&1) || status=$?
+    if [ "$status" != 0 ]; then
+        case $out in
+            *"No such image"* | *"No such object"*) return 0 ;;
+        esac
+        printf '%s\n' "$out" >&2
+        die "Docker didn't answer about the image $1 (above). Nothing was swapped."
+    fi
+    read -r -t 5 _ label <<< "$out" || true
+    if [[ $label =~ ^[0-9a-f]{40}$ ]]; then
+        printf '%s\n' "$label"
+    fi
+}
+
+# Adds GRANT statements to the rights being built. The first time, rights_file is copied into a folder of its own in
+# state/tmp as dashboard-rights.with-<12>.sql, which rights_file then names; each later time, the name gets one more
+# <12>.
+add_grants() {   # add_grants <12 characters of the commit> <statements> <the end of the comment line>
+    local next
+    if [ -z "${rights_dir:-}" ]; then
+        install -d -m 700 "$home/state" "$home/state/tmp"
+        rights_dir=$(mktemp -d "$home/state/tmp/deploy.rights.XXXXXX")
+        next=$rights_dir/dashboard-rights.with-$1.sql
+        cp "$rights_file" "$next"
+    else
+        next=${rights_file%.sql}-$1.sql
+        mv -f "$rights_file" "$next"
+    fi
+    {
+        printf '\n%s\n' "-- Added by deploy.sh: the GRANT statements of $1's own dashboard-rights.sql that the rights above lack$3"
+        printf '%s\n' "$2"
+    } >> "$next"
+    rights_file=$next
+}
+
+# The rights the dashboard's swap applies. Sets rights_file, the file to apply: the installed dashboard-rights.sql, with
+# these GRANT statements added, each named in the log, so every dashboard image the swap or rollback.sh can run before
+# the next apply keeps what it uses. The exceptions: an image whose commit src lacks, which the log warns of, and one
+# without a commit label, which no image deploy.sh builds is.
+# - For a dashboard older than the installed deploy files, which install_deploy_files kept, a pull request after its
+#   commit may have removed a right it still uses, as the rule for removing one allows. Its base is the rights the last
+#   apply used, which the dashboard that runs now has (state/dashboard-rights.applied.sql, or the installed file before
+#   any apply kept a copy), and it gets every GRANT statement of its own dashboard-rights.sql they lack.
+# - The dashboard that runs now, which a failed swap goes back to and which becomes :previous after one that works, and
+#   :current and :previous, where rollback.sh goes, keep every GRANT statement of their own dashboard-rights.sql that
+#   the rights lack. So a right a pull request removed goes only once no such dashboard has it in its own file, a deploy
+#   or two after that pull request's.
+# apply_rights keeps the result as the copy setup applies.
+swap_rights() {
+    local installed='' base what own missing lack c ran current previous seen='' status
     rights_file=$home/dashboard-rights.sql
+    lack="the installed dashboard-rights.sql lacks"
     if [ -f "$home/state/deploy-files.commit" ]; then
         IFS= read -r -t 5 installed < "$home/state/deploy-files.commit" || true
     fi
-    if [ -z "$installed" ] || [ "$installed" = "$commit" ]; then
-        return 0
+    if [ -n "$installed" ] && [ "$installed" != "$commit" ]; then
+        base=$home/state/dashboard-rights.applied.sql
+        what="the rights the last apply used, from state/dashboard-rights.applied.sql"
+        if [ ! -f "$base" ]; then
+            base=$home/dashboard-rights.sql
+            what="the installed dashboard-rights.sql, since no apply has kept a copy yet"
+        fi
+        rights_file=$base
+        own=$(run_for 30 git -C "$home/src" show "$commit:deploy/dashboard-rights.sql") \
+            || die "git couldn't read the dashboard-rights.sql of $tag12 (above). Nothing was swapped."
+        missing=$(rights_statements <<< "$own" | grep -E '^GRANT ' | grep -vxF -f <(rights_statements < "$base")) \
+            || missing=
+        if [ -z "$missing" ]; then
+            echo "The deploy files stay those of ${installed:0:12} (above), so the dashboard of $tag12 gets $what. Its own dashboard-rights.sql gives no right they lack."
+        else
+            add_grants "$tag12" "$missing" ""
+            echo "The deploy files stay those of ${installed:0:12} (above), so the dashboard of $tag12 gets $what, and these GRANT statements of its own dashboard-rights.sql, which they lack and its code may still use:"
+            printf '%s\n' "$missing" | sed 's/^/  /'
+        fi
+        lack="the rights above lack"
     fi
-    base=$home/state/dashboard-rights.applied.sql
-    what="the rights the last apply used, from state/dashboard-rights.applied.sql"
-    if [ ! -f "$base" ]; then
-        base=$home/dashboard-rights.sql
-        what="the installed dashboard-rights.sql, since no apply has kept a copy yet"
+    current=$(image_commit minerbot-dashboard:current)
+    previous=$(image_commit minerbot-dashboard:previous)
+    ran=$(container_image "$dashboard_container")
+    if [ -n "$ran" ]; then
+        ran=$(image_commit "$ran")
     fi
-    rights_file=$base
-    own=$(run_for 30 git -C "$home/src" show "$commit:deploy/dashboard-rights.sql") \
-        || die "git couldn't read the dashboard-rights.sql of $tag12 (above). Nothing was swapped."
-    missing=$(rights_statements <<< "$own" | grep -E '^GRANT ' | grep -vxF -f <(rights_statements < "$base")) || missing=
-    if [ -z "$missing" ]; then
-        echo "The deploy files stay those of ${installed:0:12} (above), so the dashboard of $tag12 gets $what. Its own dashboard-rights.sql gives no right they lack."
-        return 0
-    fi
-    install -d -m 700 "$home/state" "$home/state/tmp"
-    rights_dir=$(mktemp -d "$home/state/tmp/deploy.rights.XXXXXX")
-    rights_file=$rights_dir/dashboard-rights.with-$tag12.sql
-    {
-        cat "$base"
-        printf '\n%s\n' "-- Added by deploy.sh: the GRANT statements of $tag12's own dashboard-rights.sql that the rights above lack"
-        printf '%s\n' "$missing"
-    } > "$rights_file"
-    echo "The deploy files stay those of ${installed:0:12} (above), so the dashboard of $tag12 gets $what, and these GRANT statements of its own dashboard-rights.sql, which they lack and its code may still use:"
-    sed 's/^/  /' <<< "$missing"
+    for c in "$ran" "$current" "$previous"; do
+        if [ -z "$c" ] || [ "$c" = "$commit" ] || [[ $seen == *" $c"* ]]; then
+            continue
+        fi
+        seen+=" $c"
+        status=0
+        run_for 10 git -C "$home/src" rev-parse --verify --quiet "$c^{commit}" > /dev/null || status=$?
+        if [ "$status" = 1 ]; then
+            echo "Warning: src doesn't have ${c:0:12}, which a dashboard image here was built from, so its dashboard-rights.sql can't be read. If a failed swap or ./rollback.sh dashboard puts that dashboard back, it may lack a right its code uses."
+            continue
+        elif [ "$status" != 0 ]; then
+            die "git couldn't tell whether src has ${c:0:12}, which a dashboard image here was built from (above). Nothing was swapped."
+        fi
+        own=$(run_for 30 git -C "$home/src" show "$c:deploy/dashboard-rights.sql") \
+            || die "git couldn't read the dashboard-rights.sql of ${c:0:12} (above). Nothing was swapped."
+        missing=$(rights_statements <<< "$own" | grep -E '^GRANT ' \
+            | grep -vxF -f <(rights_statements < "$rights_file")) || missing=
+        [ -n "$missing" ] || continue
+        add_grants "${c:0:12}" "$missing" ", for its dashboard, which a failed swap or rollback.sh can put back"
+        echo "The dashboard of ${c:0:12}, which a failed swap or ./rollback.sh dashboard can put back, keeps these GRANT statements of its own dashboard-rights.sql, which $lack:"
+        printf '%s\n' "$missing" | sed 's/^/  /'
+        lack="the rights above lack"
+    done
 }
 
 detached_part() {
@@ -478,7 +584,7 @@ detached_part() {
             || die "MariaDB didn't answer (above). Nothing was swapped."
         [ "$hosts" = 2 ] \
             || die "The dashboard's database login doesn't exist yet. Run ./setup-dashboard.sh, which creates it, then deploy again. Nothing was swapped."
-        older_rights
+        swap_rights
         apply_rights "$rights_file" || die "The dashboard's database rights didn't apply (above). Nothing was swapped."
 
         step="swapping the dashboard"

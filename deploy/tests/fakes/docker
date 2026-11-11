@@ -412,11 +412,21 @@ compose() {
             case $file in
                 */state/tmp/bootstrap.*) echo "bot ${FAKE_HASH_NEW:-478d8a5f0c1d2e3b}" ;;
                 */old/*) echo "bot 478d8a5f0c1d2e3b" ;;
-                *) hash=$(section_hash "$file" bot) && [ -n "$hash" ] && echo "bot $hash" || fail "no such service: bot" ;;
+                *)
+                    if hash=$(section_hash "$file" bot) && [ -n "$hash" ]; then
+                        echo "bot $hash"
+                    else
+                        fail "no such service: bot"
+                    fi
+                    ;;
             esac
             ;;
         "config --hash dashboard")
-            hash=$(section_hash "$file" dashboard) && [ -n "$hash" ] && echo "dashboard $hash" || fail "no such service: dashboard"
+            if hash=$(section_hash "$file" dashboard) && [ -n "$hash" ]; then
+                echo "dashboard $hash"
+            else
+                fail "no such service: dashboard"
+            fi
             ;;
         "up --dry-run -d --no-build --no-deps bot")
             dry_run "$file" >&2

@@ -140,7 +140,7 @@ show_images() {   # show_images bot|dashboard
 }
 
 show() {
-    local service newest hours ends days out n avail commit user group old why answer
+    local service newest hours ends days out n avail commit user group old why answer key_ok
     echo "MinerBot on this server, $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo
     echo "Containers"
@@ -208,7 +208,8 @@ show() {
         if [ -z "$why" ]; then
             why=$(nginx_load_problem) || why=
         fi
-        echo "Proxy key: ${why:-nginx's proxy-key.conf holds the dashboard's key}"
+        key_ok="nginx's proxy-key.conf holds the dashboard's key"
+        echo "Proxy key: ${why:-$key_ok}"
     fi
     if [ -f "$home/dashboard.env" ]; then
         answer=$(public_answer) || answer=000
@@ -295,13 +296,16 @@ check() {
             problems+=("The dashboard is unhealthy. Its log: docker logs --tail 50 $dashboard_container")
         fi
         # nginx sends the visitors to the dashboard's socket, which socket_problem checks as the deploy's readiness check
-        # does. While the dashboard doesn't run, its socket is rightly gone, so then only a missing folder, or something
-        # at the socket's place, is a problem.
-        if [ "$running" = true ] || [ -e "$dashboard_socket" ] || [ -L "$dashboard_socket" ] || [ ! -d "$socket_dir" ]; then
-            why=$(socket_problem)
-            if [ -n "$why" ]; then
-                problems+=("The dashboard's socket isn't as nginx needs it: $why. Its log: docker logs --tail 50 $dashboard_container")
-            fi
+        # does: its folder first, then the socket. While the dashboard doesn't run, its socket is rightly gone, so then
+        # only a missing socket is expected, or one the dashboard left behind, which passes and which its next start
+        # replaces. Anything else at the socket's place is still a problem, and so is a missing or wrong folder, which
+        # can keep the dashboard from starting or let another account make the socket first.
+        why=$(socket_problem)
+        if [ "$running" != true ] && [ "$why" = "its socket $dashboard_socket isn't there" ]; then
+            why=
+        fi
+        if [ -n "$why" ]; then
+            problems+=("The dashboard's socket isn't as nginx needs it: $why. Its log: docker logs --tail 50 $dashboard_container")
         fi
         # The proxy key nginx sends: its file, then whether nginx has loaded it. Only a file that holds the dashboard's key
         # is worth a reload, and while an nginx change is cut off, the undo in setup-dashboard.sh is the way instead.

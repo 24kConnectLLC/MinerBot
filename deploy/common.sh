@@ -34,9 +34,9 @@ pipelog_hook=/etc/nginx/ea-nginx/config-scripts/global/minerbot-pipelog
 backups=/srv/backups/minerbot
 # The dashboard listens only on this socket, never on a TCP port, so no other account on the server can take its place.
 # Its folder is 2750, owned by 1654 (the dashboard) and the group nobody (nginx's workers): only the dashboard can make
-# a file there, and only nginx's group can reach it. /run is emptied at every boot, so systemd-tmpfiles makes the folder
-# again from tmpfiles_conf, which comes from deploy/minerbot-dashboard.tmpfiles. compose.yml and nginx's file name the
-# same paths.
+# a file there, and only processes in the group nobody, nginx's workers and cPanel's Apache among them, can reach it.
+# /run is emptied at every boot, so systemd-tmpfiles makes the folder again from tmpfiles_conf, which comes from
+# deploy/minerbot-dashboard.tmpfiles. compose.yml and nginx's file name the same paths.
 socket_dir=/run/minerbot-dashboard
 dashboard_socket=$socket_dir/dashboard.sock
 tmpfiles_conf=/etc/tmpfiles.d/minerbot-dashboard.conf
@@ -174,27 +174,28 @@ lock_holder() {   # who holds the lock, from lock.info
 # ---- server.conf
 
 # This server's own names, from /opt/minerbot/server.conf, taken line by line as text and never run. Sets SITE_DB, BOT_DB
-# and BOT_READY_PATTERN, and checks that both databases exist.
+# and BOT_READY_PATTERN, and checks that both databases exist. Its messages end with $unchanged when it's set:
+# setup-dashboard.sh sets it once its unit has undone a cut-off nginx change.
 load_server_conf() {
     local count status=0
     [ -f "$home/server.conf" ] \
-        || die "$home/server.conf is missing. bootstrap.sh writes it; server.conf.example in the repository shows its lines. Nothing was changed."
+        || die "$home/server.conf is missing. bootstrap.sh writes it; server.conf.example in the repository shows its lines. ${unchanged:-Nothing was changed.}"
     SITE_DB=$(conf_value SITE_DB)
     BOT_DB=$(conf_value BOT_DB)
     BOT_READY_PATTERN=$(conf_value BOT_READY_PATTERN)
     BOT_READY_PATTERN=${BOT_READY_PATTERN:-Gateway +Ready}
     [[ $SITE_DB =~ ^[A-Za-z0-9_]{1,64}$ ]] \
-        || die "SITE_DB in $home/server.conf must be the website's database name: 1 to 64 letters, digits and _. Nothing was changed."
+        || die "SITE_DB in $home/server.conf must be the website's database name: 1 to 64 letters, digits and _. ${unchanged:-Nothing was changed.}"
     [[ $BOT_DB =~ ^[A-Za-z0-9_]{1,64}$ ]] \
-        || die "BOT_DB in $home/server.conf must be MinerBot's own database name: 1 to 64 letters, digits and _. Nothing was changed."
+        || die "BOT_DB in $home/server.conf must be MinerBot's own database name: 1 to 64 letters, digits and _. ${unchanged:-Nothing was changed.}"
     grep -qE -- "$BOT_READY_PATTERN" /dev/null || status=$?
     if [ "$status" != 1 ] || [ ${#BOT_READY_PATTERN} -gt 200 ]; then
-        die "BOT_READY_PATTERN in $home/server.conf must be a pattern grep -E accepts, at most 200 characters. Nothing was changed."
+        die "BOT_READY_PATTERN in $home/server.conf must be a pattern grep -E accepts, at most 200 characters. ${unchanged:-Nothing was changed.}"
     fi
     count=$(run_for 30 mariadb -N -e "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name IN ('$SITE_DB', '$BOT_DB')") \
-        || die "MariaDB didn't answer as root within 30 seconds (above). Nothing was changed."
+        || die "MariaDB didn't answer as root within 30 seconds (above). ${unchanged:-Nothing was changed.}"
     [ "$count" = 2 ] \
-        || die "SITE_DB and BOT_DB in $home/server.conf must name two databases that exist on this server. Check both names. Nothing was changed."
+        || die "SITE_DB and BOT_DB in $home/server.conf must name two databases that exist on this server. Check both names. ${unchanged:-Nothing was changed.}"
 }
 
 conf_value() {   # conf_value <name>: the value of NAME= in server.conf (the last such line), or nothing
@@ -302,19 +303,27 @@ run_detached() {   # run_detached <action> <limit seconds> <script> <arguments..
     follow "minerbot-$action" "$log" "$((limit + 60))"
 }
 
-unit_running() {   # unit_running <unit>: true while it runs, and while systemd is still stopping it
-    case $(run_for 10 systemctl is-active "$1" 2> /dev/null) in
+# Whether a unit runs, by systemctl is-active within 10 seconds: 0 while it runs, and while systemd is still stopping
+# it; 1 once systemd says it doesn't; 2 when systemctl gave no answer, as when it hits its limit under heavy load, which
+# says nothing either way. A caller that only asks whether it runs takes 2 as no.
+unit_running() {   # unit_running <unit>
+    local state
+    state=$(run_for 10 systemctl is-active "$1" 2> /dev/null) || true
+    case $state in
         active | activating | deactivating | reloading | refreshing) return 0 ;;
-        *) return 1 ;;
+        '') return 2 ;;
     esac
+    return 1
 }
 
 # Shows the run's log as it grows until the unit ends, then returns 0 when its last RESULT line is "RESULT ok". Ctrl-C
-# stops only the following: the run goes on. It looks every 2 seconds, or every 0.2 with MINERBOT_TEST_FAST=1. Where
-# tail can't be told about changes (no inotify, as on overlayfs), it reads the log every half second, or tenth with
-# MINERBOT_TEST_FAST=1, and gets a second, or 0.3, after the unit ends to show the last lines.
+# stops only the following: the run goes on. It looks every 2 seconds, or every 0.2 with MINERBOT_TEST_FAST=1. Before
+# the limit, only systemd's answer that the unit doesn't run ends the wait, or the run's RESULT line while systemctl
+# gives no answer: a systemctl that answered nothing says nothing about the run. Where tail can't be told about changes
+# (no inotify, as on overlayfs), it reads the log every half second, or tenth with MINERBOT_TEST_FAST=1, and gets a
+# second, or 0.3, after the unit ends to show the last lines.
 follow() {   # follow <unit> <log> <limit seconds>
-    local unit=$1 log=$2 limit=$3 started=$SECONDS result poll=2 tail_poll=0.5 settle=1
+    local unit=$1 log=$2 limit=$3 started=$SECONDS result poll=2 tail_poll=0.5 settle=1 state=0
     if test_fast; then
         poll=0.2 tail_poll=0.1 settle=0.3
     fi
@@ -322,7 +331,12 @@ follow() {   # follow <unit> <log> <limit seconds>
     follow_tail=$!
     follow_note="The ${unit#minerbot-} goes on. Follow it again with: tail -f $log"
     trap 'follow_interrupted' INT TERM HUP
-    while unit_running "$unit" && [ $((SECONDS - started)) -lt "$limit" ]; do
+    while [ $((SECONDS - started)) -lt "$limit" ]; do
+        state=0
+        unit_running "$unit" || state=$?
+        if [ "$state" = 1 ] || { [ "$state" = 2 ] && grep -qE '^RESULT (ok|failed)$' "$log"; }; then
+            break
+        fi
         sleep "$poll"
     done
     sleep "$settle"
@@ -334,11 +348,16 @@ follow() {   # follow <unit> <log> <limit seconds>
         "RESULT ok") return 0 ;;
         "RESULT failed") return 1 ;;
     esac
-    if unit_running "$unit"; then
-        echo "It still runs after $limit seconds, longer than its own limit. Look at it with: systemctl status $unit"
-    else
-        echo "It ended without a result: it was stopped at its time limit, or the server restarted. See the log: $log"
+    # No result: systemd said the unit doesn't run, or the limit passed
+    if [ "$state" != 1 ]; then
+        state=0
+        unit_running "$unit" || state=$?
     fi
+    case $state in
+        0) echo "It still runs after $limit seconds, longer than its own limit. Look at it with: systemctl status $unit" ;;
+        2) echo "It has no result after $limit seconds, longer than its own limit, and systemctl doesn't answer whether it still runs. Look at it with: systemctl status $unit" ;;
+        *) echo "It ended without a result: it was stopped at its time limit, or the server restarted. See the log: $log" ;;
+    esac
     return 1
 }
 
@@ -437,7 +456,9 @@ tag_id() {   # tag_id <image ID> <name:tag>
 }
 
 untag() {   # untag <name:tag>: takes the tag away; the image stays while another tag or a container uses it
-    [ -n "$(image_id "$1")" ] || return 0
+    local id
+    id=$(image_id "$1")
+    [ -n "$id" ] || return 0
     run_for 30 docker rmi "$1" > /dev/null || die "Couldn't take the tag $1 away (above)."
 }
 
@@ -1169,7 +1190,8 @@ nginx_backup() {   # nginx_backup <name>...
 # didn't exist before. Files the backup doesn't name are left alone. When the backup names the conf.d file, that file
 # goes out first and comes back last, so a run cut off in between never leaves nginx a live conf.d file beside a
 # certificate and key that don't belong together, which would fail nginx -t, and every reload and start, for every site.
-# pipelog.conf then follows cPanel's setting, which may have changed since the backup, as cPanel's hook would make it.
+# pipelog.conf follows cPanel's setting, which may have changed since the backup, as cPanel's hook would make it, before
+# the conf.d file comes back: a "pipelog off;" while cPanel doesn't load its module would fail nginx -t the same way.
 nginx_restore() {   # nginx_restore <backup folder>
     local dir=$1 name target tmp
     if [ -f "$dir/minerbot-dashboard.conf" ] || grep -qxF minerbot-dashboard.conf "$dir/missing" 2> /dev/null; then
@@ -1188,10 +1210,10 @@ nginx_restore() {   # nginx_restore <backup folder>
         elif grep -qxF -- "$name" "$dir/missing" 2> /dev/null; then
             rm -f "$target"
         fi
+        if [ "$name" = pipelog.conf ] && [ -f "$target" ]; then
+            nginx_pipelog_conf "$target"
+        fi
     done
-    if [ -f "$nginx_secrets/pipelog.conf" ]; then
-        nginx_pipelog_conf "$nginx_secrets/pipelog.conf"
-    fi
 }
 
 # Changes nginx's files for the dashboard, as deploy/README.md describes. With the four files it's given, it installs
@@ -1345,9 +1367,9 @@ nginx_smoke_check() {   # sets nginx_result to reloaded or problem
 }
 
 # Undoes an nginx change that was cut off, from its backup, byte for byte, then tests and reloads. With --no-reload it
-# only puts the files back, for --remove-nginx, which tests itself. Sets nginx_result to none (there was no marker),
-# undone, or failed (with the reason above). The cut-off run's staging folder goes, and so does any copy a cut-off
-# restore left beside its target, which may hold the old key.
+# only puts the files back, for --remove-nginx, which tests itself. Sets nginx_result to none (there was no marker, or
+# its change was cut off before it changed any file), undone, or failed (with the reason above). The cut-off run's
+# staging folder goes, and so does any copy a cut-off restore left beside its target, which may hold the old key.
 nginx_undo_cut_off() {   # nginx_undo_cut_off [--no-reload]
     local dir='' reload=0
     nginx_result=none
@@ -1359,7 +1381,6 @@ nginx_undo_cut_off() {   # nginx_undo_cut_off [--no-reload]
     if [[ $dir != "$home/state/nginx-backup/"* ]] || [ ! -f "$dir/complete" ]; then
         rm -f "$home/state/nginx-change"
         echo "An nginx change was cut off before it changed any file, so there was nothing to undo."
-        nginx_result=undone
         return 0
     fi
     trap '' INT TERM HUP
@@ -1404,7 +1425,11 @@ nginx_remove() {
     local reload=0
     nginx_undo_cut_off --no-reload
     if [ ! -e "$nginx_conf" ]; then
-        echo "MinerBot's file isn't in nginx. Nothing was changed."
+        if [ "$nginx_result" = undone ]; then
+            echo "MinerBot's file isn't in nginx once the cut-off change is undone (above), so nothing else was changed."
+        else
+            echo "MinerBot's file isn't in nginx. Nothing was changed."
+        fi
         nginx_result=absent
         return 0
     fi
@@ -1428,7 +1453,7 @@ nginx_remove() {
         else
             echo "MinerBot's file is out of nginx, and nginx -t passes without it, but nginx didn't take cPanel's reload (above), so it still runs the file. The first reload nginx takes loads the configuration without it. Its copy: ${nginx_backup_dir#"$home"/}/"
         fi
-        nginx_result=reload-failed
+        nginx_result='reload-failed'
         return 0
     fi
     rm -f "$home/state/nginx-change"
@@ -1450,11 +1475,22 @@ main_context() {   # main_context [<nginx.conf>, /etc/nginx/nginx.conf by defaul
         { line = $0; sub(/#.*/, "", line); depth += gsub(/\{/, "{", line) - gsub(/\}/, "}", line) }' "$conf"
 }
 
+# True when anyone may enter every folder above the file, its links followed: a world-readable file in a folder only
+# root can enter is root's alone
+world_reachable() {   # world_reachable <file>
+    local dir
+    dir=$(readlink -f -- "$1") && [ -n "$dir" ] || return 1
+    while [ -n "$dir" ]; do
+        dir=${dir%/*}
+        [ -n "$(find "${dir:-/}" -maxdepth 0 -type d -perm -o=x 2> /dev/null)" ] || return 1
+    done
+}
+
 # The http-level look: every line of nginx's whole configuration outside server and types blocks, with its file. It never
 # prints a secret: nginx -T runs as root and prints every included file, so it prints only the files nginx -T names that
-# anyone may read, by their whole path, spaces included; whatever it can't match to such a file, it leaves out. It also
-# skips the folder /etc/nginx/minerbot whatever the modes there, and any line naming X-MinerBot-Proxy-Key or
-# cPanel-localhost, whatever the letter case.
+# anyone may read, world-readable in folders anyone may enter, by their whole path, spaces included; whatever it can't
+# match to such a file, it leaves out. It also skips the folder /etc/nginx/minerbot whatever the modes there, and any
+# line naming X-MinerBot-Proxy-Key or cPanel-localhost, whatever the letter case.
 nginx_look() {
     local conf public='' file
     conf=$(run_for 30 nginx -T 2> /dev/null) || {
@@ -1462,7 +1498,7 @@ nginx_look() {
         return 1
     }
     while IFS= read -r -t 5 file; do
-        if [ -n "$(find -L "$file" -maxdepth 0 -type f -perm -o=r 2> /dev/null)" ]; then
+        if [ -n "$(find -L "$file" -maxdepth 0 -type f -perm -o=r 2> /dev/null)" ] && world_reachable "$file"; then
             public+=$file$'\n'
         fi
     done < <(printf '%s\n' "$conf" | sed -n 's/^# configuration file \(.*\):$/\1/p')

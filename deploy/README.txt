@@ -103,7 +103,8 @@ When a setting changes
       Edit it, with values by the safe-character rule above, then the same recreate.
   The database rights
       A pull request changes deploy/dashboard-rights.sql, and the next dashboard deploy applies it. Setup applies again
-      only the rights the last apply used, never a newer file.
+      only the rights the last apply used, never a newer file. A right a pull request removed stays while a dashboard
+      that a failed swap or ./rollback.sh can put back still has it in its own file, a deploy or two longer.
   The database names
       /opt/minerbot/server.conf, and the same names in bot.env's two connection strings. Then, before any dashboard
       deploy, which would move the rights first: ./setup-dashboard.sh --no-questions, which rewrites dashboard.env's
@@ -121,6 +122,10 @@ A deploy failed.
   image, the new one is tagged :failed, and its last log lines are in logs/failed-<service>-<UTC>.log. If compose.yml
   had changed that service's settings, the compose.yml it was last ready under is back in place too, until the next
   deploy installs the new one again. Fix the cause and deploy again.
+  If it says Compose didn't put the service back, so it's left on the new image while its current tag names the one
+  before: run ./rollback.sh <service> once Docker answers, which finishes the swap back. If it says its container is
+  gone instead: docker compose up -d --no-build --no-deps <service>, which starts it on its current tag. Not
+  ./rollback.sh then: with no container, it goes back to the previous image instead.
 
 A deploy refuses the commit.
   "... isn't one of main's own commits": deploy.sh deploys only commits main itself pointed at, never a branch or a
@@ -230,15 +235,17 @@ make one.
        gzip -dc <file> | sed -n '/^INSERT INTO `schema_version`/,/;$/p'
        mariadb <BOT_DB from server.conf> -e 'SELECT version, name FROM schema_version'
   5. Restore it as the bot's own database login, never as root. Its user and password go from bot.env into a file only
-     root can read, the restore runs only when that file has both, and the file goes after:
+     root can read, the restore runs only when that file has both, and the file goes after. bot.env is read as Compose
+     and the scripts read it, by env_value in common.sh: the last line wins, and one pair of quotes around the value
+     goes.
        f=$(mktemp /opt/minerbot/state/tmp/restore.XXXXXX)
-       { echo '[client]'; sed -n 's/^ConnectionStrings__BotConnection=//p' bot.env | tail -n 1 | tr ';' '\n' \
-           | sed -n -e 's/^ *\(uid\|user id\|user\)=/user=/Ip' \
+       { echo '[client]'; bash -c 'source ./common.sh && env_value bot.env ConnectionStrings__BotConnection' \
+           | tr ';' '\n' | sed -n -e 's/^ *\(uid\|user id\|user\)=/user=/Ip' \
                -e 's/^ *\(pwd\|password\)=\(.*\)$/password="\2"/Ip'; } > "$f"
        if [ "$(grep -c -e '^user=' -e '^password=' "$f")" = 2 ]; then
            gzip -dc <file> | mariadb --defaults-file="$f" --default-character-set=utf8mb4 <BOT_DB from server.conf>
        else
-           echo "bot.env's ConnectionStrings__BotConnection has no Uid= or Pwd= part, so nothing was restored."
+           echo "bot.env's ConnectionStrings__BotConnection gave no Uid= or Pwd= part, so nothing was restored."
        fi
        rm -f "$f"
      This replaces each table in the dump. Sessions come back empty, so everyone signs in again, which is intended.

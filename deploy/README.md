@@ -31,7 +31,7 @@ The server's layout, all of it root's but the socket's folder:
                                    service was last ready under), nginx-change (while an nginx change runs, or after
                                    one was cut off), nginx-backup/<UTC>/ (newest 3), nginx-check/,
                                    tmp/ (what a run works with while it runs: setup's answers, the staged deploy files,
-                                   the rights file for an older dashboard, and so on)
+                                   the rights file a dashboard swap applies with GRANTs added, and so on)
   logs/                       700: <UTC>-<action>.log (newest 60), failed-<service>-<UTC>.log, history.log
   old/                        700: the files from before the move, kept as they were
 /etc/cron.d/minerbot          644
@@ -89,14 +89,14 @@ what happened, what state it left and what to do.
 | Command | What it does | Runs as | Limit |
 |---|---|---|---|
 | `./deploy.sh [ref] [--only bot\|dashboard] [--no-start]` | Builds a commit main itself pointed at (main's tip by default) and swaps it in, the dashboard first. Installs the deploy files, dumps and migrates when migrations are due, checks the dashboard's settings with its own validator, rehearses, applies and compares its database rights, then swaps by image ID. A swap that fails puts the service back on the exact image it ran. `--only` swaps one service; `--no-start` stops after the build and the migrations. | `minerbot-deploy` | 90 min |
-| `./rollback.sh bot\|dashboard` | Swaps a service between the image it runs and `:previous`, by image ID. Running it again goes forward again. When the service's container has another image than `:current`, a swap was cut off after it moved the tags: then it finishes that swap on `:current` first, and moves no tag. Never touches the database, the rights, nginx or the other service. | `minerbot-rollback` | 15 min |
+| `./rollback.sh bot\|dashboard` | Swaps a service between the image it runs and `:previous`, by image ID. Running it again goes forward again. When the service's container has another image than `:current`, a swap was cut off after it moved the tags, or Compose didn't put a failed swap back: then it finishes that swap on `:current` first, and moves no tag. Never touches the database, the rights, nginx or the other service. | `minerbot-rollback` | 15 min |
 | `./setup-dashboard.sh` | Asks for what only the owner has (the Origin certificate and key, neither shown as it's pasted, the Discord client ID and secret, the owners and admins, Cloudflare Access's team and AUD), then changes only what differs. Enter keeps a value, `keep` keeps a paste. | `minerbot-setup` | 30 min |
 | `./setup-dashboard.sh --no-questions [--yes]` | Keeps every value. Installs a changed nginx file once the dashboard of its commit runs, applies again the rights the last apply used, starts the dashboard when its container is stopped, recreates it when it runs on older settings than `dashboard.env` holds (after a recreate that failed), and repairs whatever differs. It asks "Go ahead?" unless `--yes`; without a terminal and without `--yes` it changes nothing. | `minerbot-setup` | 30 min |
 | `--rotate-proxy-key`, `--rotate-db-password` | Makes a new proxy key or database password; goes with either form above. | | |
 | `./setup-dashboard.sh --remove-nginx [--yes]` | The emergency path when `nginx -t` fails and names MinerBot's file: undoes a cut-off change first, takes the file out of nginx, keeping a copy, tests and reloads. Works while `nginx -t` fails. Nothing else: `/etc/nginx/minerbot`, with `pipelog.conf`, and cPanel's hook stay. | `minerbot-setup` | 30 min |
 | `./fill-secrets.sh` | Asks for `BOTTOKEN`, `WEBHOOKCHANNEL`, `STEAMWEB_PUB_KEY` and `STEAMUSER_NAME`, hidden, Enter keeps; writes them into `bot.env` and prints the recreate command. Holds the lock while it runs. | terminal | 10 min a question |
 | `./backup.sh nightly\|pre-deploy\|manual` | Dumps MinerBot's database into `/srv/backups/minerbot` and keeps 14 days, the newest 3 always. Prints nothing when it works and one line when it fails. | cron, deploy | its own limits, 2,400 s at most |
-| `./status.sh` | A read-only look: containers, images, history, a running action, backups, the certificate, `nginx -t`, cPanel's Cloudflare list, the dashboard's socket and proxy key, the public home page's status, the disk. | terminal | 30 s a probe |
+| `./status.sh` | A read-only look: containers, images, history, a running action, backups, the certificate, `nginx -t`, cPanel's Cloudflare list, the dashboard's socket, its proxy key while MinerBot's file is in nginx, the public home page's status, the disk. | terminal | 30 s a probe |
 | `./status.sh --check` | The nightly check, at 05:47: one line per problem and exit 1, silence and exit 0 when all is well. Never changes anything. | cron | 600 s (cron line) |
 | `./status.sh --mail-test` | Sends one message to root, to prove cron's mail reaches the owner. | terminal | 30 s |
 | `./status.sh --nginx-look` | nginx's http-level lines, its main context and its build flags, never a secret. | terminal | 30 s a probe |
@@ -152,6 +152,14 @@ service isn't ready. The service then goes back to the exact image it ran, and o
 `logs/failed-<service>-<UTC>.log` (600, never to the screen: the bot's can hold a Steam sign-in code), and the deploy
 stops there.
 
+When Compose can't put the service back either, as when Docker doesn't answer, the deploy says so and leaves the
+service as Compose left it. Still on the new image: "... and Compose didn't put it back on <rev> (above), so it's left
+on <rev>, while minerbot-<service>:current names <rev>. ... Run ./rollback.sh <service> once Docker answers: it
+finishes the swap back.", as it does a swap cut off after it moved the tags (below). With its container gone: "... and
+its container is gone, so it doesn't run. ... Start it on <rev>, which minerbot-<service>:current names, with: docker
+compose up -d --no-build --no-deps <service>." The swap's history line then ends `not put back on <rev>, left on <rev>`,
+or `not put back on <rev>, not running`.
+
 Each service keeps the `compose.yml` it was last ready under as `state/compose-ready-<service>.yml`, written each time
 it's ready after a deploy's swap, an already-on-it check or a rollback, and, for the dashboard, after setup recreated or
 started it. Setup's recreate counts only when Compose exits 0 and the container is a new one, since one that failed can
@@ -173,9 +181,10 @@ start time and no new restart. A container on another image than the one it must
 image that isn't ready either is left there, and says so.
 
 A deploy or rollback cut off after it moved the tags, by a restart of the server or a stop of its unit, leaves the
-container on another image than `:current`. The next `./rollback.sh <service>` finishes that swap on `:current` first:
-"The <service>'s container has <rev>, but minerbot-<service>:current is <rev>: a deploy or rollback was cut off after it
-moved the tags, before Compose swapped the container. This run finishes that swap on <rev>, and moves no tag." It
+container on another image than `:current`, as does a failed swap Compose didn't put back. The next
+`./rollback.sh <service>` finishes that swap on `:current` first: "The <service>'s container has <rev>, but
+minerbot-<service>:current is <rev>: a deploy or rollback was cut off after it moved the tags, before Compose swapped
+the container, or Compose didn't put a failed swap back. This run finishes that swap on <rev>, and moves no tag." It
 removes the service's containers, Compose's half-made `<12 hex>_minerbot-<service>` among them (the volumes stay),
 starts it and checks that it's ready. Running it once more goes back to `:previous`.
 
@@ -189,16 +198,18 @@ starts it and checks that it's ready. Running it once more goes back to `:previo
 - `nginx -t` failing twice, a minute apart, so a reload in progress isn't reported;
 - the bot not running, its container missing, or Docker not answering;
 - with `dashboard.env` there: the dashboard not running or unhealthy; its socket not as nginx needs it (a missing
-  socket only while the dashboard runs); `/etc/nginx/minerbot/proxy-key.conf` missing, or not holding the proxy key
-  the dashboard runs with (its container's, or `dashboard.env`'s when there's no container); nginx's workers older
-  than that file, so nginx hasn't loaded it (only when the file is right and no nginx change is cut off); and the
-  public home page answering anything but 200 twice, a minute apart, while the dashboard runs. A Cloudflare challenge
-  (`cf-mitigated: challenge`, as Bot Fight Mode may send the server) isn't reported, since it says nothing about the
-  dashboard;
+  socket only while the dashboard runs); and the public home page answering anything but 200 twice, a minute apart,
+  while the dashboard runs. A Cloudflare challenge (`cf-mitigated: challenge`, as Bot Fight Mode may send the server)
+  isn't reported, since it says nothing about the dashboard;
+- with `dashboard.env` there and MinerBot's file in nginx too: `/etc/nginx/minerbot/proxy-key.conf` missing, or not
+  holding the proxy key the dashboard runs with (its container's, or `dashboard.env`'s when there's no container); and
+  nginx's workers older than that file, so nginx hasn't loaded it (only when the file is right and no nginx change is
+  cut off). After `./setup-dashboard.sh --remove-nginx`, neither is looked at until setup puts the file back;
 - cPanel's Cloudflare list missing or empty;
 - an nginx change that was cut off;
 - with MinerBot's file in nginx: `/etc/nginx/minerbot/pipelog.conf` not matching cPanel's pipelog module (`pipelog
-  off;` while the module loads, empty while it doesn't), and cPanel's hook missing;
+  off;` while the module loads, empty while it doesn't), and cPanel's hook missing while cPanel's folder for it is
+  there;
 - a trigger, event or stored routine in MinerBot's database, which the next deploy and setup refuse (nothing is said
   when MariaDB doesn't answer);
 - less than 5 GiB free on `/srv`, or less than 2 GiB on `/`.
@@ -308,8 +319,14 @@ Once `./setup-dashboard.sh` has run, nginx loads MinerBot's file for every site,
    `docker volume rm minerbot-dashboard-keys` and
    `docker rmi minerbot-dashboard:current minerbot-dashboard:previous minerbot-dashboard:new minerbot-dashboard:failed`
    (a tag that isn't there only prints an error).
-4. `mariadb -e "DROP USER IF EXISTS 'minerbot-dashboard'@'localhost', 'minerbot-dashboard'@'127.0.0.1'"`. The
-   dashboard's tables in MinerBot's database can stay.
+4. The dashboard's login, and the locked throwaway login the rights rehearsal makes (`minerbot-rights-check`), which a
+   rights run cut off by a crash or a kill can leave behind, holding the rights file's grants:
+
+   ```bash
+   mariadb -e "DROP USER IF EXISTS 'minerbot-dashboard'@'localhost', 'minerbot-dashboard'@'127.0.0.1', 'minerbot-rights-check'@'localhost'"
+   ```
+
+   The dashboard's tables in MinerBot's database can stay.
 5. `rm -f dashboard.env dashboard.env.previous state/dashboard-rights.applied.sql state/compose-ready-*.yml` and
    `rm -rf state/nginx-backup`: after a certificate change, the backups hold the old Origin key and proxy key. Then
    `rm -f /var/log/nginx/minerbot-dashboard.*`, which hold visitors' addresses.
@@ -348,7 +365,8 @@ setup when the certificate changes), `status.sh` shows the days left, and the ni
   systemd-tmpfiles, pgrep and ps call, every `bash -c`, and cPanel's `/scripts/restartsrv_nginx`, goes through
   `run_for [-k <grace>] <seconds>`, which is `timeout` with a 10-second grace. None of those names may stand where a
   command starts outside `run_for` itself, after `if`, `elif`, `while`, `until`, `exec`, `time`, `command`, `env`,
-  `nohup`, `xargs`, an assignment, a backtick or a case item included; the tests check it.
+  `nohup`, `xargs` (`time`, `env` and `xargs` with their options too), an assignment, a backtick or a case item
+  included; the tests check it.
 - Every `read` has `-t`, and every `stty` runs only when `on_terminal` (`[ -t 0 ]`): without a terminal an unguarded
   `stty` fails, and in an EXIT trap under `set -e` it turns a finished run's status into 1.
 - A named helper container (`minerbot-migrate`, `minerbot-dashboard-check`) is removed with `docker rm -f -v` before it
@@ -378,15 +396,16 @@ the server, a hacked WordPress site say, could take a free port while the dashbo
 a reboot, and nginx would hand it visitors' requests, session cookies, Access tokens and the proxy key. No other
 account can make a file in the socket's folder.
 
-- The folder is `/run/minerbot-dashboard`, mode 2750, owner 1654 (the dashboard's user), group `nobody` (nginx's
-  workers): only the dashboard can make a file there, only nginx's group can reach in, and the setgid bit gives the
-  socket the group `nobody`. `/run` is emptied at every boot, so systemd-tmpfiles makes the folder again before Docker
-  starts, from `/etc/tmpfiles.d/minerbot-dashboard.conf`. Every deploy and the bootstrap run
+- The folder is `/run/minerbot-dashboard`, mode 2750, owner 1654 (the dashboard's user), group `nobody`, which nginx's
+  workers run as: only the dashboard can make a file there, only processes in the group `nobody` can reach in, nginx's
+  workers and cPanel's Apache among them, and the setgid bit gives the socket the group `nobody`. `/run` is emptied at
+  every boot, so systemd-tmpfiles makes the folder again before Docker starts, from
+  `/etc/tmpfiles.d/minerbot-dashboard.conf`. Every deploy and the bootstrap run
   `systemd-tmpfiles --create` on that file too, which puts a wrong mode or owner right.
 - `compose.yml` sets `Dashboard__UnixSocket: /run/minerbot-dashboard/dashboard.sock` in the dashboard's `environment:`,
   and bind-mounts the folder at the same path with `create_host_path: false`, so a missing folder stops the start
-  rather than Docker making one as root, where the dashboard couldn't write. The settings check, before a deploy's
-  swap and before setup's changes, gets the same setting.
+  rather than Docker making one as root, where the dashboard couldn't write. The settings check that a deploy and
+  setup run gets the same setting.
 - Before it listens, the dashboard deletes a socket a killed dashboard left there, but only a socket, and only when
   nothing accepts a connection on it within 2 seconds: "Deleted the socket at ..., which a dashboard that was stopped
   without closing it left behind". It leaves a socket something still listens on, and doesn't start: "Something still
@@ -460,8 +479,9 @@ account can make a file in the socket's folder.
      it serves for bot.murderminershub.com isn't the installed one"), with how to find another block naming the host.
 
   A change cut off in between leaves the marker, and the next setup run undoes it first, from its backup, and removes
-  any copy a cut-off restore left. `--remove-nginx`, the undo, the put-back and setup's lone reload, for an nginx that
-  serves an older copy of the certificate, prove their reloads the same way.
+  any copy a cut-off restore left. A restore, like the change, puts our `conf.d` file back last, after `pipelog.conf`
+  is in step with cPanel's module again. `--remove-nginx`, the undo, the put-back and setup's lone reload, for an nginx
+  that serves an older copy of the certificate, prove their reloads the same way.
 - Never add `brotli off;` or another directive for a module the server doesn't load: `nginx -t` would fail and block
   reloads for every site. The read-only look on 5 November 2026 found that cPanel's http level sets nothing the
   dashboard's blocks need to undo.
@@ -469,9 +489,9 @@ account can make a file in the socket's folder.
   later reload, AutoSSL's included, and a restart of nginx or of the server would leave it down for every site.
   `./setup-dashboard.sh --remove-nginx` first ("Taking the dashboard away").
 - Never share raw `nginx -T` output: it prints root-only files, MinerBot's proxy key and cPanel's own proxy secret among
-  them. Use `./status.sh --nginx-look`. It prints only the files `nginx -T` names that anyone may read, by their whole
-  path, spaces included, never anything in `/etc/nginx/minerbot`, and no line naming `X-MinerBot-Proxy-Key` or
-  `cPanel-localhost`; whatever it can't match to such a file, it leaves out.
+  them. Use `./status.sh --nginx-look`. It prints only the files `nginx -T` names that anyone may read, world-readable
+  in folders anyone may enter, by their whole path, spaces included, never anything in `/etc/nginx/minerbot`, and no
+  line naming `X-MinerBot-Proxy-Key` or `cPanel-localhost`; whatever it can't match to such a file, it leaves out.
 - The logs. `/var/log/nginx/minerbot-dashboard.access.log` has the visitor's address, the time, the method, the path
   without its query string, the status, the size, the time taken, the dashboard's status and Cloudflare's ray ID: no
   referer, user agent or cookies. `/var/log/nginx/minerbot-dashboard.error.log` (level `warn`) gets a line when nginx
@@ -486,12 +506,12 @@ account can make a file in the socket's folder.
 do. It's declarative: the login loses every right, then gets exactly these. Table and column rights only, and only what
 today's code uses.
 
-- Each deploy that swaps the dashboard applies the installed file with `apply_rights`: a rehearsal on a locked
-  throwaway login (`minerbot-rights-check`), then the real login, then a comparison of the two through
-  `rights-list.sql`, which never uses `SHOW GRANTS` (it prints the password's hash), and which ends a right held with
-  the grant option in `grantable` and a role held with its admin option in `admin`. A failed rehearsal leaves the real
-  login as it was; a failed apply leaves it fewer rights, never more; a difference means a right `REVOKE` can't take
-  away, such as a PROXY grant, which a person must remove.
+- Each deploy that swaps the dashboard applies the installed file, plus the GRANT statements below, through
+  `apply_rights`: a rehearsal on a locked throwaway login (`minerbot-rights-check`), then the real login, then a
+  comparison of the two through `rights-list.sql`, which never uses `SHOW GRANTS` (it prints the password's hash), and
+  which ends a right held with the grant option in `grantable` and a role held with its admin option in `admin`. A
+  failed rehearsal leaves the real login as it was; a failed apply leaves it fewer rights, never more; a difference
+  means a right `REVOKE` can't take away, such as a PROXY grant, which a person must remove.
 - Once the comparison passes, `apply_rights` keeps a copy of the file it applied as
   `/opt/minerbot/state/dashboard-rights.applied.sql` (600). Every setup run applies that copy again, never the
   installed file, so setup never gives the running dashboard rights no dashboard deploy applied: only a dashboard
@@ -502,17 +522,23 @@ today's code uses.
   dashboard deploy left them: the running dashboard doesn't use the new tables, and a newer rights file could take away
   a right it still uses.
 - A dashboard older than the installed deploy files, as `./deploy.sh <older commit>` deploys it, gets the rights the
-  last apply used (the copy, or the installed file before any apply kept one) and each GRANT statement of its own
-  commit's `dashboard-rights.sql` they lack, which the log lists: "The deploy files stay those of ... (above), so the
-  dashboard of ... gets the rights the last apply used, from state/dashboard-rights.applied.sql, and these GRANT
-  statements of its own dashboard-rights.sql, which they lack and its code may still use:". So the older dashboard and
-  the one it replaces, now `:previous`, both keep what they use. The file applied,
-  `state/tmp/deploy.rights.<random>/dashboard-rights.with-<12>.sql`, becomes the copy setup applies, and the next
-  deploy of a dashboard as new as the installed files applies the installed file alone again.
+  last apply used instead (the copy, or the installed file before any apply kept one), and each GRANT statement of its
+  own commit's `dashboard-rights.sql` they lack, which the log lists: "The deploy files stay those of ... (above), so
+  the dashboard of ... gets the rights the last apply used, from state/dashboard-rights.applied.sql, and these GRANT
+  statements of its own dashboard-rights.sql, which they lack and its code may still use:".
+- Every dashboard a failed swap or `./rollback.sh dashboard` can put back before the next apply keeps what it uses
+  too: the one that runs, and the ones `:current` and `:previous` name, each keep every GRANT statement of their own
+  commit's `dashboard-rights.sql` that the rights lack, which the log lists: "The dashboard of <12>, which a failed
+  swap or ./rollback.sh dashboard can put back, keeps these GRANT statements of its own dashboard-rights.sql, which the
+  installed dashboard-rights.sql lacks:". So a right a pull request removed goes only once no such dashboard has it in
+  its own file, a deploy or two after that pull request's. When `src/` doesn't have such a commit, the log says so
+  with a warning, since that dashboard may then lack a right its code uses if it's put back. The file applied,
+  `state/tmp/deploy.rights.<random>/dashboard-rights.with-<12>.sql`, with one `-<12>` more for each other commit that
+  added GRANT statements, becomes the copy setup applies.
 - A pull request whose code needs another right adds it in the same pull request, after the migration that makes its
   table (MariaDB refuses a right on a table that doesn't exist yet), and changes `DashboardRightsTests`. A right is
   removed only in a later pull request than the one whose code stopped using it, so `rollback.sh`'s previous image
-  always has what it needs. A dashboard from further back, deployed by its commit, gets its own GRANTs on top, as above.
+  always has what it needs, and the deploy keeps it a while longer for the dashboards it can put back, as above.
 - `apply_rights` refuses, with the login untouched, while MinerBot's database holds a trigger, an event or a stored
   routine, which no migration makes: "MinerBot's database, <botdb>, holds what no migration makes: <kind name, ...>.
   ... Look at each one, as in SHOW CREATE TRIGGER ...; drop it unless someone here made it on purpose, and find out who
@@ -552,10 +578,14 @@ then the file, then the old way goes.
 `backup.sh nightly` runs at 03:17 from `/etc/cron.d/minerbot`; every deploy with migrations runs `backup.sh pre-deploy`
 first. Each dump is a consistent InnoDB snapshot without locks (`--single-transaction`), with BINARY columns as hex, in
 utf8mb4, and without the session rows (`--ignore-table-data`), so a restore signs everyone out. MinerBot's database has
-no triggers, events or stored routines; the dump leaves them out (`--skip-triggers`, and no `--routines` or
-`--events`), and the restore below refuses a dump that holds one. A dump goes to a
-`.partial` file, is checked with `gzip -t` and for its last line `-- Dump completed`, and only then gets its final
-name. Dumps older than 14 days are pruned after a dump that worked, the newest 3 always kept.
+no triggers, events or stored routines; the dump leaves them out (`--skip-triggers --skip-routines --skip-events`, on
+the command line, which wins over a `routines` or `events` line in root's option files), and the restore below refuses
+a dump that holds one. The rows, each table's `CREATE` and the `DROP` before it are pinned the same way
+(`--skip-no-data --skip-no-create-info --add-drop-table`), so a `no-data` line there can't make every dump empty. Options
+that take a value, such as `where`, can't be undone on the command line, so root's option files must not set them for
+`mysqldump` or `mariadb-dump`. A dump goes to a `.partial` file, is checked with `gzip -t` and for its last line
+`-- Dump completed`, and only then gets its final name. Dumps older than 14 days are pruned after a dump that worked,
+the newest 3 always kept.
 
 A failure is visible four ways: cron mails root (the cron line's `|| echo` also covers a run stopped at its limit);
 `backup.log` has a `failed` line, or, after a restart or a kill, a `started` line with nothing after it; the 05:47
@@ -584,17 +614,18 @@ updates steps 2 and 6.
    `mariadb <BOT_DB from server.conf> -e 'SELECT version, name FROM schema_version'`.
 5. Restore it as the bot's own database login, never as root, so the dump can do no more than that login may. The
    login's user and password go from `bot.env` into a file only root can read, the restore runs only when the file has
-   both, and the file goes after:
+   both, and the file goes after. `bot.env` is read as Compose and the scripts read it, by `env_value` in `common.sh`:
+   the last line wins, and one pair of quotes around the value goes.
 
    ```bash
    f=$(mktemp /opt/minerbot/state/tmp/restore.XXXXXX)
-   { echo '[client]'; sed -n 's/^ConnectionStrings__BotConnection=//p' bot.env | tail -n 1 | tr ';' '\n' \
+   { echo '[client]'; bash -c 'source ./common.sh && env_value bot.env ConnectionStrings__BotConnection' | tr ';' '\n' \
        | sed -n -e 's/^ *\(uid\|user id\|user\)=/user=/Ip' \
            -e 's/^ *\(pwd\|password\)=\(.*\)$/password="\2"/Ip'; } > "$f"
    if [ "$(grep -c -e '^user=' -e '^password=' "$f")" = 2 ]; then
        gzip -dc <file> | mariadb --defaults-file="$f" --default-character-set=utf8mb4 <BOT_DB from server.conf>
    else
-       echo "bot.env's ConnectionStrings__BotConnection has no Uid= or Pwd= part, so nothing was restored."
+       echo "bot.env's ConnectionStrings__BotConnection gave no Uid= or Pwd= part, so nothing was restored."
    fi
    rm -f "$f"
    ```
@@ -617,16 +648,19 @@ CI's required "Build and test" job runs, after the .NET tests:
 | `shellcheck -x -P SCRIPTDIR deploy/*.sh deploy/tests/*.sh deploy/tests/fakes/*` | Quoting and syntax in scripts the server can't check |
 | `docker compose -f deploy/compose.yml config --quiet` (with an empty `deploy/bot.env`, which `*.env` keeps out of Git) | YAML and schema mistakes |
 | `bash deploy/tests/nginx-test.sh` | 26 checks of the nginx file in `nginx:1.31.8-alpine`, next to a cPanel-like configuration, with a stand-in dashboard on the socket: headers, the Cloudflare-only rule, body caps, timeouts, logs, the 503 page, `pipelog.conf`, and that nothing reaches 127.0.0.1:5080 |
-| `bash deploy/tests/nginx-procedure-test.sh` | 22 checks of the real `nginx_change`, `nginx_remove`, `nginx_undo_cut_off`, `nginx_look`, the reload's proof and cPanel's pipelog hook against a real nginx 1.31.8, cut-off runs and reloads nginx doesn't take included |
+| `bash deploy/tests/nginx-procedure-test.sh` | 23 checks of the real `nginx_change`, `nginx_remove`, `nginx_undo_cut_off`, `nginx_look`, the reload's proof and cPanel's pipelog hook against a real nginx 1.31.8, cut-off runs, an undo after WHM's piped logging changed, and reloads nginx doesn't take included |
 | `bash deploy/tests/rights-test.sh` | 19 checks of the real `apply_rights` against MariaDB 11.4: the rights, the grant options, the copy setup applies, and the refusal of triggers, events and routines |
-| `bash deploy/tests/scripts-test.sh` | 61 cases of the deploy, rollback, setup, bootstrap, fill-secrets, backup and status logic in `almalinux:9`, the server's bash and coreutils, with stand-ins for Docker, MariaDB, nginx, systemd and the rest |
+| `bash deploy/tests/scripts-test.sh` | 65 cases of the deploy, rollback, setup, bootstrap, fill-secrets, backup and status logic in `almalinux:9`, the server's bash and coreutils, with stand-ins for Docker, MariaDB, nginx, systemd and the rest |
+
+The job has 90 minutes, and each of the four test steps a limit above its script's own: 15 minutes for
+`nginx-test.sh`, 13 for `nginx-procedure-test.sh`, 10 for `rights-test.sh` and 30 for `scripts-test.sh`.
 
 `scripts-test.sh`'s cases, by number:
 
 | Cases | What they cover |
 |---|---|
-| 1-12, 24-39, 60, 61 | `deploy.sh` and `rollback.sh`: refusals, the first build, deploy files, full deploys, swaps that fail and go back, time limits, refs and main's first-parent line, Compose failing, a `compose.yml` a service can't run under, the socket, rewritten history, locks, units, readiness, an older dashboard's rights, cut-off swaps |
-| 13-16, 21, 50-59 | `setup-dashboard.sh`: the first setup through a real terminal, nginx failures, converging, refusals, no terminal, the rights copy, password changes that stop, hidden pastes, a stopped dashboard, nginx's file waiting for its dashboard, a recreate Compose didn't do, a stale `pipelog.conf` or hook, a lone reload nginx didn't take |
+| 1-12, 24-39, 60-64 | `deploy.sh` and `rollback.sh`: refusals, the first build, deploy files, full deploys, swaps that fail and go back, time limits, refs and main's first-parent line, Compose failing, a `compose.yml` a service can't run under, the socket, rewritten history, locks, units, readiness, an older dashboard's rights, cut-off swaps, following a run while `systemctl` doesn't answer, a swap Compose can't put back, and the rights every dashboard that can be put back keeps |
+| 13-16, 21, 50-59, 75 | `setup-dashboard.sh`: the first setup through a real terminal, nginx failures, converging, refusals, no terminal, the rights copy, password changes that stop, hidden pastes, a stopped dashboard, nginx's file waiting for its dashboard, a recreate Compose didn't do, a stale `pipelog.conf` or hook, a lone reload nginx didn't take, a stop after the undo of a cut-off nginx change, which names that undo |
 | 90-92 | a reload nginx doesn't take, `pipelog.conf` following WHM's piped logging, and triggers, events or routines in MinerBot's database |
 | 17, 42 | `backup.sh` |
 | 18, 43, 45, 46 | `status.sh`, the public path, `pipelog.conf`, cPanel's hook and MinerBot's database included |

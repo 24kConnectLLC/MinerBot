@@ -16,10 +16,16 @@ string[] publicPages = ["/Index", "/SignIn", "/SignOut", "/Denied", "/Error"];
 
 // "check-settings" checks the settings the way a start would, then exits: 0 when the dashboard would start, 1 with the
 // list when it wouldn't. Nothing listens and nothing connects. deploy.sh runs it on the new image after the build and any
-// migrations, before the rights and the swap. setup-dashboard.sh runs it on the dashboard.env it's about to write, before
-// it changes the database login, the rights, nginx's files or dashboard.env.
+// migrations, before the rights and the swap. setup-dashboard.sh runs it on the dashboard.env it's about to write, after
+// it undoes a cut-off nginx change if one is left, and before it changes the database login, the rights, nginx's files
+// or dashboard.env.
 var checkOnly = args is [DashboardCommands.CheckSettings, ..];
 var builder = WebApplication.CreateBuilder(checkOnly ? args[1..] : args);
+
+// The dashboard listens only where its own settings say, which AddDashboardHosting sets in code. That wins over
+// ASPNETCORE_URLS and ASPNETCORE_HTTP_PORTS only while PreferHostingUrls is off, so it's set off here, over anything the
+// environment or the command line says, and neither can put those addresses in place of the socket or the address.
+builder.WebHost.PreferHostingUrls(false);
 
 builder.Services.AddDashboardSettings();
 builder.Logging.AddDashboardFilters();

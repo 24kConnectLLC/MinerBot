@@ -37,6 +37,9 @@ env_header_2="# It keeps lines under other names. The dashboard reads the file o
 managed=(Dashboard__PublicOrigin Dashboard__ProxyKey Dashboard__Owners Dashboard__Admins Discord__ClientId
     Discord__ClientSecret CloudflareAccess__TeamDomain CloudflareAccess__Audience ConnectionStrings__DefaultConnection
     ConnectionStrings__BotConnection)
+# The end of a message that stops the unit before its own changes. Once its first step has undone a cut-off nginx
+# change, which can put nginx's files back and reload nginx, it names that undo instead.
+unchanged="Nothing was changed."
 
 mode=questions
 yes=no
@@ -377,7 +380,7 @@ candidate_env() {   # candidate_env <proxy key> <password> <file to write>
         "$(connection_string "$SITE_DB" "$pw")" "$(connection_string "$BOT_DB" "$pw")")
     for i in "${!managed[@]}"; do
         env_safe "${values[$i]}" \
-            || die "The value for ${managed[$i]} breaks the safe-character rule ($env_rule). Nothing was changed."
+            || die "The value for ${managed[$i]} breaks the safe-character rule ($env_rule). $unchanged"
     done
     {
         printf '%s\n' "$env_header_1" "$env_header_2"
@@ -419,17 +422,24 @@ confirm() {
 
 # shellcheck disable=SC2317,SC2329 # the EXIT trap runs it
 foreground_cleanup() {
+    local state=0
     if on_terminal; then stty echo 2> /dev/null || true; fi
-    # The answers belong to the unit once it has started; it deletes them itself
-    if [ -n "${answers_dir:-}" ] && { [ "${detached_unit_started:-no}" != yes ] || ! unit_running minerbot-setup; }; then
+    # The answers belong to the unit once it has started; it deletes them itself. So they go only when it never started,
+    # or once systemd says it doesn't run: a systemctl that answers nothing says nothing either way.
+    if [ -n "${answers_dir:-}" ] && [ "${detached_unit_started:-no}" = yes ]; then
+        unit_running minerbot-setup || state=$?
+    fi
+    if [ -n "${answers_dir:-}" ] && { [ "${detached_unit_started:-no}" != yes ] || [ "$state" = 1 ]; }; then
         rm -rf "$answers_dir"
     fi
 }
 
 foreground_checks() {   # checks 4 to 9; 1 to 3 come first, in foreground_part
-    local n others
+    local n others current_id new_id
     step="looking for a dashboard image"
-    if [ -z "$(image_id minerbot-dashboard:current)" ] && [ -z "$(image_id minerbot-dashboard:new)" ]; then
+    current_id=$(image_id minerbot-dashboard:current)
+    new_id=$(image_id minerbot-dashboard:new)
+    if [ -z "$current_id" ] && [ -z "$new_id" ]; then
         die "There's no dashboard image yet. Run ./deploy.sh main --only dashboard --no-start first. Nothing was changed."
     fi
     step="checking the databases"
@@ -789,7 +799,12 @@ recreate_dashboard() {
 # Recreates the dashboard after a stop, when its container exists. It looks the container up itself: a stop can come
 # before step 7 does.
 recreate_after_stop() {   # recreate_after_stop <how it runs, for the message>
-    [ -n "$(container_image "$dashboard_container")" ] || return 0
+    local id
+    if ! id=$(container_image "$dashboard_container"); then
+        echo "Docker didn't answer whether the dashboard's container exists (above), so it wasn't recreated. Run ./setup-dashboard.sh --no-questions once Docker answers."
+        return 0
+    fi
+    [ -n "$id" ] || return 0
     if recreate_dashboard; then
         echo "The dashboard runs again, $1."
     else
@@ -947,7 +962,7 @@ refresh_readme() {   # renders README.txt again from the installed deploy files'
 }
 
 detached_part() {
-    local cur_key sent_key cur_pw host n image served expected ends name joined running
+    local cur_key sent_key cur_pw host n image id served expected ends name joined running
     local -a missing_hosts=() changes=() problems=()
     if [ "${MINERBOT_DETACHED:-}" != 1 ] || [ -z "${MINERBOT_LOG:-}" ]; then
         die "--apply is only for the run setup-dashboard.sh starts itself. Nothing was changed."
@@ -971,12 +986,15 @@ detached_part() {
         esac
     fi
 
-    # 1. A change that was cut off is undone before anything else
+    # 1. A change that was cut off is undone before anything else, so a stop before step 6 names that undo
     if [ -e "$home/state/nginx-change" ]; then
         step="undoing a cut-off nginx change"
         nginx_undo_cut_off
         case $nginx_result in
-            undone) changes+=("cut-off nginx change undone") ;;
+            undone)
+                changes+=("cut-off nginx change undone")
+                unchanged="The cut-off nginx change was undone (above), and nothing else was changed."
+                ;;
             none) ;;
             *) die "The nginx change that was cut off couldn't be undone cleanly (above), so nothing else was changed." ;;
         esac
@@ -997,8 +1015,8 @@ detached_part() {
         key=$cur_key
         key_changed=no
     else
-        key=$(run_for 10 openssl rand -hex 32) || die "openssl couldn't make a proxy key (above). Nothing was changed."
-        [[ $key =~ ^[0-9a-f]{64}$ ]] || die "openssl made a proxy key of the wrong shape. Nothing was changed."
+        key=$(run_for 10 openssl rand -hex 32) || die "openssl couldn't make a proxy key (above). $unchanged"
+        [[ $key =~ ^[0-9a-f]{64}$ ]] || die "openssl made a proxy key of the wrong shape. $unchanged"
         key_changed=yes
         echo "A new proxy key was made. It's never shown."
     fi
@@ -1007,7 +1025,7 @@ detached_part() {
     step="checking the dashboard's database password"
     for host in localhost 127.0.0.1; do
         n=$(run_for 30 mariadb -N -e "SELECT COUNT(*) FROM mysql.user WHERE User = '$dashboard_login' AND Host = '$host'") \
-            || die "MariaDB didn't answer (above). Nothing was changed."
+            || die "MariaDB didn't answer (above). $unchanged"
         if [ "$n" != 1 ]; then
             missing_hosts+=("$host")
         fi
@@ -1020,7 +1038,7 @@ detached_part() {
         pw_changed=no
         echo "The dashboard's database password works, so it stays."
     else
-        pw=$(new_password) || die "openssl couldn't make a password (above). Nothing was changed."
+        pw=$(new_password) || die "openssl couldn't make a password (above). $unchanged"
         pw_changed=yes
         echo "The dashboard's database login gets a new password. It's never shown."
     fi
@@ -1032,11 +1050,13 @@ detached_part() {
     # 5. The dashboard's own validator, before the database or nginx is touched
     step="checking the new settings"
     image=minerbot-dashboard:current
-    if [ -z "$(image_id "$image")" ]; then
+    # Looked up first, so Docker not answering stops the run here: inside [ ], it would read as no image
+    id=$(image_id "$image")
+    if [ -z "$id" ]; then
         image=minerbot-dashboard:new
     fi
     check_settings "$home/dashboard.env.next" "$image" \
-        || die "The dashboard's own check refused the new settings (above). Nothing was changed."
+        || die "The dashboard's own check refused the new settings (above). $unchanged"
 
     # 6. The login, its rights, and its password on both databases. A password change can't be taken back, so when both
     # hosts exist the rights come first, and a rights failure stops the run with the login's password as it was. A

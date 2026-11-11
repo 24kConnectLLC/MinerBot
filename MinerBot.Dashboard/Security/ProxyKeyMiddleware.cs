@@ -7,9 +7,9 @@ using MinerBot.Dashboard.Settings;
 
 namespace MinerBot.Dashboard.Security
 {
-    // On the server Kestrel listens on a socket that only nginx's group can open. On loopback, which a local run uses, the
-    // PHP of every site on a server could reach it too. Either way only nginx knows this key, so anything else that calls the
-    // dashboard directly gets a bare 404, as if nothing were there.
+    // On the server Kestrel listens on a socket that only processes in the group nobody can open, cPanel's Apache as well as
+    // nginx's workers. On loopback, which a local run uses, the PHP of every site on a server could reach it too. Either way
+    // only nginx knows this key, so anything else that calls the dashboard directly gets a bare 404, as if nothing were there.
     internal sealed class ProxyKeyMiddleware(RequestDelegate next, IOptions<DashboardOptions> settings, ILogger<ProxyKeyMiddleware> logger)
     {
         public const string HeaderName = "X-MinerBot-Proxy-Key";
