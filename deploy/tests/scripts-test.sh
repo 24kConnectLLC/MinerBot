@@ -642,9 +642,14 @@ nginx_workers() {   # nginx_workers <worker title>...: returns once the master a
     local master='' n
     rm -f /var/run/nginx.pid
     cat > /tmp/mbtest-nginx-master.sh << 'EOF'
-trap '(exec -a "nginx: worker process" sleep 600) &' USR1
+# A worker is a bash under the title that waits 10 minutes, holding both ends of an empty pipe. Not sleep: the box's
+# coreutils is one program that picks its tool by the name it's run under, so a sleep under a title doesn't start.
+worker() {
+    (exec -a "$1" bash -c 'read -r -t 600 _ <> <(:)') &
+}
+trap 'worker "nginx: worker process"' USR1
 for title in "$@"; do
-    (exec -a "$title" sleep 600) &
+    worker "$title"
 done
 echo "$$" > /var/run/nginx.pid
 while :; do
@@ -1447,7 +1452,8 @@ case_11() {
     expect_exit 1 "the killed run"
     expect_said "It ended without a result: it was stopped at its time limit, or the server restarted." "the killed run"
     flock -n "$home/state/lock" true || problem "the lock is still held after the unit was killed"
-    ! pgrep -f '/opt/minerbot/deploy.sh' > /dev/null || problem "a process of the killed unit is still running"
+    # The real pgrep: the stand-in records every call, and this one is the test's own, not a script's
+    ! /usr/bin/pgrep -f '/opt/minerbot/deploy.sh' > /dev/null || problem "a process of the killed unit is still running"
 
     restore deployed
     set_main "$c5"
