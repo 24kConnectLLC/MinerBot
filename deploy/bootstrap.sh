@@ -60,11 +60,12 @@ self_test() {   # systemd must end a unit at its time limit here, or the detache
     run_for 20 systemd-run --quiet --collect --unit=minerbot-selftest -p RuntimeMaxSec=2 -p TimeoutStopSec=2 sleep 60 \
         || die "systemd-run couldn't start the self-test unit (above), so the detached runs can't be trusted. Nothing was changed."
     # Only systemd's answer that the unit doesn't run counts: a systemctl that answers nothing proves nothing, and after a
-    # silent answer, an answer past the 10 seconds can't tell when the unit ended
+    # silent answer, until one says the unit still runs, an answer past the 10 seconds can't tell when the unit ended
     while [ $((SECONDS - started)) -lt 20 ]; do
         state=0
         unit_running minerbot-selftest || state=$?
         [ "$state" != 2 ] || silent=yes
+        [ "$state" != 0 ] || silent=no
         [ "$state" != 1 ] || break
         sleep 1
     done

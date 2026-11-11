@@ -791,6 +791,8 @@ cut_off_backup_ignored() {
     run_common nginx_undo_cut_off --no-reload
     outcome none 0
     same_as "$before"
+    expect "so there was nothing to undo" "$said" "the message, with --no-reload"
+    [ ! -e "$marker" ] || problem "the marker state/nginx-change is still there, with --no-reload"
     # Cut off before the backup's folder was made
     rm -rf "$dir"
     printf '%s\n' "$dir" > "$marker"

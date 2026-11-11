@@ -92,8 +92,8 @@ errors=$(mktemp "$home/state/tmp/backup-errors.XXXXXX")
 # report it. A consistent InnoDB snapshot without locks; BINARY columns as hex; utf8mb4 for emoji; no --databases, so a
 # restore can go into a scratch database. No triggers, routines or events, which MinerBot's database never has and
 # apply_rights refuses: a restore would replay their text unchecked, with the rights of whoever restores it. Each is
-# left out here, on the command line, which wins over a routines or events line in root's option files; so are the
-# rows, each table's CREATE and its DROP before it, which a no-data line there could otherwise drop without a sign.
+# left out here, on the command line, which wins over a routines or events line in root's option files. The rows, each
+# table's CREATE and the DROP before it are kept the same way, so a no-data line there can't drop them without a sign.
 if ! run_for "$limit" mariadb-dump --single-transaction --quick --hex-blob --skip-dump-date \
     --default-character-set=utf8mb4 --skip-triggers --skip-routines --skip-events \
     --skip-no-data --skip-no-create-info --add-drop-table \

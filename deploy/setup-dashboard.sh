@@ -772,11 +772,38 @@ password_to_env() {
 # taken once Compose is done: a container it started begins again at 0, and one it left running, as after a stop call
 # that failed before Docker stopped it, keeps its earlier restarts, which aren't this run's.
 start_again() {
-    local base
+    local base out status=0
     start_service dashboard || return 1
-    base=$(run_for 30 docker container inspect -f '{{.RestartCount}}' "$dashboard_container" 2> /dev/null) || base=0
+    # Looked at the way restart_count does in deploy.sh, but returning 1: this runs where set -e is off, in before_stop
+    # and in an if, so a die would only end the $( ). Docker not answering is never a count of 0.
+    out=$(run_for 30 docker container inspect -f '{{.RestartCount}}' "$dashboard_container" 2>&1) || status=$?
+    if [ "$status" = 0 ] && [[ $out =~ ^[0-9]+$ ]]; then
+        base=$out
+    elif [[ $out == *"No such container"* || $out == *"No such object"* ]]; then
+        base=0
+    else
+        printf '%s\n' "$out"
+        echo "Docker didn't answer about the dashboard's container (above), so whether it got ready again can't be told."
+        return 1
+    fi
     ready_dashboard "" "$base" || return 1
     note_ready dashboard
+}
+
+# The dashboard container's ID, or nothing when there's no such container. Docker not answering is never "no container":
+# Docker's own words go to stderr and it returns 1, which its callers handle, since they run where set -e is off.
+dashboard_id() {
+    local out status=0
+    out=$(run_for 30 docker container inspect -f '{{.Id}}' "$dashboard_container" 2>&1) || status=$?
+    if [ "$status" = 0 ]; then
+        printf '%s\n' "$out"
+        return 0
+    fi
+    case $out in
+        *"No such container"* | *"No such object"*) return 0 ;;
+    esac
+    printf '%s\n' "$out" >&2
+    return 1
 }
 
 # Recreates the dashboard on dashboard.env as it is now, and waits until it's ready. That counts only when Compose exits
@@ -785,9 +812,15 @@ start_again() {
 # under (note_ready), which a failed deploy swap puts back.
 recreate_dashboard() {
     local before after
-    before=$(run_for 30 docker container inspect -f '{{.Id}}' "$dashboard_container" 2> /dev/null) || before=
+    if ! before=$(dashboard_id); then
+        echo "Docker didn't answer about the dashboard's container (above), so it wasn't recreated: a recreate couldn't be told from none."
+        return 1
+    fi
     start_service dashboard --force-recreate || return 1
-    after=$(run_for 30 docker container inspect -f '{{.Id}}' "$dashboard_container" 2> /dev/null) || after=
+    if ! after=$(dashboard_id); then
+        echo "Docker didn't answer about the dashboard's container (above), so whether Compose recreated it can't be told."
+        return 1
+    fi
     if [ -z "$after" ] || [ "$after" = "$before" ]; then
         echo "The dashboard isn't ready: Compose didn't make it a new container, so it doesn't run on dashboard.env as it is now."
         return 1

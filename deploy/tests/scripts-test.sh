@@ -1326,7 +1326,7 @@ case_7() {
 }
 
 case_8() {
-    begin 8 "the bot not ready (no ready line in its log): the bot goes back to its earlier image, and the new dashboard stays"
+    begin 8 "the bot not ready (no ready line in its log): the bot goes back to its earlier image, and the new dashboard stays; with no :previous before the swap, Docker not answering about that tag on the way back stops the deploy only once the bot is back"
     local log
     restore deployed
     set_main "$c5"
@@ -1339,6 +1339,37 @@ case_8() {
     [ "$(tag_of minerbot-bot:previous)" = "$old_bot" ] || problem "the bot's :previous isn't what it was"
     [ "$(ctr_image minerbot-dashboard)" = "$(image_of "$c5" dashboard)" ] || problem "the new dashboard didn't stay"
     grep -qP "\tdeploy\tbot\t${c5:0:12}\tnot ready\tback on ${c1:0:12}" "$home/logs/history.log" || problem "no history line for the bot"
+
+    # No :previous before the swap, and Docker doesn't answer the look at that tag once the swap has begun, as at its 30
+    # seconds under load: :previous is set back only after Compose's way back, so the stop leaves the bot on c1's image
+    restore deployed
+    set_main "$c5"
+    rm -f /fake/docker/tags/minerbot-bot@previous
+    trap 'if [ -e /usr/local/bin/docker.mbtest-8 ]; then mv -f /usr/local/bin/docker.mbtest-8 /usr/local/bin/docker; fi' EXIT
+    if mv /usr/local/bin/docker /usr/local/bin/docker.mbtest-8; then
+        cat > /usr/local/bin/docker << 'EOF'
+#!/usr/bin/env bash
+if [ "${1:-} ${2:-}" = "compose -f" ] && [[ " $* " == *" up -d --no-build --no-deps bot "* ]]; then
+    : > /fake/docker/mbtest-8-armed
+fi
+if [ -e /fake/docker/mbtest-8-armed ] && [ "${1:-} ${2:-} ${3:-} ${4:-} ${5:-}" = "image inspect -f {{.Id}} minerbot-bot:previous" ]; then
+    echo "Error response from daemon: a made-up timeout" >&2
+    exit 124
+fi
+exec /usr/local/bin/docker.mbtest-8 "$@"
+EOF
+        chmod 755 /usr/local/bin/docker
+        in_home no-previous 120 env FAKE_UNREADY="bot@${c5:0:12}" ./deploy.sh --only bot
+        mv -f /usr/local/bin/docker.mbtest-8 /usr/local/bin/docker
+        expect_exit 1 "the unready bot with no :previous, while Docker doesn't answer about that tag"
+        log=$(last_log deploy)
+        expect_said "Putting the bot back on ${c1:0:12}." "the unready bot with no :previous" "$log"
+        expect_said "Docker didn't answer about the image minerbot-bot:previous (above)." "the unready bot with no :previous" "$log"
+        [ "$(ctr_image minerbot-bot)" = "$(image_of "$c1" bot)" ] \
+            || problem "the deploy stopped on Docker's silence about :previous before Compose put the bot back on c1's image"
+    else
+        problem "the test couldn't set the stand-in docker aside"
+    fi
     verdict
 }
 
@@ -1381,8 +1412,8 @@ EOF
         ! said "so it's stopped and removed" "$log" \
             || problem "the deploy said the dashboard is stopped and removed while its container still runs"
         [ -e /fake/docker/ctr/minerbot-dashboard ] || problem "the test's start: the dashboard's container is gone"
-        grep -qP "\tdeploy\tdashboard\t${c1:0:12}\tnot ready\tnot stopped, with no earlier image(\t|$)" "$home/logs/history.log" \
-            || problem "no history line that says the dashboard wasn't stopped" "$(tail -n 2 "$home/logs/history.log")"
+        grep -qP "\tdeploy\tdashboard\t${c1:0:12}\tnot ready\tnot removed, with no earlier image(\t|$)" "$home/logs/history.log" \
+            || problem "no history line that says the dashboard wasn't removed" "$(tail -n 2 "$home/logs/history.log")"
     else
         problem "the test couldn't set the stand-in docker aside"
     fi
@@ -2958,6 +2989,33 @@ case_54() {
             || problem "lock.info doesn't name setup while its unit runs" "$(cat "$home/state/lock.info" 2> /dev/null)"
     fi
     wait "$bg"
+
+    # A rotation whose stop call fails stops, and starts the dashboard again, after 2 restarts from before the run, while
+    # Docker doesn't answer the look at its restart count: that's no count of 0, so the earlier restarts never read as new
+    restore deployed
+    awk '{ $3 = 2; print }' /fake/docker/ctr/minerbot-dashboard > /tmp/mbtest-ctr && mv /tmp/mbtest-ctr /fake/docker/ctr/minerbot-dashboard
+    trap 'if [ -e /usr/local/bin/docker.mbtest-54 ]; then mv -f /usr/local/bin/docker.mbtest-54 /usr/local/bin/docker; fi' EXIT
+    if mv /usr/local/bin/docker /usr/local/bin/docker.mbtest-54; then
+        cat > /usr/local/bin/docker << 'EOF'
+#!/usr/bin/env bash
+if [ "${1:-} ${2:-} ${3:-} ${4:-} ${5:-}" = "container inspect -f {{.RestartCount}} minerbot-dashboard" ]; then
+    echo "Error response from daemon: a made-up timeout" >&2
+    exit 124
+fi
+exec /usr/local/bin/docker.mbtest-54 "$@"
+EOF
+        chmod 755 /usr/local/bin/docker
+        in_home restarts-unknown 120 env FAKE_STOP=fail ./setup-dashboard.sh --no-questions --yes --rotate-proxy-key
+        mv -f /usr/local/bin/docker.mbtest-54 /usr/local/bin/docker
+        expect_exit 1 "the stopped rotation while Docker doesn't answer about the dashboard's restarts"
+        expect_said "Docker didn't answer about the dashboard's container (above), so whether it got ready again can't be told." \
+            "the stopped rotation while Docker doesn't answer about the dashboard's restarts"
+        ! said "its container restarted" \
+            || problem "a restart from before the run counted as a new one, after Docker didn't answer about the count" "$(excerpt)"
+        [ "$(dashboard_runs)" = true ] || problem "the dashboard doesn't run after the stopped rotation"
+    else
+        problem "the test couldn't set the stand-in docker aside"
+    fi
     verdict
 }
 
@@ -3299,6 +3357,34 @@ case_59() {
     in_home after-fails 120 ./setup-dashboard.sh --no-questions --yes
     expect_exit 0 "the run after both reloads failed"
     expect_said "An nginx change was cut off earlier. Its files are back as they were before it, and nginx reloaded." "the run after both reloads failed"
+
+    # Docker doesn't answer the look at the container before a recreate that Compose would report done while the old
+    # container runs on: with nothing to compare, it isn't recreated or counted, and the run says why
+    restore deployed
+    made_with
+    cid=$(ctr_id)
+    trap 'if [ -e /usr/local/bin/docker.mbtest-59 ]; then mv -f /usr/local/bin/docker.mbtest-59 /usr/local/bin/docker; fi' EXIT
+    if mv /usr/local/bin/docker /usr/local/bin/docker.mbtest-59; then
+        cat > /usr/local/bin/docker << 'EOF'
+#!/usr/bin/env bash
+if [ "${1:-} ${2:-} ${3:-} ${4:-} ${5:-}" = "container inspect -f {{.Id}} minerbot-dashboard" ] && [ ! -e /fake/docker/mbtest-59-once ]; then
+    : > /fake/docker/mbtest-59-once
+    echo "Error response from daemon: a made-up timeout" >&2
+    exit 124
+fi
+exec /usr/local/bin/docker.mbtest-59 "$@"
+EOF
+        chmod 755 /usr/local/bin/docker
+        in_home kept-unanswered 120 env FAKE_UP_KEEP=dashboard ./setup-dashboard.sh --no-questions --yes --rotate-db-password
+        mv -f /usr/local/bin/docker.mbtest-59 /usr/local/bin/docker
+        expect_exit 1 "the rotation whose look before the recreate Docker didn't answer"
+        expect_said "Docker didn't answer about the dashboard's container (above), so it wasn't recreated" \
+            "the rotation whose look before the recreate Docker didn't answer"
+        ! said "Done." || problem "the rotation whose look before the recreate Docker didn't answer said it was done" "$(excerpt)"
+        [ "$(ctr_id)" = "$cid" ] || problem "the dashboard got a new container, though its recreate couldn't be checked"
+    else
+        problem "the test couldn't set the stand-in docker aside"
+    fi
     verdict
 }
 
@@ -4091,7 +4177,6 @@ fi
 exec /usr/local/bin/systemctl.mbtest-40 "$@"
 EOF
         in_home self-test-late 120 bash /fake/bootstrap-commands.sh
-        mv -f /usr/local/bin/systemctl.mbtest-40 /usr/local/bin/systemctl
         rm -f /run/mbtest-40-slow-once
         expect_exit 1 "the bootstrap where systemctl's first answer about the self-test unit comes too late"
         expect_said "systemctl didn't answer in time whether the self-test unit still runs, so the detached runs can't be trusted. Nothing was changed." \
@@ -4101,6 +4186,18 @@ EOF
         ! run_calls | grep -q -- '--unit=minerbot-bootstrap ' \
             || problem "the self-test whose first answer came too late still started the move's unit"
         nothing_moved "the bootstrap where systemctl's first answer about the self-test unit comes too late"
+        # The same late first answer while systemd lets the unit outlive its limit: the answers after it say the unit
+        # still runs past the 10 seconds, so systemd is blamed, not systemctl
+        restore today
+        in_home self-test-late-outlived 120 env FAKE_UNIT_LIMIT=40 bash /fake/bootstrap-commands.sh
+        mv -f /usr/local/bin/systemctl.mbtest-40 /usr/local/bin/systemctl
+        rm -f /run/mbtest-40-slow-once
+        expect_exit 1 "the bootstrap where systemctl's first answer comes too late and the unit outlives its limit"
+        expect_said "systemd doesn't enforce time limits here, so the detached runs can't be trusted. Nothing was changed." \
+            "the bootstrap where systemctl's first answer comes too late and the unit outlives its limit"
+        ! said "systemctl didn't answer in time" \
+            || problem "the bootstrap blamed systemctl, though its later answers said the unit outlived its limit"
+        nothing_moved "the bootstrap where systemctl's first answer comes too late and the unit outlives its limit"
     else
         problem "the test couldn't set the stand-in systemctl aside"
     fi
@@ -4191,7 +4288,8 @@ case_42() {
     expect_exit 0 "the dump with exactly 1 GiB free"
 
     # The exact dump command: one consistent snapshot without locks, no session rows, and no triggers, routines or
-    # events, each left out on the command line, which wins over root's option files, as do the rows, tables and drops
+    # events, each left out on the command line, which wins over root's option files; the rows, tables and drops are kept
+    # the same way
     restore deployed
     backup_run exact 60 ./backup.sh manual
     expect_exit 0 "the working dump"

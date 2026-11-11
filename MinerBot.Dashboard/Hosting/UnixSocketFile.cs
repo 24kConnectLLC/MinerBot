@@ -110,9 +110,9 @@ namespace MinerBot.Dashboard.Hosting
         const uint UnixSocketTag = 0x80000023;     // IO_REPARSE_TAG_AF_UNIX
         const nint NothingFound = -1;              // INVALID_HANDLE_VALUE
 
-        // FindFirstFileW takes these as wildcards in the file's name, which could find another file, and it stops at a NUL
-        // anywhere. No file's name holds any of them. In a folder's name a wildcard makes it fail, and the ? of an extended
-        // path's \\?\ is no wildcard.
+        // FindFirstFileW takes these as wildcards in the path's last part, once Windows has taken out . and .., so they
+        // could find another file, and it stops at a NUL anywhere. No file's or folder's name holds any of them, so they're
+        // refused anywhere after the path's root, whose \\?\ holds the only ? a path to a socket can have.
         const string Wildcards = "*?<>\"";
 
         [DllImport("kernel32", EntryPoint = "FindFirstFileW", CharSet = CharSet.Unicode, ExactSpelling = true)]
@@ -147,7 +147,7 @@ namespace MinerBot.Dashboard.Hosting
 
             if (OperatingSystem.IsWindows())
             {
-                if (path.Contains('\0') || Path.GetFileName(path.AsSpan()).IndexOfAny(Wildcards) >= 0)
+                if (path.Contains('\0') || path.AsSpan(Path.GetPathRoot(path.AsSpan()).Length).IndexOfAny(Wildcards) >= 0)
                     return false;
 
                 var answer = new byte[FindAnswerBytes];

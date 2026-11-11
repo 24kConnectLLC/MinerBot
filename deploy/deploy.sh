@@ -321,21 +321,23 @@ swap() {   # swap bot|dashboard
         # first, so Docker not answering stops the deploy here.
         runs=$(container_image "$container")
         if [ -n "$runs" ]; then
-            log_history deploy "$service" "$(revision "$new")" "$word" "not stopped, with no earlier image"
+            log_history deploy "$service" "$(revision "$new")" "$word" "not removed, with no earlier image"
             die "$what, and there's no earlier image to go back to, but Compose couldn't stop and remove it (above), so it's left on $(revision "$new"). Stop and remove it with: docker compose rm -s -f $service. Its container's last log lines are in ${failed_log#"$home"/}, and the image is tagged $image:failed."
         fi
         log_history deploy "$service" "$(revision "$new")" "$word" "stopped, with no earlier image"
         die "$what, and there's no earlier image to go back to, so it's stopped and removed. Its container's last log lines are in ${failed_log#"$home"/}, and the image is tagged $image:failed."
     fi
     tag_id "$before" "$image:current"
+    put_back_compose "$service"
+    echo "Putting the $service back on $(revision "$before")."
+    start_service "$service" || true
+    # :previous goes back only now: Compose's way back needs only :current, so Docker not answering about :previous
+    # stops the deploy with the service already put back, never on the new image
     if [ -n "$prev" ]; then
         tag_id "$prev" "$image:previous"
     else
         untag "$image:previous"
     fi
-    put_back_compose "$service"
-    echo "Putting the $service back on $(revision "$before")."
-    start_service "$service" || true
     # When Compose failed, or returned without recreating it, the container doesn't run the image before, and its
     # readiness would say nothing about that image. It still runs the new one, which rollback.sh takes for a swap cut
     # off after the tags moved and puts back on :current, or it's gone.
