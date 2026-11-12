@@ -164,7 +164,11 @@ choose_commit() {
         grep -qxF -- "$commit" <<< "$chain" \
             || die "${commit:0:12} ($ref) isn't one of main's own commits: it isn't merged into main, or it's inside a merged pull request, where it was never reviewed on its own. deploy.sh deploys only commits main itself pointed at, because root's scripts come from them. git -C $home/src log --first-parent --oneline refs/remotes/origin/main lists them. Nothing was changed."
     fi
-    run_for 60 git -C "$home/src" checkout --quiet --force --detach "$commit" \
+    # The checkout writes the files it changes readable by all, unlike everything else these scripts make: src holds
+    # only the public repository's files, inside /opt/minerbot, which is 700. A build keeps the files' modes, so a
+    # commit from before the Dockerfiles' chmod would otherwise publish a stylesheet only root can read. It takes
+    # effect from the deploy after the one that installs it.
+    (umask 022 && run_for 60 git -C "$home/src" checkout --quiet --force --detach "$commit") \
         || die "Couldn't check out ${commit:0:12} in src (above). Nothing was swapped."
     run_for 60 git -C "$home/src" clean -ffdxq || die "Couldn't clean src (above). Nothing was swapped."
     [ -d "$home/src/deploy" ] \

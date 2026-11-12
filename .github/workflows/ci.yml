@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     # The deploy tests' step limits added up, with room for the build and the .NET tests, so a slow step fails with its
     # own message
-    timeout-minutes: 90
+    timeout-minutes: 125
 
     steps:
       - name: Check out the code
@@ -46,7 +46,7 @@ jobs:
 
       # Each step's limit is above its script's own: up to 5 minutes for the image pull, then the containers' lifetimes
       # (10 minutes for nginx-test.sh, 7 for nginx-procedure-test.sh, 270 seconds for rights-test.sh's checks, and 20
-      # minutes for scripts-test.sh's cases)
+      # minutes for scripts-test.sh's cases), and for image-files-test.sh two builds of 15 minutes each
       - name: Check the nginx file in nginx's own image
         timeout-minutes: 15
         run: bash deploy/tests/nginx-test.sh
@@ -62,3 +62,7 @@ jobs:
       - name: Check the scripts' logic with stand-in commands
         timeout-minutes: 30
         run: bash deploy/tests/scripts-test.sh
+
+      - name: Check that each image's user can read its files and change none
+        timeout-minutes: 35
+        run: bash deploy/tests/image-files-test.sh

@@ -360,7 +360,9 @@ setup when the certificate changes), `status.sh` shows the days left, and the ni
 ## Rules for every script
 
 - `set -Eeuo pipefail` and `umask 077`. `common.sh` holds constants and functions only, so sourcing it runs no command;
-  every script sources the copy in its own folder.
+  every script sources the copy in its own folder. The one exception to the umask is `deploy.sh`'s checkout of `src`,
+  under `umask 022` in a subshell: `src` holds only the public repository's files, inside `/opt/minerbot`, and a build
+  keeps the files' modes, so a commit whose Dockerfile doesn't make what it publishes readable still works.
 - Every docker, mariadb, mariadb-dump, curl, git, openssl, nginx, ss, sendmail, systemctl, systemd-run,
   systemd-tmpfiles, pgrep and ps call, every `bash -c`, and cPanel's `/scripts/restartsrv_nginx`, goes through
   `run_for [-k <grace>] <seconds>`, which is `timeout` with a 10-second grace. None of those names may stand where a
@@ -652,9 +654,11 @@ CI's required "Build and test" job runs, after the .NET tests:
 | `bash deploy/tests/nginx-procedure-test.sh` | 23 checks of the real `nginx_change`, `nginx_remove`, `nginx_undo_cut_off`, `nginx_look`, the reload's proof and cPanel's pipelog hook against a real nginx 1.31.8, cut-off runs, an undo after WHM's piped logging changed, and reloads nginx doesn't take included |
 | `bash deploy/tests/rights-test.sh` | 19 checks of the real `apply_rights` against MariaDB 11.4: the rights, the grant options, the copy setup applies, and the refusal of triggers, events and routines |
 | `bash deploy/tests/scripts-test.sh` | 65 cases of the deploy, rollback, setup, bootstrap, fill-secrets, backup and status logic in `almalinux:9`, the server's bash and coreutils, with stand-ins for Docker, MariaDB, nginx, systemd and the rest |
+| `bash deploy/tests/image-files-test.sh` | 5 checks of both images, built from files only root can read, as `deploy.sh`'s checkout under umask 077 left them: their user, 1654, can read every file in `/app`, and owns and can change nothing there but its volume's folder |
 
-The job has 90 minutes, and each of the four test steps a limit above its script's own: 15 minutes for
-`nginx-test.sh`, 13 for `nginx-procedure-test.sh`, 10 for `rights-test.sh` and 30 for `scripts-test.sh`.
+The job has 125 minutes, and each of the five test steps a limit above its script's own: 15 minutes for
+`nginx-test.sh`, 13 for `nginx-procedure-test.sh`, 10 for `rights-test.sh`, 30 for `scripts-test.sh` and 35 for
+`image-files-test.sh`, whose two builds get 15 minutes each.
 
 `scripts-test.sh`'s cases, by number:
 
@@ -673,13 +677,16 @@ Each test script starts only `--rm` containers with time limits, and removes its
 trap. Their containers end by themselves too: `nginx-test.sh`'s after 10 minutes, `nginx-procedure-test.sh`'s after 7,
 `rights-test.sh`'s after 5, and `scripts-test.sh`'s after 25, whose cases get 20 at most. Docker picks
 `nginx-test.sh`'s subnet for each run, so runs side by side don't clash; a killed run leaves its network, which
-`docker network prune --filter label=mbtest-nginx` removes. `MBTEST_CASES="5 17"` runs only those cases of
+`docker network prune --filter label=mbtest-nginx` removes. `image-files-test.sh` removes its two images when it ends;
+their build cache stays, so the next run is quicker, and `docker builder prune` removes it. A run of it killed during a
+build can leave its scratch folder, `mbtest-files.*` in TMPDIR, and, once that build ends, its images, which
+`docker image prune -a -f --filter label=mbtest-files` removes. `MBTEST_CASES="5 17"` runs only those cases of
 `scripts-test.sh`, and `MBTEST_SAVE=<folder>` keeps its outputs. Each stand-in in `tests/fakes/` says at its top what
-it records and which `FAKE_*` variables change what it does. `deploy/tests/fixtures/compose-before-pr3.yml` is the
-server's compose file from before these deploy files, word for word. `deploy/tests/local-stack.sh up|check|down` is a
-manual test of the whole stack (MariaDB, the dashboard image and nginx sharing one loopback, as host networking does,
-and the dashboard's socket in a volume they share), including the bootstrap's bot check with real Compose; it isn't in
-CI.
+it records and which `FAKE_*` variables change what it does.
+`deploy/tests/fixtures/compose-before-pr3.yml` is the server's compose file from before these deploy files, word for
+word. `deploy/tests/local-stack.sh up|check|down` is a manual test of the whole stack (MariaDB, the dashboard image and
+nginx sharing one loopback, as host networking does, and the dashboard's socket in a volume they share), including the
+bootstrap's bot check with real Compose; it isn't in CI.
 
 On this Windows machine, in Git Bash, with temporary files off the nearly full C: drive:
 
@@ -689,6 +696,7 @@ bash deploy/tests/nginx-test.sh
 bash deploy/tests/nginx-procedure-test.sh
 bash deploy/tests/rights-test.sh
 bash deploy/tests/scripts-test.sh
+bash deploy/tests/image-files-test.sh
 timeout 120 docker run --rm -v "$(pwd -W):/mnt:ro" -w /mnt koalaman/shellcheck:stable -x -P SCRIPTDIR deploy/*.sh deploy/tests/*.sh deploy/tests/fakes/*
 d=$(mktemp -d) && cp deploy/compose.yml "$d/" && touch "$d/bot.env" && timeout 60 docker compose -f "$d/compose.yml" config --quiet; rm -r "$d"
 ```
