@@ -535,14 +535,49 @@ socket_problem() {
     fi
 }
 
+# The proxy key the dashboard runs with, from its container's environment, or dashboard.env's when there's no container
+# or Docker doesn't say. It's only ever compared, or sent to the dashboard on curl's standard input, never printed or put
+# in a command line.
+dashboard_key() {
+    local vars line key=''
+    vars=$(run_for 30 docker container inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$dashboard_container" 2> /dev/null) \
+        || vars=
+    while IFS= read -r -t 5 line; do
+        case $line in
+            Dashboard__ProxyKey=*) key=${line#Dashboard__ProxyKey=} ;;
+        esac
+    done <<< "$vars"
+    if [ -z "$key" ]; then
+        key=$(env_value "$home/dashboard.env" Dashboard__ProxyKey 2> /dev/null) || key=
+    fi
+    printf '%s\n' "$key"
+}
+
+# The home page's HTTP status through the dashboard's socket, asked as nginx asks for it: the public name, https, and the
+# proxy key, which goes in on curl's standard input, so it's never in a command line. 000 when nothing answered. The page
+# needs no database, but it renders the layout, which reads the stylesheet, so a dashboard that can't render its pages,
+# as one that can't read its own files can't, answers 500 here while /health/ready answers Healthy.
+home_page_status() {   # home_page_status <proxy key>
+    local code
+    code=$(printf 'X-MinerBot-Proxy-Key: %s\n' "$1" | run_for 15 curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+        --unix-socket "$dashboard_socket" -H @- -H "Host: $public_host" -H 'X-Forwarded-Proto: https' \
+        http://localhost/ 2> /dev/null) || true
+    if [[ $code =~ ^[0-9]{3}$ ]]; then
+        printf '%s\n' "$code"
+    else
+        echo 000
+    fi
+}
+
 # Waits until the dashboard is ready, for 90 seconds: its container runs the image it must, when one is given, with no
-# new restart, and isn't unhealthy; socket_problem finds nothing; and /health/ready, asked through the socket and read
-# up to 64 bytes, answers Healthy, which proves both databases with its own login and rights. Then, when the public home
-# page answered 200 before the swap, it must answer 200 again within 30 seconds. A container on another image fails at
-# once: Compose has returned, so nothing changes it any more.
+# new restart, and isn't unhealthy; socket_problem finds nothing; /health/ready, asked through the socket and read up to
+# 64 bytes, answers Healthy, which proves both databases with its own login and rights; and its home page, asked through
+# the socket as nginx asks for it, with the proxy key the container runs with, answers 200, which proves it can render a
+# page. Then, when the public home page answered 200 before the swap, it must answer 200 again within 30 seconds. A
+# container on another image fails at once: Compose has returned, so nothing changes it any more.
 ready_dashboard() {   # ready_dashboard [<public status before the swap>] [<restart count it starts from, 0 by default, or first: its first look's>] [<image ID it must run>]
     local public_before=${1:-} base=${2:-0} expected=${3:-} limit=90 public_limit=30 poll=2 started=$SECONDS
-    local state image running restarts health said why
+    local state image running restarts health said key page why
     if test_fast; then
         limit=10 public_limit=4 poll=0.5
     fi
@@ -574,10 +609,22 @@ ready_dashboard() {   # ready_dashboard [<public status before the swap>] [<rest
             if [ -z "$why" ]; then
                 said=$(run_for 10 curl -s --max-time 5 --unix-socket "$dashboard_socket" -H 'Host: localhost' \
                     http://localhost/health/ready 2> /dev/null | head -c 64) || true
-                if [ "$said" = Healthy ]; then
-                    break
+                if [ "$said" != Healthy ]; then
+                    why="/health/ready answers \"${said:0:40}\""
+                else
+                    key=$(dashboard_key)
+                    if [ -z "$key" ]; then
+                        why="/health/ready answers Healthy, but the proxy key the dashboard runs with couldn't be read, from its container or dashboard.env, to ask for its home page"
+                    else
+                        page=$(home_page_status "$key")
+                        case $page in
+                            200) break ;;
+                            000) why="/health/ready answers Healthy, but its home page didn't answer through its socket within 10 seconds" ;;
+                            404) why="/health/ready answers Healthy, but its home page answers 404 through its socket, as the dashboard does to a request without the proxy key it runs with" ;;
+                            *) why="/health/ready answers Healthy, but its home page answers $page through its socket, not 200" ;;
+                        esac
+                    fi
                 fi
-                why="/health/ready answers \"${said:0:40}\""
             fi
         fi
         if [ $((SECONDS - started)) -ge "$limit" ]; then
@@ -586,7 +633,7 @@ ready_dashboard() {   # ready_dashboard [<public status before the swap>] [<rest
         fi
         sleep "$poll"
     done
-    echo "The dashboard is ready: /health/ready answers Healthy through its socket, which only it can make."
+    echo "The dashboard is ready: /health/ready answers Healthy, and its home page 200, through its socket, which only it can make."
     [ "$public_before" = 200 ] || return 0
     started=$SECONDS
     until [ "$(public_status)" = 200 ]; do

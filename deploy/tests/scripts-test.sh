@@ -1165,7 +1165,7 @@ case_3() {
 }
 
 case_4() {
-    begin 4 "a full deploy: src checked out readable, the settings checked in isolation, with the socket compose.yml gives, the rights rehearsed, applied and compared, then the dashboard swapped and ready (its own socket, the public check) before the bot; history ok; run logs pruned to the newest 60"
+    begin 4 "a full deploy: src checked out readable, the settings checked in isolation, with the socket compose.yml gives, the rights rehearsed, applied and compared, then the dashboard swapped and ready (its own socket, its home page through it, the public check) before the bot; history ok; run logs pruned to the newest 60"
     local log dash bot n expected
     restore deployed
     set_main "$c5"
@@ -1190,6 +1190,8 @@ case_4() {
         '^curl \[timeout -k 10 15\] -s -o /dev/null -w %\{http_code\} --max-time 10 https://bot.murderminershub.com/$' \
         '^docker \[timeout -k 10 120\] compose -f /opt/minerbot/compose.yml --project-directory /opt/minerbot up -d --no-build --no-deps dashboard$' \
         '^curl \[timeout -k 10 10\] -s --max-time 5 --unix-socket /run/minerbot-dashboard/dashboard.sock -H Host: localhost http://localhost/health/ready$' \
+        '^docker \[timeout -k 10 30\] container inspect -f \{\{range \.Config\.Env\}\}\{\{println \.\}\}\{\{end\}\} minerbot-dashboard$' \
+        '^curl \[timeout -k 10 15\] -s -o /dev/null -w %\{http_code\} --max-time 10 --unix-socket /run/minerbot-dashboard/dashboard.sock -H @- -H Host: bot\.murderminershub\.com -H X-Forwarded-Proto: https http://localhost/$' \
         '^curl \[timeout -k 10 15\] -s -o /dev/null -w %\{http_code\} --max-time 10 https://bot.murderminershub.com/$' \
         '^docker \[timeout -k 10 120\] compose -f /opt/minerbot/compose.yml --project-directory /opt/minerbot up -d --no-build --no-deps bot$' \
         '^docker \[timeout -k 10 30\] logs --since \S+ minerbot-bot$'
@@ -1201,7 +1203,7 @@ case_4() {
         || problem "the dashboard's current and previous tags aren't c5's and c1's images"
     [ "$(tag_of minerbot-bot:current)" = "$bot" ] && [ "$(tag_of minerbot-bot:previous)" = "$(image_of "$c1" bot)" ] \
         || problem "the bot's current and previous tags aren't c5's and c1's images"
-    expect_said "The dashboard is ready: /health/ready answers Healthy through its socket, which only it can make." "the full deploy" "$log"
+    expect_said "The dashboard is ready: /health/ready answers Healthy, and its home page 200, through its socket, which only it can make." "the full deploy" "$log"
     expect_said "The public home page answers 200, as before the swap." "the full deploy" "$log"
     expect_said "The bot is ready, and still runs." "the full deploy" "$log"
     grep -qP "\tdeploy\tdashboard\t${c5:0:12}\tok\twas ${c1:0:12}" "$home/logs/history.log" || problem "no history line for the dashboard's swap"
@@ -1242,7 +1244,7 @@ case_5() {
     in_home restarted 120 ./deploy.sh
     expect_exit 0 "$what"
     expect_said "The dashboard is already on ${c1:0:12}." "$what"
-    expect_said "The dashboard is ready: /health/ready answers Healthy through its socket, which only it can make." "$what"
+    expect_said "The dashboard is ready: /health/ready answers Healthy, and its home page 200, through its socket, which only it can make." "$what"
     expect_said "The bot is ready, and still runs." "$what"
     ! said "its container restarted" || problem "$what: a restart from before the deploy counted as one" "$(excerpt)"
     [ "$(cut -d' ' -f2,3 /fake/docker/ctr/minerbot-dashboard)" = "true 0" ] || problem "$what: the dashboard wasn't started"
@@ -2464,6 +2466,95 @@ case_64() {
         || problem "the deploy dropped the right of X's dashboard, which ran while its rights applied"
     [ "$(tag_of minerbot-dashboard:previous)" = "$(image_of "$x" dashboard)" ] \
         || problem "X's dashboard, which ran before the swap, isn't :previous after it"
+    verdict
+}
+
+case_65() {
+    begin 65 "the home page through the socket: a dashboard that answers every page with 500 while /health/ready says Healthy isn't ready, so a deploy goes back to its earlier image, the first swap, which has no public 200 to compare, stops and removes it, and a rollback onto such an image fails; the page is asked for with the proxy key its container runs with, which stays off every command line, and a key it doesn't run with gets its 404, which isn't ready either"
+    local log key2 mark what
+    mark=$(wc -l < "$calls")
+    key2=$(printf 'mbtest proxy key two' | sha256sum | cut -c1-64)
+    restore deployed
+    set_main "$c5"
+    in_home page-fails 120 env FAKE_PAGE_FAIL="dashboard@${c5:0:12}" ./deploy.sh --only dashboard
+    expect_exit 1 "the deploy whose dashboard can't render a page"
+    log=$(last_log deploy)
+    expect_said "/health/ready answers Healthy, but its home page answers 500 through its socket, not 200." \
+        "the deploy whose dashboard can't render a page" "$log"
+    expect_said "so it's back on ${c1:0:12}, which is ready." "the deploy whose dashboard can't render a page" "$log"
+    [ "$(ctr_image minerbot-dashboard)" = "$(image_of "$c1" dashboard)" ] && [ "$(tag_of minerbot-dashboard:current)" = "$(image_of "$c1" dashboard)" ] \
+        || problem "the dashboard isn't back on c1's image"
+    [ "$(tag_of minerbot-dashboard:failed)" = "$(image_of "$c5" dashboard)" ] || problem ":failed isn't c5's image"
+    grep -qP "\tdeploy\tdashboard\t${c5:0:12}\tnot ready\tback on ${c1:0:12}" "$home/logs/history.log" \
+        || problem "no history line for the swap that went back"
+
+    # The first swap, as when the dashboard first started on the server: no earlier image, and nothing to compare the
+    # public home page with
+    restore setup
+    in_home first-page-fails 120 env FAKE_PAGE_FAIL="dashboard@${c1:0:12}" ./deploy.sh --only dashboard
+    expect_exit 1 "the first swap of a dashboard that can't render a page"
+    log=$(last_log deploy)
+    expect_said "The public home page answers 503 before the swap." "the first swap of a dashboard that can't render a page" "$log"
+    expect_said "its home page answers 500 through its socket" "the first swap of a dashboard that can't render a page" "$log"
+    expect_said "there's no earlier image to go back to, so it's stopped and removed" \
+        "the first swap of a dashboard that can't render a page" "$log"
+    [ ! -e /fake/docker/ctr/minerbot-dashboard ] && [ -z "$(tag_of minerbot-dashboard:current)" ] \
+        || problem "the first dashboard that can't render a page is still there, or :current is"
+    [ "$(tag_of minerbot-dashboard:failed)" = "$(image_of "$c1" dashboard)" ] || problem ":failed isn't c1's image"
+
+    restore deployed
+    in_home back-page-fails 60 env FAKE_PAGE_FAIL="dashboard@${old_dashboard_label:0:12}" ./rollback.sh dashboard
+    expect_exit 1 "the rollback onto a dashboard that can't render a page"
+    log=$(last_log rollback)
+    expect_said "its home page answers 500 through its socket" "the rollback onto a dashboard that can't render a page" "$log"
+    expect_said "The dashboard isn't ready on ${old_dashboard_label:0:12} either (above)" \
+        "the rollback onto a dashboard that can't render a page" "$log"
+
+    # Compose exits 0 but leaves the container on the settings it was made with (FAKE_UP_KEEP), so dashboard.env names
+    # another proxy key than the container runs with. Real Compose recreates a container whose env file changed, so this
+    # is the anomaly that taking the container's key first guards against: the check sends the key the dashboard
+    # compares with, and it's ready.
+    what="the same commit again while dashboard.env names another proxy key than the container"
+    restore deployed
+    set_main "$c5"
+    in_home made 120 ./deploy.sh --only dashboard
+    expect_exit 0 "the test's start: the deploy that makes the dashboard's container"
+    write_dashboard_env "$key2" "$pw1" ""
+    in_home other-key 120 env FAKE_UP_KEEP=dashboard ./deploy.sh --only dashboard
+    grep -qx "Dashboard__ProxyKey=$key1" /fake/docker/env/minerbot-dashboard 2> /dev/null \
+        || problem "the test's start: the dashboard's container doesn't still run with the first key"
+    expect_exit 0 "$what"
+    log=$(last_log deploy)
+    expect_said "The dashboard is ready: /health/ready answers Healthy, and its home page 200, through its socket, which only it can make." \
+        "$what" "$log"
+    in_order "the page asked for with the key on standard input, after /health/ready" \
+        '^curl \[timeout -k 10 10\] -s --max-time 5 --unix-socket /run/minerbot-dashboard/dashboard.sock -H Host: localhost http://localhost/health/ready$' \
+        '^curl \[timeout -k 10 15\] -s -o /dev/null -w %\{http_code\} --max-time 10 --unix-socket /run/minerbot-dashboard/dashboard.sock -H @- -H Host: bot\.murderminershub\.com -H X-Forwarded-Proto: https http://localhost/$'
+
+    # Docker doesn't answer the look at the container's environment, so the check takes dashboard.env's key, which the
+    # dashboard doesn't run with: it answers 404, as to anyone without its key, and isn't ready
+    what="the same commit again while Docker doesn't say the container's environment"
+    trap 'if [ -e /usr/local/bin/docker.mbtest-65 ]; then mv -f /usr/local/bin/docker.mbtest-65 /usr/local/bin/docker; fi' EXIT
+    if mv /usr/local/bin/docker /usr/local/bin/docker.mbtest-65; then
+        cat > /usr/local/bin/docker << 'EOF'
+#!/usr/bin/env bash
+if [ "${1:-} ${2:-} ${3:-} ${4:-} ${5:-}" = "container inspect -f {{range .Config.Env}}{{println .}}{{end}} minerbot-dashboard" ]; then
+    echo "Error response from daemon: a made-up timeout" >&2
+    exit 124
+fi
+exec /usr/local/bin/docker.mbtest-65 "$@"
+EOF
+        chmod 755 /usr/local/bin/docker
+        in_home key-unknown 120 env FAKE_UP_KEEP=dashboard ./deploy.sh --only dashboard
+        mv -f /usr/local/bin/docker.mbtest-65 /usr/local/bin/docker
+        expect_exit 1 "$what"
+        expect_said "its home page answers 404 through its socket, as the dashboard does to a request without the proxy key it runs with" \
+            "$what" "$(last_log deploy)"
+    else
+        problem "the test couldn't set the stand-in docker aside"
+    fi
+    ! grep -qF -e "$key1" -e "$key2" < <(tail -n +"$((mark + 1))" "$calls") || problem "a proxy key is in the arguments of one of this case's calls"
+    ! grep -qF -e "$key1" -e "$key2" "$out"/*.out "$home"/logs/*.log || problem "a proxy key is in this case's output or the logs"
     verdict
 }
 

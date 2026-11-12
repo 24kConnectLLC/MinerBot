@@ -84,7 +84,10 @@ namespace MinerBot.Dashboard.Security
                 """;
         }
 
-        // Versioned like the layout's link, so a browser never keeps an old stylesheet
+        // Versioned like the layout's link, so a browser never keeps an old stylesheet. One that can't be read gets the plain
+        // link, because the error page must never fail itself. On Linux a file the app's user can't open throws
+        // UnauthorizedAccessException, which isn't an IOException: the first image on the server had such a stylesheet,
+        // and every page, this one included, answered an empty 500 without a request ID.
         static string Stylesheet(HttpContext context)
         {
             const string path = "/css/site.css";
@@ -93,7 +96,7 @@ namespace MinerBot.Dashboard.Security
             {
                 return context.RequestServices.GetService<IFileVersionProvider>()?.AddFileVersionToPath(context.Request.PathBase, path) ?? path;
             }
-            catch (IOException)
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
             {
                 return path;
             }

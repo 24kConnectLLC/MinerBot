@@ -97,25 +97,10 @@ in_use() {   # in_use <image ID>: true when a tag or a container still refers to
 now() { date -u +%Y-%m-%dT%H:%M:%S.%NZ; }
 new_hex() { head -c 32 /dev/urandom | sha256sum | cut -c1-64; }
 
-# The KEY=VALUE lines of a container's env file, as Compose gives them to the container it makes
-env_of() {   # env_of <container name>
-    local file=/opt/minerbot/bot.env
-    if [ "$1" = minerbot-dashboard ]; then
-        file=/opt/minerbot/dashboard.env
-    fi
-    if [ -f "$file" ]; then
-        grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$file" || true
-    fi
-}
-
 fill() {   # fill <template> <container name>: the templates the scripts use with docker container inspect -f
     local template=$1 image running restarts started health pid id hash status=exited with_none with_words label='' key
     if [ "$template" = '{{range .Config.Env}}{{println .}}{{end}}' ]; then
-        if [ -f "$D/env/$2" ]; then
-            cat "$D/env/$2"
-        else
-            env_of "$2"
-        fi
+        container_env "$2"
         return 0
     fi
     read -r image running restarts started health pid id hash < "$D/ctr/$2"

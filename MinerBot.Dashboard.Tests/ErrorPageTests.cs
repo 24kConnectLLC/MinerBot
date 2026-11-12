@@ -8,6 +8,7 @@ using DataAccessLibrary.Dashboard.Models;
 using DataAccessLibrary.Tests.Database;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc.ViewFeatures;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
@@ -159,6 +160,34 @@ namespace MinerBot.Dashboard.Tests
             Assert.Contains("/css/site.css", page);
             AssertNoDetails(page);
             RequestId(page);
+        }
+
+        // On Linux a stylesheet the app's user can't open throws UnauthorizedAccessException, not an IOException, as on the
+        // first image on the server. The error page still comes, with the stylesheet's plain link, instead of an empty 500.
+        [Fact]
+        public async Task AnUnreadableStylesheetStillGetsThePage()
+        {
+            var services = new ServiceCollection().AddLogging()
+                .AddSingleton<IFileVersionProvider>(new UnreadableStylesheet())
+                .BuildServiceProvider();
+            var context = new DefaultHttpContext { RequestServices = services };
+            context.Response.Body = new MemoryStream();
+            context.Features.Set<IExceptionHandlerFeature>(new ExceptionHandlerFeature { Error = new UnauthorizedAccessException("marker"), Path = "/" });
+
+            await ErrorResponses.WriteAsync(context);
+
+            var page = Encoding.UTF8.GetString(((MemoryStream)context.Response.Body).ToArray());
+            Assert.Equal(StatusCodes.Status500InternalServerError, context.Response.StatusCode);
+            Assert.Contains(ErrorResponses.Failed, WebUtility.HtmlDecode(page));
+            Assert.Contains("href=\"/css/site.css\"", page);
+            AssertNoDetails(page, "marker");
+            RequestId(page);
+        }
+
+        sealed class UnreadableStylesheet : IFileVersionProvider
+        {
+            public string AddFileVersionToPath(PathString requestPathBase, string path) =>
+                throw new UnauthorizedAccessException("Access to the path '/app/wwwroot/css/site.css' is denied.");
         }
 
         [GeneratedRegex("Request ID: <code>([^<]+)</code>")]
