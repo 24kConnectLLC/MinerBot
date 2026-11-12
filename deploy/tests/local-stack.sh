@@ -791,8 +791,9 @@ bind_as() {   # bind_as <uid:gid> <socket path>
 }
 
 # deploy.sh's readiness check on the socket, in the server's OS as root: common.sh's own socket_problem, which status.sh
-# uses too, then /health/ready through the socket, read up to 64 bytes. It prints what socket_problem said, or "none",
-# and on the next line what /health/ready answered.
+# uses too, then /health/ready through the socket, read up to 64 bytes, then common.sh's own home_page_status, with the
+# stack's proxy key, which goes in on standard input ahead of common.sh, so it's never in a command line. It prints what
+# socket_problem said, or "none", then on one line each what /health/ready and the home page answered.
 server_rule() {
     local out
     have_image "$alma_image" || {
@@ -801,12 +802,14 @@ server_rule() {
     }
     dk 30 rm -f -v "$stack-rule" > /dev/null 2>&1 || true
     # shellcheck disable=SC2016 # the $ are for the container's shell
-    out=$(dk 120 run -i --rm --name "$stack-rule" --label "$label" --network none "${socket_mount_ro[@]}" "$alma_image" \
-        bash -c 'cat > /tmp/common.sh && source /tmp/common.sh || exit 1
+    out=$( { printf '%s\n' "$proxy_key"; cat "$deploy/common.sh"; } \
+        | dk 120 run -i --rm --name "$stack-rule" --label "$label" --network none "${socket_mount_ro[@]}" "$alma_image" \
+        bash -c 'IFS= read -r key && cat > /tmp/common.sh && source /tmp/common.sh || exit 1
             why=$(socket_problem)
             said=$(run_for 10 curl -s --max-time 5 --unix-socket "$dashboard_socket" -H "Host: localhost" \
                 http://localhost/health/ready | head -c 64)
-            printf "%s\n%s\n" "${why:-none}" "$said"' < "$deploy/common.sh" 2>&1) || out="it didn't run: $out"
+            page=$(home_page_status "$key")
+            printf "%s\n%s\n%s\n" "${why:-none}" "$said" "$page"' 2>&1) || out="it didn't run: $out"
     dk 30 rm -f -v "$stack-rule" > /dev/null 2>&1 || true
     printf '%s\n' "$out"
 }
@@ -830,8 +833,8 @@ socket_files() {
         problem "nginx's workers don't all run as 65534:65534, nobody" "$ids"
     fi
     said=$(server_rule)
-    [ "$said" = $'none\nHealthy' ] \
-        || problem "deploy.sh's readiness rule in $alma_image, socket_problem and then /health/ready, didn't pass" "$said"
+    [ "$said" = $'none\nHealthy\n200' ] \
+        || problem "deploy.sh's readiness rule in $alma_image, socket_problem, /health/ready and then the home page with the key, didn't pass" "$said"
     compose=$(tr -d '\r' < "$deploy/compose.yml")
     conf=$(tr -d '\r' < "$deploy/minerbot-dashboard.conf")
     tmpfiles=$(tr -d '\r' < "$deploy/minerbot-dashboard.tmpfiles")
@@ -1253,7 +1256,7 @@ check() {
     on_the_socket || true
     verdict "on the dashboard's socket, as root: 404 without the key, 400 for another Host even with it, 200 with it, Healthy from localhost's /health/live and /health/ready; and nothing answers on 127.0.0.1:5080"
     socket_files || true
-    verdict "the socket's folder is 2750, 1654:nobody, with only the socket in it, which is 660, 1654:nobody; nginx's workers run as nobody; deploy.sh's readiness rule passes in $alma_image; compose.yml, nginx's file and the tmpfiles line name the same paths"
+    verdict "the socket's folder is 2750, 1654:nobody, with only the socket in it, which is 660, 1654:nobody; nginx's workers run as nobody; deploy.sh's readiness rule, the home page through the socket included, passes in $alma_image; compose.yml, nginx's file and the tmpfiles line name the same paths"
     socket_access || true
     verdict "nobody, nginx's account, can ask the dashboard through the socket and gets the bare 404 without the key; another account can't reach it; neither can make a file or a socket in its folder"
     broken_settings || true

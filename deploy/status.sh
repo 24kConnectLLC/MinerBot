@@ -34,26 +34,9 @@ gib() {   # gib <KiB>: whole GiB
 
 # ---- The public path: the proxy key nginx sends, and the public home page
 
-# The proxy key the dashboard runs with, from its container's environment, or dashboard.env's when there's no container
-# or Docker doesn't say. It's only ever compared, never printed.
-dashboard_key() {
-    local vars line key=''
-    vars=$(run_for 30 docker container inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$dashboard_container" 2> /dev/null) \
-        || vars=
-    while IFS= read -r -t 5 line; do
-        case $line in
-            Dashboard__ProxyKey=*) key=${line#Dashboard__ProxyKey=} ;;
-        esac
-    done <<< "$vars"
-    if [ -z "$key" ]; then
-        key=$(env_value "$home/dashboard.env" Dashboard__ProxyKey 2> /dev/null) || key=
-    fi
-    printf '%s\n' "$key"
-}
-
 # What's wrong with the proxy key nginx sends, as one clause, or nothing: proxy-key.conf must be the one line setup writes
-# for the dashboard's key. The dashboard answers every request without that key with 404, and nginx -t passes without the
-# file, since its include is a pattern.
+# for the dashboard's key, which dashboard_key in common.sh reads. The dashboard answers every request without that key
+# with 404, and nginx -t passes without the file, since its include is a pattern.
 proxy_key_problem() {
     if [ ! -f "$nginx_secrets/proxy-key.conf" ]; then
         echo "nginx's $nginx_secrets/proxy-key.conf is missing"

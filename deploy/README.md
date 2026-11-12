@@ -169,12 +169,20 @@ in place before the old image starts, so it runs as it did: "compose.yml changed
 last ready, so the compose.yml it was ready under is back in place, until the next deploy installs the new one again."
 The history line then ends `, under the earlier compose.yml`.
 
-Ready means, for the dashboard, within 90 seconds: its container runs the image it must, with no new restart, and
-isn't unhealthy; its socket is as nginx needs it; and `/health/ready`, asked through the socket, answers `Healthy`,
-which proves both databases with its own login and rights. When the public home page answered 200 before the swap, it
-must answer 200 again within 30 seconds. For the bot, until PR 6 gives it a status the deploy can ask: a line matching
-`BOT_READY_PATTERN` from `server.conf` in its log within 150 seconds, and 20 seconds later it still runs with the same
-start time and no new restart. A container on another image than the one it must run fails at once.
+Ready means, for the dashboard, within 90 seconds: its container runs the image it must, with no new restart, and isn't
+unhealthy; its socket is as nginx needs it; `/health/ready`, asked through the socket, answers `Healthy`, which proves
+both databases with its own login and rights; and its home page, asked through the socket as nginx asks for it, with the
+proxy key its container runs with (or `dashboard.env`'s when Docker doesn't say), answers 200, which proves it can
+render a page. `/health/ready` renders none. On 2026-11-12, the deploy that first started the dashboard on the server,
+and a rebuild deployed after it, each started a dashboard that couldn't read its own stylesheet: every page answered 500
+while `/health/ready` answered `Healthy`, and both were called ready. When the public home page answered 200 before a
+deploy's swap, it must answer 200 again within 30 seconds, but no other readiness check looks at the public page, and
+`status.sh --check` looks at it only once a night. A first swap (503 before it), a swap over a dashboard that already
+fails, or one whose request Cloudflare challenges has nothing to compare. A failed swap's put-back, a deploy that finds
+the dashboard already on its image, `rollback.sh`, and setup's start and recreate don't look at the public page at all.
+That's why the page check goes through the socket. For the bot, until PR 6 gives it a status the deploy can ask: a line
+matching `BOT_READY_PATTERN` from `server.conf` in its log within 150 seconds, and 20 seconds later it still runs with
+the same start time and no new restart. A container on another image than the one it must run fails at once.
 
 `rollback.sh` puts its tags back when Compose never replaced the container: "Compose didn't recreate the <service> on
 <rev> (above), so it still runs <rev>, and its tags are back as they were. Nothing was changed." A rollback onto an
@@ -424,7 +432,12 @@ account can make a file in the socket's folder.
 - The image's health check, `dotnet MinerBot.Dashboard.dll healthcheck`, asks `/health/live` through the socket.
 - The readiness check and `status.sh` look at the folder (2750, owner 1654, group `nobody`) and the socket (a socket of
   1654 and `nobody` that the group can write to), with `socket_problem` in `common.sh`. The readiness check then asks
-  `curl -s --max-time 5 --unix-socket /run/minerbot-dashboard/dashboard.sock -H 'Host: localhost' http://localhost/health/ready`.
+  `curl -s --max-time 5 --unix-socket /run/minerbot-dashboard/dashboard.sock -H 'Host: localhost' http://localhost/health/ready`,
+  and then the home page, with `home_page_status` in `common.sh`: `-H 'Host: bot.murderminershub.com'`,
+  `-H 'X-Forwarded-Proto: https'` and `http://localhost/` on the same socket, and the proxy key on curl's standard input
+  through `-H @-`, so it's never in a command line. The key is the one the container runs with, from
+  `docker container inspect`, or `dashboard.env`'s when Docker doesn't say, as `status.sh` takes it too. A 404 there
+  means the key didn't match.
   By hand, `stat -c '%a %u %G %F' /run/minerbot-dashboard /run/minerbot-dashboard/dashboard.sock` prints
   `2750 1654 nobody directory` and `660 1654 nobody socket` while the dashboard runs.
 - While the socket is missing, or there with nothing listening, nginx answers with its own plain 503 and
@@ -576,6 +589,13 @@ previous nginx file too, because a deploy swaps the dashboard before setup insta
 this, such as a new upstream, Host or proxy-key header, is split over pull requests: an image that works both ways,
 then the file, then the old way goes.
 
+The same holds for the request the readiness check sends, `home_page_status` in `common.sh`, since a deploy installs
+the deploy files forward only. Every dashboard that a deploy, a failed swap's put-back, `rollback.sh` or setup starts
+must answer it with 200: `/`, asked through the socket with the public Host, `X-Forwarded-Proto: https`, the proxy key
+and no cookie. So the home page keeps answering a visitor who isn't signed in with the page itself, which a comment
+in `MinerBot.Dashboard/Pages/Index.cshtml.cs` repeats. A change to that request, such as a renamed proxy-key header,
+waits until the previous image answers the new one too.
+
 ## Backups and restore
 
 `backup.sh nightly` runs at 03:17 from `/etc/cron.d/minerbot`; every deploy with migrations runs `backup.sh pre-deploy`
@@ -653,7 +673,7 @@ CI's required "Build and test" job runs, after the .NET tests:
 | `bash deploy/tests/nginx-test.sh` | 26 checks of the nginx file in `nginx:1.31.8-alpine`, next to a cPanel-like configuration, with a stand-in dashboard on the socket: headers, the Cloudflare-only rule, body caps, timeouts, logs, the 503 page, `pipelog.conf`, and that nothing reaches 127.0.0.1:5080 |
 | `bash deploy/tests/nginx-procedure-test.sh` | 23 checks of the real `nginx_change`, `nginx_remove`, `nginx_undo_cut_off`, `nginx_look`, the reload's proof and cPanel's pipelog hook against a real nginx 1.31.8, cut-off runs, an undo after WHM's piped logging changed, and reloads nginx doesn't take included |
 | `bash deploy/tests/rights-test.sh` | 19 checks of the real `apply_rights` against MariaDB 11.4: the rights, the grant options, the copy setup applies, and the refusal of triggers, events and routines |
-| `bash deploy/tests/scripts-test.sh` | 65 cases of the deploy, rollback, setup, bootstrap, fill-secrets, backup and status logic in `almalinux:9`, the server's bash and coreutils, with stand-ins for Docker, MariaDB, nginx, systemd and the rest |
+| `bash deploy/tests/scripts-test.sh` | 66 cases of the deploy, rollback, setup, bootstrap, fill-secrets, backup and status logic in `almalinux:9`, the server's bash and coreutils, with stand-ins for Docker, MariaDB, nginx, systemd and the rest |
 | `bash deploy/tests/image-files-test.sh` | 5 checks of both images, built from files only root can read, as `deploy.sh`'s checkout under umask 077 left them: their user, 1654, can read every file in `/app`, and owns and can change nothing there but its volume's folder |
 
 The job has 125 minutes, and each of the five test steps a limit above its script's own: 15 minutes for
@@ -664,7 +684,7 @@ The job has 125 minutes, and each of the five test steps a limit above its scrip
 
 | Cases | What they cover |
 |---|---|
-| 1-12, 24-39, 60-64 | `deploy.sh` and `rollback.sh`: refusals, the first build, deploy files, full deploys, swaps that fail and go back, time limits, refs and main's first-parent line, Compose failing, a `compose.yml` a service can't run under, the socket, rewritten history, locks, units, readiness, an older dashboard's rights, cut-off swaps, following a run while `systemctl` doesn't answer, a swap Compose can't put back, and the rights every dashboard that can be put back keeps |
+| 1-12, 24-39, 60-65 | `deploy.sh` and `rollback.sh`: refusals, the first build, deploy files, full deploys, swaps that fail and go back, time limits, refs and main's first-parent line, Compose failing, a `compose.yml` a service can't run under, the socket, rewritten history, locks, units, readiness, an older dashboard's rights, cut-off swaps, following a run while `systemctl` doesn't answer, a swap Compose can't put back, the rights every dashboard that can be put back keeps, and a dashboard that can't render a page |
 | 13-16, 21, 50-59, 75 | `setup-dashboard.sh`: the first setup through a real terminal, nginx failures, converging, refusals, no terminal, the rights copy, password changes that stop, hidden pastes, a stopped dashboard, nginx's file waiting for its dashboard, a recreate Compose didn't do, a stale `pipelog.conf` or hook, a lone reload nginx didn't take, a stop after the undo of a cut-off nginx change, which names that undo |
 | 90-92 | a reload nginx doesn't take, `pipelog.conf` following WHM's piped logging, and triggers, events or routines in MinerBot's database |
 | 17, 42 | `backup.sh` |

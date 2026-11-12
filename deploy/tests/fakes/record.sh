@@ -80,6 +80,28 @@ listed() {   # listed <space-separated list> <word>: true when the word is in th
     [[ " $1 " == *" $2 "* ]]
 }
 
+# The KEY=VALUE lines of a container's env file, as Compose gives them to the container it makes
+env_of() {   # env_of <container name>
+    local file=/opt/minerbot/bot.env
+    if [ "$1" = minerbot-dashboard ]; then
+        file=/opt/minerbot/dashboard.env
+    fi
+    if [ -f "$file" ]; then
+        grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$file" || true
+    fi
+}
+
+# The environment a container runs with, as docker container inspect's {{range .Config.Env}} prints it: its env file's
+# lines when the stand-in docker made it, or, for a container it didn't make, such as the made-up states', its env
+# file's lines as they are now
+container_env() {   # container_env <container name>
+    if [ -f "$D/env/$1" ]; then
+        cat "$D/env/$1"
+    else
+        env_of "$1"
+    fi
+}
+
 running() {   # running bot|dashboard: true when that container exists and runs
     local image state='' rest
     { read -r image state rest < "$D/ctr/minerbot-$1"; } 2> /dev/null || return 1
