@@ -790,15 +790,22 @@ run_migrate() {
         || die "bot.env's ConnectionStrings__BotConnection can't be used as it is (above). Nothing was migrated or swapped."
     [ -n "$bot_connection" ] \
         || die "bot.env has no ConnectionStrings__BotConnection, which the migrations need. Nothing was migrated or swapped."
+    migrate_with "$bot_connection" minerbot-dashboard:new \
+        || die "The migrations didn't finish (above). Nothing was swapped. Migrations only ever add, so what runs keeps working."
+}
+
+# The migrations of a dashboard image, with a connection string that goes in as run_migrate's does, by name, never on a
+# command line. Returns 1 when they don't finish.
+migrate_with() {   # migrate_with <connection string> <image>
     # A run killed at its limit can leave the container behind, with the anonymous volume the image's VOLUME /app/keys
     # gives it. -v removes that too.
     run_for 30 docker rm -f -v minerbot-migrate > /dev/null 2>&1 || true
-    if ! ConnectionStrings__BotConnection=$bot_connection run_for 180 docker run --rm --pull never --name minerbot-migrate \
+    if ! ConnectionStrings__BotConnection=$1 run_for 180 docker run --rm --pull never --name minerbot-migrate \
         --network host --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777 --cap-drop ALL \
         --security-opt no-new-privileges:true --memory 256m --pids-limit 64 \
-        -e ConnectionStrings__BotConnection minerbot-dashboard:new migrate; then
+        -e ConnectionStrings__BotConnection "$2" migrate; then
         run_for 30 docker rm -f -v minerbot-migrate > /dev/null 2>&1 || true
-        die "The migrations didn't finish (above). Nothing was swapped. Migrations only ever add, so what runs keeps working."
+        return 1
     fi
     run_for 30 docker rm -f -v minerbot-migrate > /dev/null 2>&1 || true
 }
@@ -850,9 +857,10 @@ rights_of() {   # rights_of <user> <host>
 
 # What MinerBot's database holds that no migration makes, one per line and sorted, such as "trigger audit_log_stamp":
 # its triggers, events and stored routines. A trigger or an event runs with the rights of the login that made it, so one
-# made with the bot's own login, which has every right in that database and which the cPanel account owns, could change
-# or delete what the dashboard's login writes there, the audit log included, and survive every rights apply. A pull
-# request whose migration makes one changes this check.
+# made with the bot's own login, which has every right in that database, could change or delete what the dashboard's
+# login writes there, the audit log included, and survive every rights apply. While the database is still a cPanel one,
+# as before move-database.sh, the cPanel account that owns it can make one too. A pull request whose migration makes
+# one changes this check.
 bot_db_extras() {
     run_for 30 mariadb -N -e "SELECT CONCAT('trigger ', TRIGGER_NAME) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = '$BOT_DB' UNION ALL SELECT CONCAT('event ', EVENT_NAME) FROM information_schema.EVENTS WHERE EVENT_SCHEMA = '$BOT_DB' UNION ALL SELECT CONCAT(LOWER(ROUTINE_TYPE), ' ', ROUTINE_NAME) FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = '$BOT_DB'" \
         | LC_ALL=C sort
@@ -883,7 +891,7 @@ apply_rights() {   # apply_rights [<rights file>, the installed dashboard-rights
         return 1
     fi
     if [ -n "$extras" ]; then
-        echo "MinerBot's database, $BOT_DB, holds what no migration makes: ${extras//$'\n'/, }. Each runs with the rights of the login that made it, on rows the dashboard's login writes, the audit log's included, and no rights file takes that away. The bot's own database login can make one, and so can the cPanel account that owns that login. Look at each one, as in SHOW CREATE TRIGGER \`$BOT_DB\`.\`<name>\`; drop it unless someone here made it on purpose, and find out who made it. The dashboard's login wasn't touched."
+        echo "MinerBot's database, $BOT_DB, holds what no migration makes: ${extras//$'\n'/, }. Each runs with the rights of the login that made it, on rows the dashboard's login writes, the audit log's included, and no rights file takes that away. The bot's own database login can make one, and so can a cPanel account that owns this database. Look at each one, as in SHOW CREATE TRIGGER \`$BOT_DB\`.\`<name>\`; drop it unless someone here made it on purpose, and find out who made it. The dashboard's login wasn't touched."
         return 1
     fi
     rights_check_made=yes
@@ -926,6 +934,110 @@ apply_rights() {   # apply_rights [<rights file>, the installed dashboard-rights
         return 1
     fi
     echo "The database rights were rehearsed, applied and compared: the dashboard's login has exactly what ${file##*/} gives."
+}
+
+# ---- MinerBot's database outside cPanel
+
+# A cPanel account can take over every database and login its map lists, and so can anything that runs as that account,
+# such as its websites' code: change a login's password, give its own login rights, or read and change the rows.
+# move-database.sh moves MinerBot's database out of it, to these names, which cPanel can never claim: cPanel maps a
+# database to the account whose name and an underscore start it, and no cPanel account's name holds a hyphen. moved_db
+# has no underscore either, so a right on the whole database never reads it as a wildcard. The bot's cPanel login, which
+# keeps the website's database, must never get a right in moved_db.
+moved_db=minerbot
+bot_login=minerbot-bot
+
+# The cPanel account whose map, /var/cpanel/databases/<account>.json, lists the database; nothing when no account's
+# does. Only an account's own map counts: dbindex.db.json, cPanel's index of them all, names no account.
+cpanel_owner() {   # cpanel_owner <database>
+    local map account
+    for map in /var/cpanel/databases/*.json; do
+        account=${map##*/}
+        account=${account%.json}
+        [ -f "/var/cpanel/users/$account" ] || continue
+        # shellcheck disable=SC2016 # $db is jq's own variable
+        if run_for 10 jq -e --arg db "$1" '.MYSQL.dbs // {} | has($db)' "$map" > /dev/null 2>&1; then
+            printf '%s\n' "$account"
+            return 0
+        fi
+    done
+}
+
+# 1 when the database exists on this server, 0 when it doesn't; nothing, and exit 1, when MariaDB doesn't answer
+database_exists() {   # database_exists <database>
+    run_for 30 mariadb -N -e "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = '$1'"
+}
+
+new_password() {   # 40 letters and digits, made as setup-login.sh made the bot's, so it meets the server's password rules
+    local pw _
+    for _ in 1 2 3 4 5; do
+        pw=$(run_for 10 openssl rand -base64 64 | tr -dc 'A-Za-z0-9' | cut -c1-40) || pw=
+        if [[ $pw =~ ^[A-Za-z0-9]{40}$ ]]; then
+            printf '%s\n' "$pw"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Whether a login opens a database with this password, over TCP as the bot and the dashboard connect. The password goes
+# in on stdin, as an option file, never on a command line.
+login_works() {   # login_works <login> <password> <database>
+    printf '[client]\nuser=%s\npassword=%s\nhost=127.0.0.1\nprotocol=tcp\n' "$1" "$2" \
+        | run_for 15 mariadb --defaults-file=/dev/stdin -D "$3" -N -e 'SELECT 1' > /dev/null
+}
+
+# Makes the bot's own login on both its hosts, or gives it a new password where it exists, with the rights the
+# migrations and the bot need in the moved database and none anywhere else. None of them makes a view, a routine, a
+# trigger or an event: root's own scripts read this database, and any of those would run code there with root's rights.
+# The statements go in on stdin, never on a command line, and with --skip-print-query-on-error, without which MariaDB's
+# client prints a failing statement, password included.
+make_bot_login() {   # make_bot_login <password>
+    local host n sql=''
+    for host in localhost 127.0.0.1; do
+        n=$(run_for 30 mariadb -N -e "SELECT COUNT(*) FROM mysql.user WHERE User = '$bot_login' AND Host = '$host'") \
+            || return 1
+        if [ "$n" = 1 ]; then
+            sql+="ALTER USER '$bot_login'@'$host' IDENTIFIED BY '$1';"$'\n'
+        else
+            sql+="CREATE USER '$bot_login'@'$host' IDENTIFIED BY '$1';"$'\n'
+        fi
+        sql+="REVOKE ALL PRIVILEGES, GRANT OPTION FROM '$bot_login'@'$host';"$'\n'
+        sql+="GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP, REFERENCES ON \`$moved_db\`.* TO '$bot_login'@'$host';"$'\n'
+    done
+    run_for 30 mariadb --batch --skip-print-query-on-error <<< "$sql"
+}
+
+# A connection string with some of its parts set: each NAME=value replaces the part named NAME, which must be there once.
+# The other parts stay as they are, in their order. Prints nothing, and returns 1, when a part isn't there once.
+with_parts() {   # with_parts <connection string> <NAME=value>...
+    local cs=$1 part name out='' trailing=no
+    local -a parts=()
+    local -A cs_wanted=() cs_seen=()
+    shift
+    for part in "$@"; do
+        cs_wanted[${part%%=*}]=${part#*=}
+    done
+    if [[ $cs == *';' ]]; then
+        trailing=yes
+    fi
+    IFS=';' read -r -t 5 -a parts <<< "$cs" || true
+    for part in "${parts[@]}"; do
+        [ -n "$part" ] || continue
+        name=${part%%=*}
+        if [ -n "${cs_wanted[$name]+set}" ]; then
+            cs_seen[$name]=$((${cs_seen[$name]:-0} + 1))
+            part=$name=${cs_wanted[$name]}
+        fi
+        out+=${out:+;}$part
+    done
+    for name in "${!cs_wanted[@]}"; do
+        [ "${cs_seen[$name]:-0}" = 1 ] || return 1
+    done
+    if [ "$trailing" = yes ]; then
+        out+=';'
+    fi
+    printf '%s\n' "$out"
 }
 
 # ---- Deploy files

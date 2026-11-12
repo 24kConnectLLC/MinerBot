@@ -25,8 +25,9 @@ Where everything is
                            failed-<service>-<UTC>.log: the last log lines of a container a deploy took back out
   state/                   the lock and lock.info, deploy-files.commit, nginx-backup/ (the newest 3), bootstrap.done,
                            dashboard-rights.applied.sql (the rights the last apply used, which setup applies again),
-                           and compose-ready-bot.yml and compose-ready-dashboard.yml (the compose.yml each service was
-                           last ready under, which a failed swap puts back)
+                           compose-ready-bot.yml and compose-ready-dashboard.yml (the compose.yml each service was
+                           last ready under, which a failed swap puts back), and database-moved (after
+                           move-database.sh)
   src/                     the clone deploy.sh builds from, at the deployed commit
   old/                     the files from before the move to these deploy files, kept as they were
 
@@ -111,6 +112,11 @@ When a setting changes
       connection strings, moves the dashboard's rights, and may give its login a new password. Then:
       docker compose up -d --no-build --no-deps --force-recreate bot
       A database renamed outside cPanel also needs the bot's login's grants moved.
+  MinerBot's database out of cPanel, once
+      bash /opt/minerbot/src/deploy/move-database.sh moves it to minerbot, with the bot's own login minerbot-bot, both
+      root's alone. minerbot starts empty, with tables from the migrations: the old database stays, its rows are in the
+      pre-move dump, and whoever was signed in signs in again. Once the dashboard works on it, the same with --drop-old
+      deletes the old one through cPanel. state/database-moved records both. deploy/README.md says why.
 
 
 When something goes wrong
@@ -223,8 +229,8 @@ for each run. A failure is mailed to root, and the 05:47 check reports a backup 
 ./status.sh --mail-test proves the mail arrives. The website's database isn't in these dumps.
 
 To restore one. Nothing from a dump ever runs as MariaDB's root: a trigger, event or routine in a dump can hide SQL
-that would run with the rights of whoever restores it, and the bot's login, or the cPanel account it belongs to, can
-make one.
+that would run with the rights of whoever restores it, and the bot's login can make one, as could the cPanel account
+that owned MinerBot's database before move-database.sh moved it.
   1. ./backup.sh manual, a dump of the current state first.
   2. docker compose stop dashboard, and the bot too once it uses this database. Don't run ./setup-dashboard.sh before
      step 6: it starts a stopped dashboard.

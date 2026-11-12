@@ -24,7 +24,7 @@ old_files=(compose.yml deploy.sh rollback.sh fill-secrets.sh setup-login.sh move
 # lacks, and pgrep and ps from procps-ng: without pgrep, setup couldn't prove that nginx took a reload, and without ps,
 # the nightly check couldn't see that nginx never loaded proxy-key.conf.
 needed=(awk cmp curl cut date df diff docker du find flock getent git grep groupadd gzip install jq mariadb mariadb-dump
-    mktemp nginx openssl pgrep ps readlink sed sort stat systemctl systemd-run systemd-tmpfiles tail tar timeout tr
+    mktemp nginx openssl pgrep ps readlink sed sort stat systemctl systemd-run systemd-tmpfiles tail tar timeout tr uapi
     useradd)
 
 apply=no

@@ -7,17 +7,17 @@
 # the EXIT trap then, so backup.log says failed. A run killed outright, by a restart say, runs no trap and leaves its
 # "started" line with nothing after it, which the nightly check reports once it's 2 hours old. The check runs at 05:47,
 # after the nightly run's limit, so a nightly run cut off is reported that same morning.
-# Usage: ./backup.sh nightly|pre-deploy|manual
+# Usage: ./backup.sh nightly|pre-deploy|pre-move|manual
 #   nightly and manual wait up to 15 minutes for the deploy lock, so a dump never runs during a migration;
-#   pre-deploy comes only from deploy.sh, which holds that lock already.
+#   pre-deploy comes only from deploy.sh and pre-move only from move-database.sh, which hold that lock already.
 set -Eeuo pipefail
 umask 077
 # shellcheck source=common.sh
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/common.sh"
 
 reason=${1:-}
-if [ $# -ne 1 ] || ! [[ $reason =~ ^(nightly|pre-deploy|manual)$ ]]; then
-    echo "Usage: ./backup.sh nightly|pre-deploy|manual" >&2
+if [ $# -ne 1 ] || ! [[ $reason =~ ^(nightly|pre-deploy|pre-move|manual)$ ]]; then
+    echo "Usage: ./backup.sh nightly|pre-deploy|pre-move|manual" >&2
     exit 1
 fi
 
@@ -65,7 +65,7 @@ step="loading server.conf"
 load_server_conf
 
 step="waiting for the locks"
-if [ "$reason" != pre-deploy ]; then
+if [ "$reason" != pre-deploy ] && [ "$reason" != pre-move ]; then
     take_lock "backup $reason" 900 "A deploy held the lock for 15 minutes, so this $reason dump didn't run. A deploy dumps before any migration itself."
 fi
 install -d -m 700 "$home/state"
@@ -83,7 +83,7 @@ step="dumping"
 file=$backups/minerbot-$(date -u +%Y%m%dT%H%M%SZ)-$reason.sql.gz
 partial=$file.partial
 limit=900
-if [ "$reason" = pre-deploy ]; then
+if [ "$reason" = pre-deploy ] || [ "$reason" = pre-move ]; then
     limit=300
 fi
 install -d -m 700 "$home/state" "$home/state/tmp"

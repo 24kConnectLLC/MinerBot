@@ -25,7 +25,7 @@ umask 077
 # The server's MariaDB version. Change it with the server's.
 image=mariadb:11.4
 name=mbtest-rights-$$
-checks=19   # how many checks this script makes
+checks=21   # how many checks this script makes
 made=0
 passed=0
 notes=""
@@ -72,9 +72,9 @@ call_one() {   # call_one <function> [<arguments>...]
     # shellcheck source=../common.sh
     source /opt/minerbot/common.sh
     trap 'stopped $? $LINENO' ERR
-    # What load_server_conf takes from server.conf on the server
+    # What load_server_conf takes from server.conf on the server; MBTEST_BOT_DB stands for a server.conf the move changed
     SITE_DB=$site
-    BOT_DB=$bot
+    BOT_DB=${MBTEST_BOT_DB:-$bot}
     cd "$home"
     "$@" || die "$1 failed (above)."
 }
@@ -360,6 +360,60 @@ applied_copy_kept() {
     [ "$(stat -c '%a %U' "$copy" 2>&1)" = "600 root" ] || problem "the copy isn't root's alone, 600" "$(ls -l "$copy" 2>&1)"
 }
 
+# move-database.sh's database steps, with the real common.sh: the new database, and the bot's own login with exactly the
+# rights the migrations need there, none anywhere else and none it can pass on, also when it's made again; the first
+# migration runs with it; and it can make no view, routine, trigger or event, which root's scripts would run
+moved_login() {
+    local pw out want got kind
+    pw=$(head -c 600 /dev/urandom | tr -dc 'A-Za-z0-9' | cut -c 1-40)
+    out=$(sql "CREATE DATABASE minerbot CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_520_ci") \
+        || problem "couldn't make the database minerbot" "$out"
+    run_common make_bot_login "$pw"
+    [ "$status" = 0 ] || problem "make_bot_login failed (exit code $status)" "$said"
+    run_common make_bot_login "$pw"
+    [ "$status" = 0 ] || problem "make_bot_login run again, as a move that starts over runs it, failed (exit code $status)" "$said"
+    run_common login_works minerbot-bot "$pw" minerbot
+    [ "$status" = 0 ] || problem "the bot's login can't open minerbot with its password" "$said"
+    printf '[client]\nuser=minerbot-bot\npassword=%s\nhost=127.0.0.1\nprotocol=tcp\n' "$pw" > /tmp/bot.cnf
+    out=$(timeout -k 5 15 mariadb --defaults-file=/tmp/bot.cnf -N -e "SELECT COUNT(*) FROM $bot.schema_version" 2>&1) || true
+    expect "denied" "$out" "the bot's login reading the old database"
+    want=$(printf 'schema %s minerbot\n' ALTER CREATE DELETE DROP INDEX INSERT REFERENCES SELECT UPDATE | LC_ALL=C sort)
+    for host in localhost 127.0.0.1; do
+        got=$(rights minerbot-bot "$host")
+        if [ "$(grep '^schema ' <<< "$got")" != "$want" ] || grep -qvE '^(global USAGE|schema .*|limits .*)$' <<< "$got"; then
+            problem "the bot's login on $host doesn't have exactly the migrations' rights in minerbot" "$got"
+        fi
+    done
+    out=$(tr -d '\r' < /work/0001_core.sql | timeout -k 5 60 mariadb --defaults-file=/tmp/bot.cnf minerbot 2>&1) \
+        || problem "the first migration didn't run with the bot's login" "$out"
+    [ "$(sql "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'minerbot' AND TABLE_NAME IN ('audit_log', 'dashboard_sessions')")" = 2 ] \
+        || problem "the first migration didn't make the dashboard's tables in minerbot"
+    for kind in "CREATE VIEW v AS SELECT 1" "CREATE FUNCTION f() RETURNS INT RETURN 1" \
+        "CREATE TRIGGER t BEFORE INSERT ON audit_log FOR EACH ROW SET @x = 1" \
+        "CREATE EVENT e ON SCHEDULE EVERY 1 DAY DO SELECT 1"; do
+        out=$(timeout -k 5 15 mariadb --defaults-file=/tmp/bot.cnf minerbot -N -e "$kind" 2>&1) || true
+        expect "denied" "$out" "the bot's login making ${kind%% *} ${kind#* }"
+    done
+    rm -f /tmp/bot.cnf
+}
+
+# apply_rights with server.conf naming the new database, as the move runs it: the dashboard's login gets the file's rights
+# there and keeps none on the old database, and it opens the new one
+moved_rights() {
+    local now out
+    MBTEST_BOT_DB=minerbot run_common apply_rights /opt/minerbot/dashboard-rights.sql
+    [ "$status" = 0 ] || problem "apply_rights on minerbot failed (exit code $status)" "$said"
+    now=$(login_rights)
+    ! grep -q " $bot " <<< "$now" || problem "the dashboard's login kept rights on $bot" "$now"
+    if ! grep -q '^table SELECT minerbot dashboard_sessions$' <<< "$now" || ! grep -q '^table INSERT minerbot audit_log$' <<< "$now"; then
+        problem "the dashboard's login lacks the file's rights on minerbot" "$now"
+    fi
+    [ "${now// minerbot / $bot }" = "$expected" ] \
+        || problem "on minerbot, the login doesn't have exactly the rights the file gives" "$(differs "$expected" "${now// minerbot / $bot }")"
+    out=$(as_login minerbot 'SELECT COUNT(*) >= 0 FROM dashboard_sessions')
+    [ "$out" = 1 ] || problem "the dashboard's login can't read sessions in minerbot" "$out"
+}
+
 # ---------- In the container: the databases, then the checks
 
 inside_container() {
@@ -448,6 +502,10 @@ inside_container() {
     verdict "18. The last apply that passed leaves a copy of its file, root's alone, which applies again; an apply that fails leaves the copy as it was."
     extras_refused || true
     verdict "19. A trigger that rewrites the dashboard's audit rows, an event and a procedure in MinerBot's database, which no migration makes, stop apply_rights before it touches the login, each named; once they're dropped, it passes."
+    moved_login || true
+    verdict "20. move-database.sh's steps: the bot's own login has exactly the migrations' rights in minerbot and none elsewhere, also when it's made again; the first migration runs with it; it can make no view, function, trigger or event."
+    moved_rights || true
+    verdict "21. apply_rights with server.conf naming minerbot gives the dashboard's login exactly the file's rights there and none on the old database."
 
     echo "$passed of $checks passed"
     if [ "$made" != "$checks" ]; then

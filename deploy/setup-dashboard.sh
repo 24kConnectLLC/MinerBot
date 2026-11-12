@@ -893,18 +893,6 @@ take_answers() {   # the answers the foreground left, taken into this run; then 
     rm -rf "$apply_dir"
 }
 
-new_password() {   # 40 letters and digits, made as setup-login.sh made the bot's, so it meets the server's password rules
-    local pw _
-    for _ in 1 2 3 4 5; do
-        pw=$(run_for 10 openssl rand -base64 64 | tr -dc 'A-Za-z0-9' | cut -c1-40) || pw=
-        if [[ $pw =~ ^[A-Za-z0-9]{40}$ ]]; then
-            printf '%s\n' "$pw"
-            return 0
-        fi
-    done
-    return 1
-}
-
 # Creates the login on the missing hosts given, and gives every other host the same new password: with no host given,
 # both get it. The statements go in on stdin, never on a command line, and with --skip-print-query-on-error, without
 # which MariaDB's client prints a failing statement, password included.
