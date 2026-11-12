@@ -1,0 +1,37 @@
+@model EmbedPreview
+@using MinerBot.Dashboard.Armor
+@*
+    A Discord embed as the bot sends it: its colour bar, title, description, fields, picture and footer. The text is raw,
+    as Discord shows it, but encoded and isolated in bdi elements. The footer's icon is on 24kconnect.com, which the
+    Content-Security-Policy doesn't allow, so a plain mark stands in for it.
+*@
+<div class="embed">
+    @if (!string.IsNullOrEmpty(Model.Title))
+    {
+        <p class="embed-title">
+            @if (Model.TitleLink != null)
+            {
+                <a href="@Model.TitleLink"><bdi>@Model.Title</bdi></a>
+            }
+            else
+            {
+                <bdi>@Model.Title</bdi>
+            }
+        </p>
+    }
+    <div class="embed-description">@DiscordText.Of(Model.Description).Html()</div>
+    <div class="embed-fields">
+        @foreach (var field in Model.Fields)
+        {
+            <div class="embed-field@(field.Inline ? " embed-field-inline" : "")">
+                <p class="embed-field-name"><bdi>@field.Name</bdi></p>
+                <div class="embed-field-value">@DiscordText.Of(field.Value).Html()</div>
+            </div>
+        }
+    </div>
+    @if (Model.Image != null)
+    {
+        <img class="embed-image" src="@Model.Image" alt="The screenshot, attached by the bot" />
+    }
+    <p class="embed-footer"><span class="embed-footer-icon" aria-hidden="true"></span>@BotMessages.Footer</p>
+</div>

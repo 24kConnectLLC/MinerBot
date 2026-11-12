@@ -220,7 +220,7 @@ The bot exits when it hits a failure it can't recover from, and `--restart unles
 
 ## 🖥️ Web dashboard
 
-`MinerBot.Dashboard` is a web app at https://bot.murderminershub.com for the people who run MinerBot. You sign in with Discord, and only the accounts on its lists, with Discord two-factor turned on, get in. For now its overview shows who is signed in; the bot's status, servers and armor review come in later updates.
+`MinerBot.Dashboard` is a web app at https://bot.murderminershub.com for the people who run MinerBot. You sign in with Discord, and only the accounts on its lists, with Discord two-factor turned on, get in. The owner and the admins review armor submissions there, under Armor: each one's text with its hidden characters shown, its screenshot when it's an upload on the website, the approval rules, and how the bot will post it. They can approve, reject, take down or move it back to pending, and each change is kept in its history and the audit log. The bot's status and servers come in later updates.
 
 Sign-in uses a Discord application of its own, MinerBot Dashboard, with the `identify` scope only, and the dashboard revokes the Discord token as soon as it has read who signed in. Sessions are kept in MinerBot's own database and end after 30 minutes unused, or 12 hours at most.
 

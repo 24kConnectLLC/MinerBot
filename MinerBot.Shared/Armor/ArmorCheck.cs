@@ -14,10 +14,13 @@ namespace MinerBot.Shared.Armor
         LookupTooLongForDiscord,
         ColorOutOfRange,
         IdTooBigForTheBot,
+        ScreenshotNotAllowed,
+        StyleHasBacktick,
+        StyleHasLineBreak,
+        SaveStringDiffers,
 
         // Warnings
         NoScreenshot,
-        ScreenshotNotAllowed,
         HiddenCharacters,
         DirectionCharacters,
         MentionSyntax,
@@ -32,7 +35,10 @@ namespace MinerBot.Shared.Armor
         Description,
         Author,
         Screenshot,
-        Colors
+        Colors,
+        Helmet,
+        Skin,
+        SaveString
     }
 
     public sealed record ArmorProblem(ArmorProblemKind Kind, ArmorField Field, string Message);

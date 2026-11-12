@@ -12,6 +12,9 @@ namespace MinerBot.Shared.Tests
             public string? ArmorDescription { get; set; } = "A dark set for night raids, with a red visor.";
             public string? ArmorScreenshot { get; set; } = "https://murderminershub.com/wp-content/uploads/ArmorPreviews/Test-Armor-3.png";
             public string Author { get; set; } = "Test Author";
+            public string? ArmorChoice { get; set; } = "Tri-Clops";
+            public string? ArmorSkin { get; set; } = "Default";
+            public string? ColorArray { get; set; }
             public int? Helmet { get; set; } = 1;
             public int? Visor { get; set; } = 2;
             public int? Torso { get; set; } = 3;
@@ -55,6 +58,16 @@ namespace MinerBot.Shared.Tests
 
             Assert.True(check.CanApprove);
             return Assert.Single(check.Warnings, problem => problem.Kind == kind);
+        }
+
+        // An address that's refused blocks, and is no warning as well
+        static ArmorProblem RefusesScreenshot(string address)
+        {
+            Assert.False(ArmorRules.IsAllowedScreenshot(address));
+
+            var check = Check(new Submission { ArmorScreenshot = address });
+            Assert.Empty(check.Warnings);
+            return Blocks(new Submission { ArmorScreenshot = address }, ArmorProblemKind.ScreenshotNotAllowed);
         }
 
         // Catches a rule that flags too much
@@ -258,57 +271,93 @@ namespace MinerBot.Shared.Tests
         [InlineData("https://murderminershub.com/wp-content/uploads/ArmorPreviews/x.png")]
         [InlineData("https://www.murderminershub.com/wp-content/uploads/ArmorPreviews/x.png")]
         [InlineData("https://MURDERMINERSHUB.COM/wp-content/uploads/ArmorPreviews/x.png")]
-        [InlineData("HTTPS://murderminershub.com/x.png")]
-        [InlineData("https://murderminershub.com:443/x.png")]
-        [InlineData("https://murderminershub.com/x.png?size=large")]
+        [InlineData("HTTPS://murderminershub.com/wp-content/uploads/x.png")]
+        [InlineData("https://murderminershub.com:443/wp-content/uploads/x.png")]
+        [InlineData("https://murderminershub.com/wp-content/uploads/2026/11/x.png")]
         [InlineData("https://murderminershub.com/wp-content/uploads/Café-Knight.png")]
-        public void ScreenshotOnTheWebsiteIsAllowed(string address)
+        [InlineData("https://murderminershub.com/wp-content/uploads/Caf%C3%A9-Knight.png")]
+        // Dot segments that stay inside the folder, which a browser and the bot resolve the same way
+        [InlineData("https://murderminershub.com/wp-content/./uploads/x.png")]
+        [InlineData("https://murderminershub.com/wp-content/uploads/a/../x.png")]
+        public void UploadOnTheWebsiteIsAllowed(string address)
         {
             Assert.True(ArmorRules.IsAllowedScreenshot(address));
             Assert.Empty(Check(new Submission { ArmorScreenshot = address }).Warnings);
         }
 
         [Theory]
-        [InlineData("http://murderminershub.com/x.png")]
-        [InlineData("https://example.com/x.png")]
-        [InlineData("https://murderminershub.com.example.com/x.png")]
-        [InlineData("https://murderminershub.com@example.com/x.png")]
-        [InlineData("https://user@murderminershub.com/x.png")]
-        [InlineData("https://murderminershub.com:8443/x.png")]
-        [InlineData("https://murderminershub.com./x.png")]
+        [InlineData("http://murderminershub.com/wp-content/uploads/x.png")]
+        [InlineData("https://example.com/wp-content/uploads/x.png")]
+        [InlineData("https://murderminershub.com.example.com/wp-content/uploads/x.png")]
+        [InlineData("https://murderminershub.com@example.com/wp-content/uploads/x.png")]
+        [InlineData("https://user@murderminershub.com/wp-content/uploads/x.png")]
+        [InlineData("https://murderminershub.com:8443/wp-content/uploads/x.png")]
+        [InlineData("https://murderminershub.com./wp-content/uploads/x.png")]
         [InlineData("javascript:alert(1)")]
         [InlineData("data:image/png;base64,AAAA")]
         [InlineData("/wp-content/uploads/x.png")]
-        [InlineData("ftp://murderminershub.com/x.png")]
-        [InlineData(" https://murderminershub.com/x.png")]
-        [InlineData("https://murderminershub.com/x y.png")]
-        [InlineData("https://murderminershub.com/x\u200B.png")]
+        [InlineData("ftp://murderminershub.com/wp-content/uploads/x.png")]
+        [InlineData(" https://murderminershub.com/wp-content/uploads/x.png")]
+        [InlineData("https://murderminershub.com/wp-content/uploads/x y.png")]
+        [InlineData("https://murderminershub.com/wp-content/uploads/x\u200B.png")]
         // Hosts outside ASCII, some of which .NET's IDN conversion throws on, and look-alikes it would turn into the real host
-        [InlineData("https://\u0301x.com/x.png")]
-        [InlineData("https://murderminershub\uFE52com/x.png")]
-        [InlineData("https://murderminershub.com\u2024/x.png")]
-        [InlineData("https://evil.example\uFF20murderminershub.com/x.png")]
-        [InlineData("https://murderminershub.com\uFF1A8443/x.png")]
-        [InlineData("https://\uFF4Durderminershub.com/x.png")]
-        [InlineData("https://murderminer\u017Fhub.com/x.png")]
-        public void ScreenshotAnywhereElseWarns(string address)
+        [InlineData("https://\u0301x.com/wp-content/uploads/x.png")]
+        [InlineData("https://murderminershub\uFE52com/wp-content/uploads/x.png")]
+        [InlineData("https://murderminershub.com\u2024/wp-content/uploads/x.png")]
+        [InlineData("https://evil.example\uFF20murderminershub.com/wp-content/uploads/x.png")]
+        [InlineData("https://murderminershub.com\uFF1A8443/wp-content/uploads/x.png")]
+        [InlineData("https://\uFF4Durderminershub.com/wp-content/uploads/x.png")]
+        [InlineData("https://murderminer\u017Fhub.com/wp-content/uploads/x.png")]
+        public void ScreenshotAnywhereElseBlocks(string address)
         {
-            Assert.False(ArmorRules.IsAllowedScreenshot(address));
-            Assert.Equal(ArmorField.Screenshot, Warns(new Submission { ArmorScreenshot = address }, ArmorProblemKind.ScreenshotNotAllowed).Field);
+            Assert.Equal(ArmorField.Screenshot, RefusesScreenshot(address).Field);
+        }
+
+        // The owner's decision: the website itself, but outside its uploads, is refused too. A GET there could reach a
+        // WordPress page with the reviewer's cookies, or the bot could fetch it.
+        [Theory]
+        [InlineData("https://murderminershub.com/x.png")]
+        [InlineData("https://murderminershub.com/wp-admin/admin-ajax.php")]
+        [InlineData("https://murderminershub.com/wp-login.php")]
+        [InlineData("https://murderminershub.com/wp-content/uploads/")]
+        [InlineData("https://murderminershub.com/wp-content/uploads")]
+        [InlineData("https://murderminershub.com/wp-content/uploadsx/x.png")]
+        [InlineData("https://murderminershub.com/WP-CONTENT/uploads/x.png")]
+        [InlineData("https://murderminershub.com//wp-content/uploads/x.png")]
+        [InlineData("https://murderminershub.com/x/wp-content/uploads/x.png")]
+        // Dot segments that leave the folder, plain and percent-encoded, and the other ways a path can be read differently
+        [InlineData("https://murderminershub.com/wp-content/uploads/../../wp-login.php")]
+        [InlineData("https://murderminershub.com/wp-content/uploads/%2e%2e/%2e%2e/wp-login.php")]
+        [InlineData("https://murderminershub.com/wp-content/uploads/%2E%2E/%2E%2E/wp-login.php")]
+        [InlineData("https://murderminershub.com/wp-content/uploads/.%2e/.%2e/wp-login.php")]
+        [InlineData("https://murderminershub.com/wp-content/uploads/..%2fwp-login.php")]
+        [InlineData("https://murderminershub.com/wp-content/uploads/..%5cwp-login.php")]
+        [InlineData("https://murderminershub.com/wp-content/uploads/..\\..\\wp-login.php")]
+        // A query reaches WordPress for a file that isn't there, and an upload's address has neither
+        [InlineData("https://murderminershub.com/wp-content/uploads/x.png?action=logout")]
+        [InlineData("https://murderminershub.com/wp-content/uploads/x.png?")]
+        [InlineData("https://murderminershub.com/wp-content/uploads/x.png#part")]
+        public void WebsiteOutsideItsUploadsBlocks(string address)
+        {
+            var problem = RefusesScreenshot(address);
+
+            Assert.Contains("/wp-content/uploads/", problem.Message);
+            Assert.Contains("server's own network", problem.Message);
         }
 
         // The website's column has no limit, so an address longer than any upload's is refused before it's read through
         [Fact]
-        public void ScreenshotOverTheLimitWarns()
+        public void ScreenshotOverTheLimitBlocks()
         {
-            const string start = "https://murderminershub.com/";
+            const string start = "https://murderminershub.com/wp-content/uploads/";
             var longest = start + new string('a', ArmorRules.ScreenshotLimit - start.Length);
 
             Assert.True(ArmorRules.IsAllowedScreenshot(longest));
             Assert.False(ArmorRules.IsAllowedScreenshot(longest + "a"));
 
-            var problem = Warns(new Submission { ArmorScreenshot = longest + new string('​', 1000000) }, ArmorProblemKind.ScreenshotNotAllowed);
+            var problem = Blocks(new Submission { ArmorScreenshot = longest + new string('\u200B', 1000000) }, ArmorProblemKind.ScreenshotNotAllowed);
             Assert.Contains($"over {ArmorRules.ScreenshotLimit} characters", problem.Message);
+            Assert.Empty(Check(new Submission { ArmorScreenshot = longest + "a" }).Warnings);
         }
 
         [Theory]
@@ -367,6 +416,53 @@ namespace MinerBot.Shared.Tests
             Warns(new Submission { Author = "Test`Author" }, ArmorProblemKind.Backtick);
         }
 
+        // /armor lookup's card writes the helmet and the skin inside a code block, which a backtick ends, and what follows
+        // shows as Discord's markdown, links included. Fails if either is left out of the rules, when one click approves it.
+        [Theory]
+        [InlineData(ArmorField.Helmet, "Bug```[Free Nitro](https://phish.example)```")]
+        [InlineData(ArmorField.Helmet, "Bug`")]
+        [InlineData(ArmorField.Skin, "Default```[Free Nitro](https://phish.example)```")]
+        public void BacktickInTheHelmetOrSkinIsBlocked(ArmorField field, string value)
+        {
+            var armor = field == ArmorField.Helmet ? new Submission { ArmorChoice = value } : new Submission { ArmorSkin = value };
+
+            Assert.Equal(field, Blocks(armor, ArmorProblemKind.StyleHasBacktick).Field);
+            Assert.DoesNotContain(ArmorProblemKind.Backtick, Kinds(Check(armor).Warnings));
+        }
+
+        [Theory]
+        [InlineData("Bug\nArmor Skin Type: Gold")]
+        [InlineData("Bug\r")]
+        [InlineData("Bug\u2028")]
+        public void LineBreakInTheHelmetOrSkinIsBlocked(string value)
+        {
+            Assert.Equal(ArmorField.Helmet, Blocks(new Submission { ArmorChoice = value }, ArmorProblemKind.StyleHasLineBreak).Field);
+            Assert.Equal(ArmorField.Skin, Blocks(new Submission { ArmorSkin = value }, ArmorProblemKind.StyleHasLineBreak).Field);
+        }
+
+        // Hidden and right-to-left characters in the helmet or the skin need a look, as in the name
+        [Fact]
+        public void HelmetAndSkinAreReadLikeTheName()
+        {
+            var check = Check(new Submission { ArmorChoice = "Tri\u200BClops", ArmorSkin = "Gold\u202E" });
+
+            Assert.True(check.CanApprove);
+            Assert.Equal([(ArmorProblemKind.HiddenCharacters, ArmorField.Helmet), (ArmorProblemKind.DirectionCharacters, ArmorField.Skin)],
+                check.Warnings.Select(problem => (problem.Kind, problem.Field)));
+        }
+
+        // The card shows a stored save string as it is, so only the one the colours give passes, which is the one the bot's
+        // hourly job stores
+        [Fact]
+        public void StoredSaveStringThatIsntTheColoursIsBlocked()
+        {
+            Assert.True(Check(new Submission { ColorArray = "AQIDBAUGBwgJCgsMDQ==" }).CanApprove);
+            Assert.True(Check(new Submission { ColorArray = null }).CanApprove);
+
+            foreach (var stored in new[] { "AAAAAAAAAAAAAAAAAA==", "a`[x](http://a.co)", "" })
+                Assert.Equal(ArmorField.SaveString, Blocks(new Submission { ColorArray = stored }, ArmorProblemKind.SaveStringDiffers).Field);
+        }
+
         [Fact]
         public void WarningsNeverBlock()
         {
@@ -375,13 +471,13 @@ namespace MinerBot.Shared.Tests
                 ArmorName = "Night\u200BRaid\u202E @here",
                 ArmorDescription = "Visit https://example.com, ping @everyone and <@&1000000000000000003> ``` ",
                 Author = "www.example.com\u2066",
-                ArmorScreenshot = "https://example.com/x.png"
+                ArmorScreenshot = null
             });
 
             Assert.Empty(check.Blocking);
             Assert.True(check.CanApprove);
             Assert.Equal(
-                [ArmorProblemKind.ScreenshotNotAllowed, ArmorProblemKind.HiddenCharacters, ArmorProblemKind.DirectionCharacters,
+                [ArmorProblemKind.NoScreenshot, ArmorProblemKind.HiddenCharacters, ArmorProblemKind.DirectionCharacters,
                  ArmorProblemKind.MentionSyntax, ArmorProblemKind.MentionSyntax, ArmorProblemKind.LinkSyntax, ArmorProblemKind.Backtick,
                  ArmorProblemKind.DirectionCharacters, ArmorProblemKind.LinkSyntax],
                 Kinds(check.Warnings));
@@ -396,13 +492,18 @@ namespace MinerBot.Shared.Tests
                 ArmorName = string.Concat(Enumerable.Repeat("`", 30)) + "\n" + string.Concat(Enumerable.Repeat(Emoji, 40)),
                 Author = new string('a', 61),
                 ArmorDescription = new string('a', 4100),
-                Helmet = 256
+                Helmet = 256,
+                ArmorScreenshot = "http://127.0.0.1/x.png",
+                ArmorChoice = "Bug`\n",
+                ArmorSkin = "Gold`",
+                ColorArray = "x"
             }, nameTaken: true);
 
             Assert.Equal(
                 [ArmorProblemKind.IdTooBigForTheBot, ArmorProblemKind.NameTaken, ArmorProblemKind.NameHasBacktick, ArmorProblemKind.NameHasLineBreak,
                  ArmorProblemKind.NameTooLongForDiscord, ArmorProblemKind.NameTooLong, ArmorProblemKind.AuthorTooLong, ArmorProblemKind.DescriptionTooLong,
-                 ArmorProblemKind.LookupTooLongForDiscord, ArmorProblemKind.ColorOutOfRange],
+                 ArmorProblemKind.LookupTooLongForDiscord, ArmorProblemKind.ColorOutOfRange, ArmorProblemKind.ScreenshotNotAllowed,
+                 ArmorProblemKind.StyleHasBacktick, ArmorProblemKind.StyleHasLineBreak, ArmorProblemKind.StyleHasBacktick, ArmorProblemKind.SaveStringDiffers],
                 Kinds(check.Blocking));
         }
 

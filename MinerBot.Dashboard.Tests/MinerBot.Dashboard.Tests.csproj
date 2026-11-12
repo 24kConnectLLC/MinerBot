@@ -22,6 +22,8 @@
   <ItemGroup>
     <Compile Include="..\DataAccessLibrary.Tests\Database\MariaDbFixture.cs" Link="Database\MariaDbFixture.cs" />
     <Compile Include="..\DataAccessLibrary.Tests\Database\DatabaseCollection.cs" Link="Database\DatabaseCollection.cs" />
+    <!-- A deadlock as MySql.Data reports one, for the armor review's transaction that runs again -->
+    <Compile Include="..\DataAccessLibrary.Tests\MySqlErrors.cs" Link="Database\MySqlErrors.cs" />
     <None Include="..\docs\schema\wordpress-tables.sql" Link="schema\wordpress-tables.sql" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 

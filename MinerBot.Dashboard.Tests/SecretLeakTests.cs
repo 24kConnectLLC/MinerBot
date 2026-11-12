@@ -5,6 +5,7 @@ using Microsoft.Extensions.DependencyInjection;
 using MinerBot.Dashboard.Auth;
 using MinerBot.Dashboard.Security;
 using MinerBot.Dashboard.Tests.Support;
+using MinerBot.Shared.Armor;
 using MySql.Data.MySqlClient;
 
 namespace MinerBot.Dashboard.Tests
@@ -53,14 +54,26 @@ namespace MinerBot.Dashboard.Tests
 
             var seen = new List<(string What, string Text, HttpResponseMessage Response)>();
 
-            // Every GET endpoint without route parameters, so a new page is crawled without changing this test
+            // Armor for the pages that show one, with its history
+            await db.AddArmorAsync(ArmorSteps.Submission(1));
+            await db.AddArmorAsync(ArmorSteps.Submission(2, ArmorStatus.Approved, "Test Armor 2"));
+            await db.RootExecuteAsync($"INSERT INTO {MariaDbFixture.ReviewTable} (armor_id, from_status, to_status, reason, reviewed_by, reviewer_name, reviewed_at) " +
+                "VALUES (2, 'Pending Approval', 'Approved', 'Looks right', 1000000000000000002, 'Test Admin', UTC_TIMESTAMP(3))");
+
+            // Every GET endpoint without route parameters, so a new page is crawled without changing this test, and those
+            // with one, here
             var pages = factory.Services.GetRequiredService<EndpointDataSource>().Endpoints.OfType<RouteEndpoint>()
                 .Where(endpoint => endpoint.RoutePattern.Parameters.Count == 0)
                 .Select(endpoint => ("/" + endpoint.RoutePattern.RawText!.Trim('/')).ToLowerInvariant())
                 .Concat(["/denied?reason=unlisted", "/denied?reason=mfa", "/denied?reason=scope", "/denied?reason=cancelled", "/denied?reason=failed",
-                    "/error", "/nothing-here", "/signout", "/signin", "/css/site.css"])
+                    "/error", "/nothing-here", "/signout", "/signin", "/css/site.css",
+                    "/admin/armor?status=all", "/admin/armor/1", "/admin/armor/2", "/admin/armor/2?done=approved", "/admin/armor/999"])
                 .Distinct()
                 .ToList();
+
+            // The review page's route is the one with a parameter, so a new one fails here until it's crawled too
+            Assert.Equal(["Admin/Armor/{id:long}"], factory.Services.GetRequiredService<EndpointDataSource>().Endpoints.OfType<RouteEndpoint>()
+                .Where(endpoint => endpoint.RoutePattern.Parameters.Count > 0).Select(endpoint => endpoint.RoutePattern.RawText!.Trim('/')));
 
             async Task Crawl(string who, TestBrowser browser)
             {
@@ -140,6 +153,9 @@ namespace MinerBot.Dashboard.Tests
 
             Assert.Contains(seen, page => page.What == "owner /admin" && page.Response.StatusCode == HttpStatusCode.OK);
             Assert.Contains(seen, page => page.What == "admin /admin" && page.Response.StatusCode == HttpStatusCode.OK);
+            Assert.Contains(seen, page => page.What == "owner /admin/armor/2" && page.Response.StatusCode == HttpStatusCode.OK);
+            Assert.Contains(seen, page => page.What == "admin /admin/armor/1" && page.Response.StatusCode == HttpStatusCode.OK);
+            Assert.Contains(seen, page => page.What == "admin /admin/armor" && page.Response.StatusCode == HttpStatusCode.OK);
         }
     }
 }

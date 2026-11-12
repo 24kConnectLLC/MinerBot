@@ -1,4 +1,5 @@
 using DataAccessLibrary;
+using MinerBot.Dashboard.Armor;
 using MinerBot.Dashboard.Auth;
 using MinerBot.Dashboard.Health;
 using MinerBot.Dashboard.Hosting;
@@ -35,9 +36,12 @@ builder.Services.AddCloudflareAccess();
 builder.Services.AddDataAccessServices(builder.Configuration)
                 .AddAuditLogAccess()
                 .AddDashboardSessionAccess()
-                .AddDatabaseHealthAccess();
+                .AddDatabaseHealthAccess()
+                .AddArmorSubmissionAccess()
+                .AddArmorReviewAccess();
 
 builder.Services.AddDashboardSignIn();
+builder.Services.AddArmorReview();
 
 // No fallback policy: it would also apply to addresses that match no page and turn every 404 into a sign-in. Deny by
 // default is the endpoint test's job instead.

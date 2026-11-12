@@ -17,7 +17,7 @@ namespace MinerBot.Dashboard.Tests
         // Written out here rather than read from the app, so a change to the policy has to change this too
         static readonly Dictionary<string, string> Expected = new()
         {
-            ["Content-Security-Policy"] = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' https://cdn.discordapp.com https://murderminershub.com https://www.murderminershub.com; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'",
+            ["Content-Security-Policy"] = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' https://cdn.discordapp.com https://murderminershub.com/wp-content/uploads/ https://www.murderminershub.com/wp-content/uploads/; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'",
             ["Strict-Transport-Security"] = "max-age=31536000",
             ["X-Content-Type-Options"] = "nosniff",
             ["Referrer-Policy"] = "same-origin",

@@ -9,10 +9,12 @@ namespace MinerBot.Dashboard.Security
     internal sealed class SecurityHeaders(RequestDelegate next)
     {
         // Scripts and styles only from the dashboard's own files. Images also from Discord's CDN, for avatars and server
-        // icons, and from the hosts armor screenshots are allowed on, which MinerBot.Shared keeps in one place.
+        // icons, and from the website's uploads folder, where armor screenshots are allowed, which MinerBot.Shared keeps in
+        // one place. A source ending in / covers only the paths under it, so the browser won't load anything else of the
+        // website's, which would carry the reviewer's WordPress cookies.
         internal static readonly string ContentSecurityPolicy =
             "default-src 'none'; script-src 'self'; style-src 'self'; " +
-            $"img-src 'self' https://cdn.discordapp.com {string.Join(' ', ArmorRules.ScreenshotHosts.Select(host => "https://" + host))}; " +
+            $"img-src 'self' https://cdn.discordapp.com {string.Join(' ', ArmorRules.ScreenshotHosts.Select(host => "https://" + host + ArmorRules.ScreenshotPath))}; " +
             "connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'";
 
         internal const string NoTransform = "no-transform";

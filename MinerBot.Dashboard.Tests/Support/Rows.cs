@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using DataAccessLibrary.Armor.Models;
 using DataAccessLibrary.Audit.Models;
 using DataAccessLibrary.Tests.Database;
 
@@ -23,13 +24,20 @@ namespace MinerBot.Dashboard.Tests.Support
 
     internal static class Rows
     {
-        // The database every test that starts the app needs, with no sessions or audit rows left from another test
+        // The database every test that starts the app needs, with no sessions, audit rows, armor or reviews left from another
+        // test
         public static async Task<MariaDbFixture> ReadyAsync(this MariaDbFixture fixture)
         {
             var db = fixture.Require();
-            await db.ClearAsync(MariaDbFixture.SessionTable, MariaDbFixture.AuditTable);
+            await db.ClearAsync(MariaDbFixture.SessionTable, MariaDbFixture.AuditTable, MariaDbFixture.ArmorTable, MariaDbFixture.ReviewTable);
             return db;
         }
+
+        public static Task<List<ArmorReview>> ReviewsAsync(this MariaDbFixture db) =>
+            db.RootQueryAsync<ArmorReview>($"SELECT * FROM {MariaDbFixture.ReviewTable} ORDER BY id");
+
+        public static async Task<string?> StatusAsync(this MariaDbFixture db, long id) =>
+            (await db.RootQueryAsync<string?>($"SELECT Status FROM {MariaDbFixture.ArmorTable} WHERE ID = @id", new { id })).Single();
 
         public static Task<List<SessionRow>> SessionsAsync(this MariaDbFixture db) =>
             db.RootQueryAsync<SessionRow>($"SELECT * FROM {MariaDbFixture.SessionTable} ORDER BY created_at, user_id");

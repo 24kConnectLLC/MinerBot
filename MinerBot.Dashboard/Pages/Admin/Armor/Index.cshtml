@@ -1,0 +1,125 @@
+@page
+@model ArmorListModel
+@using System.Globalization
+@using MinerBot.Dashboard.Armor
+@using MinerBot.Shared.Armor
+@{
+    ViewData["Title"] = "Armor";
+    var everything = Model.Tab.Status == null;
+}
+<h1>Armor</h1>
+<nav aria-label="Armor by status" class="tabs">
+    <ul>
+        @foreach (var tab in ArmorListModel.Tabs)
+        {
+            <li><a href="@Model.Link(tab)" aria-current="@(tab == Model.Tab ? "page" : null)">@tab.Label</a></li>
+        }
+    </ul>
+</nav>
+<form method="get" action="/admin/armor" class="search" role="search">
+    <input type="hidden" name="status" value="@Model.Tab.Word" />
+    <label for="q">Search by name or author</label>
+    <div class="search-row">
+        <input type="search" id="q" name="q" value="@Model.Search" maxlength="@ArmorListModel.SearchLimit" />
+        <button type="submit" class="button">Search</button>
+        @if (Model.Search.Length > 0)
+        {
+            <a href="@Model.Link(keepSearch: false)">Clear the search</a>
+        }
+    </div>
+</form>
+<p>@Model.Summary</p>
+@* The markers' kinds in words, since their colours and weight alone say nothing until someone says what they mean *@
+<p class="muted">Markers show what the approval rules find in each armor: <span class="marker marker-block">bold ones</span> stop an approval, and <span class="marker marker-warn">the others</span> need a look first. Whether another approved armor already has the name is checked on each armor's own page.</p>
+@if (Model.Rows.Count == 0)
+{
+    @if (Model.PageNumber > 1)
+    {
+        <p>There's nothing on page @Model.PageNumber. <a href="@Model.Link()">Go to the first page</a>.</p>
+    }
+    else if (Model.Search.Length > 0)
+    {
+        <p>No armor here matches that search.</p>
+    }
+    else
+    {
+        <p>No armor here.</p>
+    }
+}
+else
+{
+    <div class="table-wrap">
+        <table class="armor-list">
+            <thead>
+                <tr>
+                    <th scope="col">Name</th>
+                    <th scope="col">Author</th>
+                    @if (everything)
+                    {
+                        <th scope="col">Status</th>
+                    }
+                    <th scope="col">Sent</th>
+                    <th scope="col">Markers</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var row in Model.Rows)
+                {
+                    <tr>
+                        <td>
+                            <a href="@Model.ReviewLink(row)">@if (row.NameBlank) {<text>(no name)</text>} else {@RevealedText.Html(row.Name)}</a>
+                        </td>
+                        <td>@RevealedText.Html(row.Author)</td>
+                        @if (everything)
+                        {
+                            <td>
+                                @if (row.Status == null)
+                                {
+                                    <text>No status</text>
+                                }
+                                else if (row.KnownStatus == null)
+                                {
+                                    @RevealedText.Html(row.Status) <span class="muted">(not one the website uses)</span>
+                                }
+                                else if (row.KnownStatus != row.Status)
+                                {
+                                    @row.KnownStatus <span class="muted">(stored as @RevealedText.Html(row.Status))</span>
+                                }
+                                else
+                                {
+                                    @row.Status
+                                }
+                            </td>
+                        }
+                        <td>@row.Sent.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)</td>
+                        <td>
+                            @foreach (var label in row.Blocking)
+                            {
+                                <span class="marker marker-block"><span class="visually-hidden">Blocks approval: </span>@label</span>
+                            }
+                            @foreach (var label in row.Warnings)
+                            {
+                                <span class="marker marker-warn"><span class="visually-hidden">Needs a look: </span>@label</span>
+                            }
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+@if (Model.PageCount > 1 && Model.PageNumber <= Model.PageCount)
+{
+    <nav aria-label="Pages" class="pager">
+        @if (Model.PageNumber > 1)
+        {
+            <a href="@Model.Link(page: Model.PageNumber - 1)">Previous page</a>
+        }
+        <span>Page @Model.PageNumber of @Model.PageCount</span>
+        @if (Model.PageNumber < Model.PageCount)
+        {
+            <a href="@Model.Link(page: Model.PageNumber + 1)">Next page</a>
+        }
+    </nav>
+}
+<p class="muted">Times are when the website saved each armor, by its own clock.</p>

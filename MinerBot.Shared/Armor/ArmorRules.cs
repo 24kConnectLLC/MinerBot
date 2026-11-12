@@ -5,7 +5,9 @@ using System.Text;
 namespace MinerBot.Shared.Armor
 {
     // What a submission has to pass before it can be approved, and what a reviewer has to look at first. A blocking
-    // problem would break a post or a command in every server, or makes the row impossible to save. A warning needs a tick.
+    // problem would break a post or a command in every server, put something the bot didn't write in /armor lookup's
+    // card, make the row impossible to save, or have the bot fetch an address that isn't the website's upload. A warning
+    // needs a tick.
     public static class ArmorRules
     {
         // What the website's table holds, counted in code points the way MariaDB counts them. Its strict mode makes a
@@ -17,9 +19,18 @@ namespace MinerBot.Shared.Armor
         // Every screenshot was an upload on the website when this was written
         public static readonly IReadOnlyList<string> ScreenshotHosts = ["murderminershub.com", "www.murderminershub.com"];
 
+        // Where WordPress keeps uploads, as plain files. The bot fetches a screenshot from the server's own network, and the
+        // review page's browser sends its WordPress cookies with it, so an address anywhere else on the site could reach a
+        // page that acts on a GET. The dashboard's Content-Security-Policy allows images only from here too.
+        public const string ScreenshotPath = "/wp-content/uploads/";
+
         // The longest screenshot address that's looked at. An upload's address is far shorter, and the website's column has
         // no limit, so a longer one is refused before it's read through.
         public const int ScreenshotLimit = 2048;
+
+        // A dot, a slash or a backslash, percent-encoded. A browser or the web server can decode one in the path after this
+        // check has passed it, and take the address out of the uploads folder.
+        static readonly string[] EncodedPathCharacters = ["%2e", "%2f", "%5c"];
 
         // The characters Unicode always breaks a line at
         static readonly char[] LineBreaks = ['\n', '\v', '\f', '\r', '\u0085', '\u2028', '\u2029'];
@@ -51,29 +62,43 @@ namespace MinerBot.Shared.Armor
             CheckName(armor.ArmorName, nameTaken, blocking);
             CheckSizes(armor, blocking);
             CheckColors(armor, blocking);
+            CheckScreenshot(armor.ArmorScreenshot, blocking, warnings);
+            CheckStyle(ArmorField.Helmet, "helmet", armor.ArmorChoice, blocking);
+            CheckStyle(ArmorField.Skin, "skin", armor.ArmorSkin, blocking);
+            CheckSaveString(armor, blocking);
 
-            CheckScreenshot(armor.ArmorScreenshot, warnings);
             CheckText(ArmorField.Name, "name", armor.ArmorName, warnings);
             CheckText(ArmorField.Description, "description", armor.ArmorDescription, warnings);
             CheckText(ArmorField.Author, "author", armor.Author, warnings);
+            CheckText(ArmorField.Helmet, "helmet", armor.ArmorChoice, warnings);
+            CheckText(ArmorField.Skin, "skin", armor.ArmorSkin, warnings);
 
             return new ArmorCheck(blocking, warnings);
         }
 
-        // The review page shows the screenshot and the bot fetches it, so it has to be an https address on the website
-        // itself. Whitespace anywhere doesn't pass either, because the bot takes spaces out of the address before fetching.
+        // The review page shows the screenshot and the bot fetches it, so it has to be an upload on the website itself: an
+        // https address on one of ScreenshotHosts, with a file under ScreenshotPath. Whitespace anywhere doesn't pass
+        // either, because the bot takes spaces out of the address before fetching.
         public static bool IsAllowedScreenshot(string? address)
         {
             if (string.IsNullOrEmpty(address) || address.Length > ScreenshotLimit || address.Any(char.IsWhiteSpace) || TextInspector.HasHidden(address))
                 return false;
 
+            // An upload's address has no query or fragment, and on the web server a query can reach WordPress itself, which
+            // answers any address it has no file for
+            if (address.IndexOfAny(['?', '#', '\\']) >= 0 || EncodedPathCharacters.Any(code => address.Contains(code, StringComparison.OrdinalIgnoreCase)))
+                return false;
+
             // Host keeps the letters as written, only lowercased, so a look-alike from outside ASCII never matches. IdnHost would
-            // turn one such as a fullwidth m into the real host, and its conversion throws on some Unicode hosts.
+            // turn one such as a fullwidth m into the real host, and its conversion throws on some Unicode hosts. AbsolutePath
+            // has its dot segments resolved, as a browser and the bot's HttpClient resolve them before asking.
             return Uri.TryCreate(address, UriKind.Absolute, out var uri)
                 && uri.Scheme == Uri.UriSchemeHttps
                 && uri.IsDefaultPort
                 && uri.UserInfo.Length == 0
-                && ScreenshotHosts.Contains(uri.Host, StringComparer.OrdinalIgnoreCase);
+                && ScreenshotHosts.Contains(uri.Host, StringComparer.OrdinalIgnoreCase)
+                && uri.AbsolutePath.Length > ScreenshotPath.Length
+                && uri.AbsolutePath.StartsWith(ScreenshotPath, StringComparison.Ordinal);
         }
 
         // The bot reads an armor's ID as an int with an overflow check, like its colours, so one approved armor past that
@@ -139,7 +164,7 @@ namespace MinerBot.Shared.Armor
         }
 
         // Reading an approved armor turns each colour into a byte with an overflow check, so one colour outside a byte
-        // stops the armor posts, the colour job and /armor list for every server
+        // stops the armor posts and the colour job for every server, and /armor lookup of that armor
         static void CheckColors(IArmorSubmission armor, List<ArmorProblem> blocking)
         {
             var outside = Colors
@@ -150,20 +175,49 @@ namespace MinerBot.Shared.Armor
 
             if (outside.Count > 0)
                 blocking.Add(Problem(ArmorProblemKind.ColorOutOfRange, ArmorField.Colors,
-                    $"Colours have to be from 0 to 255, and these aren't: {string.Join(", ", outside)}. The bot couldn't read the armor, which would stop its armor posts and /armor list"));
+                    $"Colours have to be from 0 to 255, and these aren't: {string.Join(", ", outside)}. The bot couldn't read the armor, which would stop its armor posts and colour job in every server, and /armor lookup of this armor"));
         }
 
-        static void CheckScreenshot(string? address, List<ArmorProblem> warnings)
+        // No screenshot only needs a look. One anywhere but the website's uploads blocks, because once the armor is approved
+        // the bot fetches the address from the server's own network for every /armor lookup.
+        static void CheckScreenshot(string? address, List<ArmorProblem> blocking, List<ArmorProblem> warnings)
         {
             if (string.IsNullOrWhiteSpace(address))
                 warnings.Add(Problem(ArmorProblemKind.NoScreenshot, ArmorField.Screenshot,
                     "There's no screenshot, so you can't see the armor before approving it, and /armor lookup shows no picture"));
             else if (address.Length > ScreenshotLimit)
-                warnings.Add(Problem(ArmorProblemKind.ScreenshotNotAllowed, ArmorField.Screenshot,
-                    $"The screenshot's address is over {ScreenshotLimit} characters long, far longer than an upload's, so the review page won't show it and the bot shouldn't fetch it"));
+                blocking.Add(Problem(ArmorProblemKind.ScreenshotNotAllowed, ArmorField.Screenshot,
+                    $"The screenshot's address is over {ScreenshotLimit} characters long, far longer than an upload's, so the review page won't show it, and the bot fetches an approved armor's screenshot from the server's own network on every /armor lookup"));
             else if (!IsAllowedScreenshot(address))
-                warnings.Add(Problem(ArmorProblemKind.ScreenshotNotAllowed, ArmorField.Screenshot,
-                    $"The screenshot isn't an https address on {string.Join(" or ", ScreenshotHosts)}, so the review page won't show it and the bot shouldn't fetch it"));
+                blocking.Add(Problem(ArmorProblemKind.ScreenshotNotAllowed, ArmorField.Screenshot,
+                    $"The screenshot isn't an upload on the website, an https address under {ScreenshotPath} on {string.Join(" or ", ScreenshotHosts)}, so the review page won't show it, and the bot fetches an approved armor's screenshot from the server's own network on every /armor lookup"));
+        }
+
+        // /armor lookup's card writes the helmet and the skin inside its Armor Style code block. A backtick there would end
+        // the block, so what follows would show as Discord's markdown, links included, and a line break would add lines the
+        // bot didn't write. No helmet or skin needs either.
+        static void CheckStyle(ArmorField field, string fieldName, string? text, List<ArmorProblem> blocking)
+        {
+            if (text == null)
+                return;
+
+            if (text.Contains('`'))
+                blocking.Add(Problem(ArmorProblemKind.StyleHasBacktick, field,
+                    $"The {fieldName} has a backtick (`), which would end the code block that /armor lookup's card shows it in, so what follows could show as a link"));
+
+            if (text.IndexOfAny(LineBreaks) >= 0)
+                blocking.Add(Problem(ArmorProblemKind.StyleHasLineBreak, field,
+                    $"The {fieldName} has a line break, which would add lines of its own to /armor lookup's card"));
+        }
+
+        // The card shows a stored save string as it is, in inline code, rather than the one the colours give. The bot's
+        // hourly job stores the colours' own string, so another one was put there some other way: players would copy
+        // colours that aren't the armor's, and a backtick in it would end the code.
+        static void CheckSaveString(IArmorSubmission armor, List<ArmorProblem> blocking)
+        {
+            if (armor.ColorArray != null && armor.ColorArray != ArmorColors.CreateColorArray(armor))
+                blocking.Add(Problem(ArmorProblemKind.SaveStringDiffers, ArmorField.SaveString,
+                    "The stored save string isn't the one the colours give, and /armor lookup's card shows the stored one as it is, so players would copy colours that aren't this armor's"));
         }
 
         static void CheckText(ArmorField field, string fieldName, string? text, List<ArmorProblem> warnings)
@@ -188,8 +242,9 @@ namespace MinerBot.Shared.Armor
                 warnings.Add(Problem(ArmorProblemKind.LinkSyntax, field,
                     $"The {fieldName} has a link: {Quote(findings.Links)}"));
 
-            // The name's backtick is blocking above. /armor lookup shows the description and the author inside a code block.
-            if (field != ArmorField.Name && text?.Contains('`') == true)
+            // A backtick in the name, the helmet or the skin blocks, above. /armor lookup shows the description and the
+            // author inside a code block.
+            if ((field is ArmorField.Description or ArmorField.Author) && text?.Contains('`') == true)
                 warnings.Add(Problem(ArmorProblemKind.Backtick, field,
                     $"The {fieldName} has a backtick (`), which can end the code block that /armor lookup shows it in"));
         }

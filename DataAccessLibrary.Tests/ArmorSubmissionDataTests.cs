@@ -98,6 +98,7 @@ namespace DataAccessLibrary.Tests
                 CreatedAt = new DateTime(2025, 8, 14, 21, 30, 15),
                 UserID = 9000000000000000000,
                 Status = ArmorStatus.Pending,
+                KnownStatus = ArmorStatus.Pending,
                 Author = "Test Author",
                 ArmorName = "Test Armor 9",
                 ArmorDescription = new string('d', 256),
@@ -195,6 +196,44 @@ namespace DataAccessLibrary.Tests
             // Back to pending, the undo
             Assert.True(await armor.ChangeStatus(101, ArmorStatus.Approved, ArmorStatus.Pending));
             Assert.Equal(ArmorStatus.Pending, await StatusAsync(101));
+        }
+
+        // The bot's Status = 'Approved' and the list's tabs go through the column's collation, so a status stored in other
+        // capitals, with spaces after it or with a character the collation gives no weight is the website's word to them.
+        // Fails if KnownStatus reads a row differently from them, or ChangeStatus can't change what they call Approved.
+        [Fact]
+        public async Task KnownStatusIsTheWordTheCollationMatches()
+        {
+            var expected = new Dictionary<long, string?>
+            {
+                [201] = ArmorStatus.Approved,
+                [202] = ArmorStatus.Approved,
+                [203] = ArmorStatus.Approved,
+                [204] = ArmorStatus.Approved,
+                [205] = ArmorStatus.Pending,
+                [206] = ArmorStatus.NotApproved,
+                [207] = null,
+                [208] = null,
+                [209] = null,
+                [210] = ArmorStatus.Approved
+            };
+
+            string?[] stored = ["approved", "Approved  ", "APPROVED", "Approved\u200B", "pending approval", "NOT APPROVED", "Pending", " Approved", null, ArmorStatus.Approved];
+            var db = await StartAsync([.. stored.Select((status, index) => Armor(201 + index, status, $"Test Armor {201 + index}", Day(index + 1)))]);
+            var armor = db.Submissions();
+
+            foreach (var (id, status) in expected)
+                Assert.Equal(status, (await armor.GetSubmission(id))?.KnownStatus);
+
+            // The lists read it the same way, and the Approved tab lists exactly the rows it calls Approved
+            Assert.All((await armor.ListByStatus(null, 0, 25)).Rows, row => Assert.Equal(expected[row.ID], row.KnownStatus));
+            Assert.Equal([210, 204, 203, 202, 201], Ids(await armor.ListByStatus(ArmorStatus.Approved, 0, 25)));
+
+            // A change from Approved applies to a row stored as 'approved', and saves the website's own word
+            Assert.True(await armor.ChangeStatus(201, ArmorStatus.Approved, ArmorStatus.NotApproved));
+            Assert.Equal(ArmorStatus.NotApproved, await StatusAsync(201));
+            Assert.False(await armor.ChangeStatus(207, null, ArmorStatus.Pending));
+            Assert.Equal("Pending", await StatusAsync(207));
         }
 
         // Fails for a version that reads the status and then writes it, which would let both win
@@ -324,6 +363,67 @@ namespace DataAccessLibrary.Tests
             Assert.True(await armor.ChangeStatus(3000000000, ArmorStatus.Pending, ArmorStatus.NotApproved));
         }
 
+        // The review's read in its transaction holds the row, so the website can't change it between the review's checks and
+        // the change of its status. Fails for a read without FOR UPDATE, which would let the other change through at once.
+        [Fact]
+        public async Task GetSubmissionInATransactionLocksTheRow()
+        {
+            var db = await StartAsync(Armor(901, ArmorStatus.Pending, "Test Armor 91", Day(1)));
+            var armor = db.Submissions();
+            var read = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            var review = armor.RunInTransaction(async transaction =>
+            {
+                var row = await armor.GetSubmission(901, transaction);
+                read.SetResult();
+                await release.Task;
+                return row;
+            });
+
+            try
+            {
+                await read.Task.WaitAsync(WaitLimit, TestContext.Current.CancellationToken);
+                var website = armor.ChangeStatus(901, ArmorStatus.Pending, ArmorStatus.NotApproved);
+
+                // The other change waits for the review's transaction
+                Assert.Equal(1, await fixture.LockWaitsAsync("ihvph_armor_styles", 1, WaitLimit));
+                Assert.False(website.IsCompleted);
+                release.SetResult();
+
+                Assert.Equal("Test Armor 91", (await review.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken))?.ArmorName);
+                Assert.True(await website.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
+            }
+            finally
+            {
+                release.TrySetResult();
+            }
+
+            Assert.Equal(ArmorStatus.NotApproved, await StatusAsync(901));
+        }
+
+        // Outside a transaction it's a plain read, which neither waits for a lock nor takes one
+        [Fact]
+        public async Task GetSubmissionOutsideATransactionDoesntWait()
+        {
+            var db = await StartAsync(Armor(902, ArmorStatus.Pending, "Test Armor 92", Day(1)));
+            var armor = db.Submissions();
+
+            await using var holder = new MySqlConnection(db.RootConnection);
+            await holder.OpenAsync(TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+            await RawAsync(holder, "START TRANSACTION");
+            await RawAsync(holder, $"SELECT ID FROM {MariaDbFixture.ArmorTable} WHERE ID = 902 FOR UPDATE");
+
+            try
+            {
+                Assert.Equal("Test Armor 92", (await armor.GetSubmission(902).WaitAsync(WaitLimit, TestContext.Current.CancellationToken))?.ArmorName);
+            }
+            finally
+            {
+                await RawAsync(holder, "COMMIT");
+            }
+        }
+
         // In a transaction the check runs on its connection, so it sees the transaction's own approval
         [Fact]
         public async Task NameCheckInATransactionSeesItsOwnChange()
@@ -358,7 +458,7 @@ namespace DataAccessLibrary.Tests
             var listed = (await armor.ListByStatus(ArmorStatus.Pending, 0, 25)).Rows;
             Assert.Equal([cut, plain.ArmorScreenshot], listed.Select(row => row.ArmorScreenshot));
             Assert.Equal(cut, (await armor.Search("Test Armor 81", null, 0, 25)).Rows.Single().ArmorScreenshot);
-            Assert.Contains(ArmorProblemKind.ScreenshotNotAllowed, ArmorRules.Check(listed[0], nameTaken: false).Warnings.Select(problem => problem.Kind));
+            Assert.Contains(ArmorProblemKind.ScreenshotNotAllowed, ArmorRules.Check(listed[0], nameTaken: false).Blocking.Select(problem => problem.Kind));
 
             Assert.Equal(huge.ArmorScreenshot, (await armor.GetSubmission(801))?.ArmorScreenshot);
         }

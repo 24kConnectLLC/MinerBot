@@ -2,6 +2,7 @@ using System.Net;
 using System.Text.RegularExpressions;
 using DataAccessLibrary.Tests.Database;
 using MinerBot.Dashboard.Tests.Support;
+using MinerBot.Shared.Armor;
 
 namespace MinerBot.Dashboard.Tests
 {
@@ -14,7 +15,7 @@ namespace MinerBot.Dashboard.Tests
         static readonly string[] Reasons = ["unlisted", "mfa", "scope", "cancelled", "failed"];
 
         // Fails on markup the policy would block, such as an inline script or style, or on a page that needs a script
-        static void AssertAccessible(string what, string html)
+        internal static void AssertAccessible(string what, string html)
         {
             Assert.True(html.Contains("<html lang=\"en\">", StringComparison.Ordinal), $"{what} has no lang");
             Assert.True(Regex.Count(html, "<h1[ >]") == 1, $"{what} hasn't exactly one h1");
@@ -31,17 +32,43 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task EveryPageIsAccessibleAndScriptFree()
         {
-            await using var factory = new DashboardFactory(await fixture.ReadyAsync());
+            var db = await fixture.ReadyAsync();
+            await using var factory = new DashboardFactory(db);
             var anonymous = factory.Visitor();
 
             foreach (var page in new[] { "/", "/signout", "/denied", "/error", "/nothing-here" }.Concat(Reasons.Select(reason => "/denied?reason=" + reason)))
                 AssertAccessible(page, await (await anonymous.Client.GetAsync(page, Token)).Content.ReadAsStringAsync(Token));
 
+            // Armor with everything the review page draws: warnings to tick, a blocking problem, hidden characters, a
+            // mention, a link, a backtick, no screenshot and a stored save string, and history
+            var busy = ArmorSteps.Submission(2, ArmorStatus.Pending, "Night​Raid‮");
+            busy.ArmorDescription = "Ping @everyone at https://example.com ```";
+            busy.ArmorScreenshot = null;
+            busy.ColorArray = "AQIDBAUGBwgJCgsMDQ==";
+            var blocked = ArmorSteps.Submission(3, ArmorStatus.Pending, "Night`Raid");
+            blocked.ArmorScreenshot = "http://127.0.0.1/x.png";
+
+            // Approved armor the rules would stop now, a status spelt differently from the website's word, and one the
+            // website doesn't use
+            var approvedButBlocked = ArmorSteps.Submission(4, ArmorStatus.Approved, "Test Armor 4");
+            approvedButBlocked.ArmorScreenshot = "https://murderminershub.com/x.png";
+            await db.AddAsync(ArmorSteps.Submission(1), busy, blocked, approvedButBlocked, ArmorSteps.Submission(5, "approved", "Test Armor 5"),
+                ArmorSteps.Submission(6, "Pending", "Test Armor 6"));
+
             var owner = factory.Visitor("203.0.113.70");
             await SignInSteps.SignedInAsync(factory, owner, TestUsers.Owner);
+            var reject = await ArmorSteps.PostAsync(owner, 1, "Reject", await ArmorSteps.OpenAsync(owner, 1), true, ("reason", "Not real"));
+            Assert.Equal(HttpStatusCode.Redirect, reject.StatusCode);
 
-            foreach (var page in new[] { "/", "/admin", "/signout" })
+            foreach (var page in new[] { "/", "/admin", "/signout", "/admin/armor", "/admin/armor?status=all", "/admin/armor?q=nothing", "/admin/armor?page=9",
+                "/admin/armor/1", "/admin/armor/1?done=rejected", "/admin/armor/1?list=all&q=test", "/admin/armor/2", "/admin/armor/3", "/admin/armor/4",
+                "/admin/armor/5", "/admin/armor/6" })
                 AssertAccessible("owner " + page, await owner.Client.GetStringAsync(page, Token));
+
+            // The page a refused action answers with. ArmorActionTests checks the one for a save that may not have landed.
+            var refused = await ArmorSteps.PostAsync(owner, 2, "Approve", await ArmorSteps.OpenAsync(owner, 2), false);
+            Assert.Equal(HttpStatusCode.Conflict, refused.StatusCode);
+            AssertAccessible("a refused approval", await refused.Content.ReadAsStringAsync(Token));
         }
 
         // A link, not a form: browsers apply the form-action policy to the redirect after a form, and discord.com isn't 'self'
@@ -101,6 +128,7 @@ namespace MinerBot.Dashboard.Tests
             await SignInSteps.SignedInAsync(factory, owner, TestUsers.Owner);
             var ownerPage = WebUtility.HtmlDecode(await owner.Client.GetStringAsync("/admin", Token));
             Assert.Contains($"You're signed in as Test Owner, Discord ID {TestUsers.Owner.IdText}, with the Owner role.", ownerPage);
+            Assert.Contains("Review armor submissions under <a href=\"/admin/armor\">Armor</a>", ownerPage);
 
             var admin = factory.Visitor("203.0.113.72");
             await SignInSteps.SignedInAsync(factory, admin, TestUsers.Admin);

@@ -6,7 +6,8 @@ namespace DataAccessLibrary.Armor
     // so a review can also be written inside a transaction on the website's connection, together with the change.
     public class ArmorReviewData : DbBaseConnection, IArmorReviewData
     {
-        const int ReasonLimit = 500;
+        // The size of armor_reviews.reason, in code points. Public so the review form's box stops at the same place.
+        public const int ReasonLimit = 500;
         const int ReviewerNameLimit = 100;
 
         private readonly DatabaseNames _names;
