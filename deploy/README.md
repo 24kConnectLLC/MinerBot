@@ -14,7 +14,7 @@ the tests of all of it. The server keeps its own names (database names, secrets)
 | `README.txt` | `/opt/minerbot/README.txt`, with `{{ORIGIN_CERT_ENDS}}` filled in from the installed certificate, or "not installed yet" | 600 |
 | `minerbot.cron` | `/etc/cron.d/minerbot` (cron refuses group- or world-writable files) | 644 |
 | `minerbot-dashboard.tmpfiles` | `/etc/tmpfiles.d/minerbot-dashboard.conf`, from which systemd-tmpfiles makes the dashboard's socket folder at every boot | 644 |
-| `bootstrap.sh`, `server.conf.example`, `README.md`, `tests/` | not installed | |
+| `bootstrap.sh`, `move-database.sh`, `server.conf.example`, `README.md`, `tests/` | not installed; `move-database.sh` runs from `src/deploy/` | |
 
 The server's layout, all of it root's but the socket's folder:
 
@@ -27,6 +27,9 @@ The server's layout, all of it root's but the socket's folder:
   src/                        the clone deploy.sh builds from, detached at the deployed commit
   state/                      700: lock, lock.info, backup.lock, deploy-files.commit, bootstrap.done,
                                    dashboard-rights.applied.sql (600, the rights file the last apply used),
+                                   database-moved (600, after move-database.sh; database-move,
+                                   database-move-values and database-move-ran only while a move runs, or after
+                                   one stopped, until a run finishes it),
                                    compose-ready-bot.yml, compose-ready-dashboard.yml (600, the compose.yml each
                                    service was last ready under), nginx-change (while an nginx change runs, or after
                                    one was cut off), nginx-backup/<UTC>/ (newest 3), nginx-check/,
@@ -53,7 +56,8 @@ The real names live only on the server: in `server.conf`, and inside the connect
 `deploy.sh` installs a commit's deploy files with `install_deploy_files` in `common.sh`, which `bootstrap.sh` uses too:
 
 1. The files come from the commit object (`git archive <commit> deploy`), never from `src/`'s working tree. Nothing
-   ever runs from `src/`, because bash reads a script as it runs it.
+   runs from `src/`, because bash reads a script as it runs it, but the one-off `move-database.sh`, which holds the lock
+   that every deploy waits for, so nothing changes `src/` while it runs.
 2. **Forward only.** The installed files stay when `state/deploy-files.commit` names a newer commit than the one being
    deployed ("Kept the deploy files of ..., which are newer than ...") or one on another line of main ("Kept the
    deploy files of ..., which is on main, on another line than ..."). When that commit is gone from `src/`, or is no
@@ -95,7 +99,8 @@ what happened, what state it left and what to do.
 | `--rotate-proxy-key`, `--rotate-db-password` | Makes a new proxy key or database password; goes with either form above. | | |
 | `./setup-dashboard.sh --remove-nginx [--yes]` | The emergency path when `nginx -t` fails and names MinerBot's file: undoes a cut-off change first, takes the file out of nginx, keeping a copy, tests and reloads. Works while `nginx -t` fails. Nothing else: `/etc/nginx/minerbot`, with `pipelog.conf`, and cPanel's hook stay. | `minerbot-setup` | 30 min |
 | `./fill-secrets.sh` | Asks for `BOTTOKEN`, `WEBHOOKCHANNEL`, `STEAMWEB_PUB_KEY` and `STEAMUSER_NAME`, hidden, Enter keeps; writes them into `bot.env` and prints the recreate command. Holds the lock while it runs. | terminal | 10 min a question |
-| `./backup.sh nightly\|pre-deploy\|manual` | Dumps MinerBot's database into `/srv/backups/minerbot` and keeps 14 days, the newest 3 always. Prints nothing when it works and one line when it fails. | cron, deploy | its own limits, 2,400 s at most |
+| `./backup.sh nightly\|pre-deploy\|pre-move\|manual` | Dumps MinerBot's database into `/srv/backups/minerbot` and keeps 14 days, the newest 3 always. Prints nothing when it works and one line when it fails. | cron, deploy | its own limits, 2,400 s at most |
+| `bash src/deploy/move-database.sh [--drop-old]` | Once: moves MinerBot's database out of cPanel, and later deletes the old one through cPanel ("MinerBot's database out of cPanel"). | unit `minerbot-move-database` | 900 s |
 | `./status.sh` | A read-only look: containers, images, history, a running action, backups, the certificate, `nginx -t`, cPanel's Cloudflare list, the dashboard's socket, its proxy key while MinerBot's file is in nginx, the public home page's status, the disk. | terminal | 30 s a probe |
 | `./status.sh --check` | The nightly check, at 05:47: one line per problem and exit 1, silence and exit 0 when all is well. Never changes anything. | cron | 600 s (cron line) |
 | `./status.sh --mail-test` | Sends one message to root, to prove cron's mail reaches the owner. | terminal | 30 s |
@@ -261,7 +266,8 @@ steps they can't check, so they're here, in their order. `<server IP>` stands fo
 4. **Root's mail:** the server contact email in WHM's Basic WebHost Manager Setup is one the owner reads. Backup
    failures and the nightly check go there; `./status.sh --mail-test` proves it once the move is done.
 5. **On the server:** the move (below), then `./deploy.sh main --only dashboard --no-start`, which builds the dashboard
-   and makes its tables.
+   and makes its tables. On a new server, make MinerBot's database and the bot's login outside cPanel first ("MinerBot's
+   database out of cPanel, once").
 6. **Right before setup,** the two pages that show a secret only once, kept open until setup has its answers:
    - Cloudflare's SSL/TLS › Origin Server › Create Certificate: the key generated by Cloudflare, RSA 2048, hostnames
      **only** `bot.murderminershub.com` (setup refuses any other), 15 years, PEM;
@@ -312,6 +318,73 @@ The bot's container was never touched. `server.conf`, `old/`, `state/`, `logs/` 
 which can't sign in, can stay: the old files never read them. `setup-login.sh` and `move-docker-storage.sh` stay in
 `old/`: both were one-offs. A `--no-start` deploy also left the image `minerbot-dashboard:new`, which
 `docker rmi minerbot-dashboard:new` removes, and the dashboard's tables in MinerBot's database, which can stay.
+
+## MinerBot's database out of cPanel, once
+
+A cPanel account can take over every database and login its map lists, and so can anything that runs as that account,
+such as its websites' code: change a login's password with cPanel's own tools, then read the audit log, with the
+addresses people signed in from, and change or delete what the dashboard writes. MinerBot's database was made in cPanel,
+with the bot's login, so `move-database.sh` moves it out once: to `minerbot`, with the bot's own login `minerbot-bot`
+on `localhost` and `127.0.0.1`, both root's alone. cPanel can never claim either name: it maps a database to the account
+whose name and an underscore start it, and no account's name holds a hyphen. The dashboard's login, `minerbot-dashboard`,
+was never cPanel's.
+
+Nothing is copied from the old database. It's the cPanel account's, so its tables, views and even its names may be
+that account's doing, and root would run them while it copied. The new database gets its tables from the migrations of
+the dashboard that runs, and starts empty: the old rows stay in the dump the move makes first, and whoever was signed in
+signs in again.
+
+It runs from the checkout deploy.sh keeps, once a deploy has installed the same commit's deploy files, with the owner's
+go-ahead:
+
+```
+bash /opt/minerbot/src/deploy/move-database.sh
+```
+
+As the unit `minerbot-move-database`, for 15 minutes at most, it:
+
+1. checks that `server.conf`'s `BOT_DB` is a cPanel database, that `bot.env`'s and `dashboard.env`'s
+   `ConnectionStrings__BotConnection` name it, that `minerbot-dashboard:current` is there, and that nobody else made
+   `minerbot` or `minerbot-bot`;
+2. dumps the old database, as `minerbot-<UTC>-pre-move.sql.gz`;
+3. makes `minerbot` (utf8mb4) and `minerbot-bot`, with a new password and the rights the migrations need there (SELECT,
+   INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP and REFERENCES) and none anywhere else, and checks the login;
+4. runs the migrations of `minerbot-dashboard:current` into `minerbot` with that login;
+5. keeps the three values it's about to change, then points them at `minerbot`: `dashboard.env`'s connection string gets
+   the new database, `bot.env`'s the new database, login and password, and `server.conf`'s `BOT_DB` the new name;
+6. moves the dashboard's rights there, with the rights file the last apply used, and recreates the dashboard, which must
+   be ready, its home page included. Until then it runs on the old database, untouched.
+
+The bot's login can make no view, routine, trigger or event: root's own scripts read MinerBot's database, and any of
+those would run code there with root's rights. The bot's cPanel login stays, for the website's database, and must never
+get a right in `minerbot`.
+
+A failure before the dashboard runs on `minerbot` puts back those three values and nothing else, so a change made since
+with setup or `fill-secrets.sh` stays, and the dashboard's rights go back to the old database, where it still runs.
+Once the dashboard has run on `minerbot`, what it wrote is there only, so the move never goes back: running it again
+finishes it. A run cut off anywhere is finished by running it again too. One cut off before `server.conf` moved starts
+over, and drops the `minerbot` it made, which nothing has used. The bot keeps running throughout: it doesn't use
+MinerBot's database yet, so it takes the new connection string when it's next recreated, and only the deploy's
+migrations use it until then.
+
+Once the dashboard works on `minerbot`, the second step deletes the old database with cPanel's own tool, as the account
+that owns it, so cPanel's map stays right:
+
+```
+bash /opt/minerbot/src/deploy/move-database.sh --drop-old
+```
+
+It refuses while `server.conf`, either env file or the dashboard's container still names the old database.
+`state/database-moved` records the move and the deletion.
+
+What changes for the owner afterwards: `minerbot` isn't in cPanel's MySQL Databases, the account's phpMyAdmin or cPanel's
+account backups any more, which is the point. MinerBot's own nightly dump in `/srv/backups/minerbot` is its backup, kept
+14 days on this server; copy it somewhere else as well, as with any backup. WHM's phpMyAdmin, as root, still shows it.
+
+On a new server, MinerBot's database and the bot's login are made outside cPanel from the start, as root, with the
+password on stdin: `CREATE DATABASE minerbot CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_520_ci`, then
+`minerbot-bot` on both hosts with the rights above on `minerbot.*`, and `bot.env`'s `ConnectionStrings__BotConnection`
+naming both.
 
 ## Taking the dashboard away
 
@@ -562,8 +635,8 @@ today's code uses.
   login adds, the audit log's included, and no rights file takes that away. A pull request whose migration makes one
   changes `bot_db_extras` in `common.sh`.
 - The audit log is add-only for the dashboard's login only. The bot's own login has every right in MinerBot's database,
-  and the cPanel account it's mapped to can take it over through cPanel's MySQL tools, then read, change or delete
-  audit rows and sessions.
+  and so has root. Before `move-database.sh` moved it, the cPanel account that owned the database and the bot's login
+  could take them over through cPanel's MySQL tools, then read, change or delete audit rows and sessions.
 - Never give this login rights in cPanel: cPanel only knows whole databases.
 
 How the file grows. The approved plan's list is the ceiling:
@@ -621,8 +694,8 @@ rule reports only a second such night in a row.
 
 Restore, as `README.txt` gives it on the server. Nothing from a dump ever runs as MariaDB's root: `mariadb-dump` writes
 a trigger's, event's or routine's text unchecked between `DELIMITER` lines, so text the server stored as one statement
-can reach the client as several, and anyone who can make one in MinerBot's database (the bot's login, and the cPanel
-account it's mapped to) could have a root restore run SQL of their choosing. PR 6, which gives the bot this database,
+can reach the client as several, and anyone who can make one in MinerBot's database (the bot's login, and, before
+`move-database.sh`, the cPanel account that owned it) could have a root restore run SQL of their choosing. PR 6, which gives the bot this database,
 updates steps 2 and 6.
 
 1. `./backup.sh manual`, a dump of the current state first.
@@ -672,8 +745,8 @@ CI's required "Build and test" job runs, after the .NET tests:
 | `docker compose -f deploy/compose.yml config --quiet` (with an empty `deploy/bot.env`, which `*.env` keeps out of Git) | YAML and schema mistakes |
 | `bash deploy/tests/nginx-test.sh` | 26 checks of the nginx file in `nginx:1.31.8-alpine`, next to a cPanel-like configuration, with a stand-in dashboard on the socket: headers, the Cloudflare-only rule, body caps, timeouts, logs, the 503 page, `pipelog.conf`, and that nothing reaches 127.0.0.1:5080 |
 | `bash deploy/tests/nginx-procedure-test.sh` | 23 checks of the real `nginx_change`, `nginx_remove`, `nginx_undo_cut_off`, `nginx_look`, the reload's proof and cPanel's pipelog hook against a real nginx 1.31.8, cut-off runs, an undo after WHM's piped logging changed, and reloads nginx doesn't take included |
-| `bash deploy/tests/rights-test.sh` | 19 checks of the real `apply_rights` against MariaDB 11.4: the rights, the grant options, the copy setup applies, and the refusal of triggers, events and routines |
-| `bash deploy/tests/scripts-test.sh` | 66 cases of the deploy, rollback, setup, bootstrap, fill-secrets, backup and status logic in `almalinux:9`, the server's bash and coreutils, with stand-ins for Docker, MariaDB, nginx, systemd and the rest |
+| `bash deploy/tests/rights-test.sh` | 21 checks of the real `apply_rights` against MariaDB 11.4: the rights, the grant options, the copy setup applies, the refusal of triggers, events and routines, and `move-database.sh`'s steps: the bot's login, the copy and its comparison, and the rights on the new database |
+| `bash deploy/tests/scripts-test.sh` | 70 cases of the deploy, rollback, setup, bootstrap, move-database, fill-secrets, backup and status logic in `almalinux:9`, the server's bash and coreutils, with stand-ins for Docker, MariaDB, nginx, systemd and the rest |
 | `bash deploy/tests/image-files-test.sh` | 5 checks of both images, built from files only root can read, as `deploy.sh`'s checkout under umask 077 left them: their user, 1654, can read every file in `/app`, and owns and can change nothing there but its volume's folder |
 
 The job has 125 minutes, and each of the five test steps a limit above its script's own: 15 minutes for
@@ -685,6 +758,7 @@ The job has 125 minutes, and each of the five test steps a limit above its scrip
 | Cases | What they cover |
 |---|---|
 | 1-12, 24-39, 60-65 | `deploy.sh` and `rollback.sh`: refusals, the first build, deploy files, full deploys, swaps that fail and go back, time limits, refs and main's first-parent line, Compose failing, a `compose.yml` a service can't run under, the socket, rewritten history, locks, units, readiness, an older dashboard's rights, cut-off swaps, following a run while `systemctl` doesn't answer, a swap Compose can't put back, the rights every dashboard that can be put back keeps, and a dashboard that can't render a page |
+| 66-69 | `move-database.sh`: a move and `--drop-old`, the refusals before anything changes, a copy that differs and a dashboard that isn't ready on the new database, each going back, and a run cut off after each step |
 | 13-16, 21, 50-59, 75 | `setup-dashboard.sh`: the first setup through a real terminal, nginx failures, converging, refusals, no terminal, the rights copy, password changes that stop, hidden pastes, a stopped dashboard, nginx's file waiting for its dashboard, a recreate Compose didn't do, a stale `pipelog.conf` or hook, a lone reload nginx didn't take, a stop after the undo of a cut-off nginx change, which names that undo |
 | 90-92 | a reload nginx doesn't take, `pipelog.conf` following WHM's piped logging, and triggers, events or routines in MinerBot's database |
 | 17, 42 | `backup.sh` |

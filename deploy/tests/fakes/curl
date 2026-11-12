@@ -2,7 +2,8 @@
 # A stand-in for curl, for scripts-test.sh. It answers the five addresses the scripts ask:
 #   http://localhost/health/ready        through --unix-socket /run/minerbot-dashboard/dashboard.sock: Healthy while the
 #                                        dashboard's container runs and its socket is there; Unhealthy when its image is
-#                                        in FAKE_UNREADY (dashboard@<rev>) or its health is "starting"; no connection
+#                                        in FAKE_UNREADY (dashboard@<rev>), its health is "starting", or its container's
+#                                        connection string names the database in FAKE_UNREADY_DB; no connection
 #                                        without the socket
 #   http://localhost/                    the home page, through the same socket, as the readiness check asks for it with
 #                                        -H @-, the proxy key on standard input: 400 for a Host other than the public
@@ -24,6 +25,13 @@
 source /usr/local/lib/mbtest/record.sh
 record curl "$@"
 sync_socket
+
+# True when FAKE_UNREADY_DB names the database the dashboard's container runs on, by its environment's
+# ConnectionStrings__BotConnection, as a dashboard that can't open that database answers
+unready_db() {
+    [ -n "${FAKE_UNREADY_DB:-}" ] || return 1
+    container_env minerbot-dashboard | grep -q "^ConnectionStrings__BotConnection=.*;Database=${FAKE_UNREADY_DB};"
+}
 
 url=''
 write_out=no
@@ -84,7 +92,7 @@ case $url in
         if [ "$local_host" != yes ]; then
             # Without Host: localhost, the dashboard wants the proxy key, which the probe never has
             answer 404 ""
-        elif [ "$health" = starting ] || listed "${FAKE_UNREADY:-}" "$(running_key dashboard)"; then
+        elif [ "$health" = starting ] || listed "${FAKE_UNREADY:-}" "$(running_key dashboard)" || unready_db; then
             answer 503 Unhealthy
         else
             answer 200 Healthy

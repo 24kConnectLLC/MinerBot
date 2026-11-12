@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# A stand-in for cPanel's uapi, for scripts-test.sh. It answers the one call the scripts make, as root for an account:
+#   uapi --output=json --user=<account> Mysql delete_database name=<database>
+# When /var/cpanel/databases/<account>.json lists the database, it takes it out of that map, drops the stand-in
+# database (/fake/db/dbs/<database>) and prints status 1, as cPanel does. When the map doesn't list it, or with
+# FAKE_UAPI=refuse, it prints status 0 with an error and changes nothing. Anything else it doesn't know fails loudly.
+# shellcheck source=record.sh
+source /usr/local/lib/mbtest/record.sh
+record uapi "$@"
+
+user=''
+module=''
+func=''
+name=''
+for arg in "$@"; do
+    case $arg in
+        --output=json) ;;
+        --user=*) user=${arg#--user=} ;;
+        Mysql) module=Mysql ;;
+        delete_database) func=delete_database ;;
+        name=*) name=${arg#name=} ;;
+        *)
+            echo "fake uapi: an argument it doesn't know: $arg" >&2
+            exit 9
+            ;;
+    esac
+done
+if [ "$module $func" != "Mysql delete_database" ] || [ -z "$user" ] || [ -z "$name" ]; then
+    echo "fake uapi: a call it doesn't know: $*" >&2
+    exit 9
+fi
+
+map=/var/cpanel/databases/$user.json
+if [ "${FAKE_UAPI:-}" = refuse ] || ! jq -e --arg db "$name" '.MYSQL.dbs // {} | has($db)' "$map" > /dev/null 2>&1; then
+    printf '%s\n' '{"apiversion":3,"func":"delete_database","module":"Mysql","result":{"data":null,"errors":["The system could not delete the database (made up)"],"messages":null,"metadata":{},"status":0,"warnings":null}}'
+    exit 0
+fi
+tmp=$(mktemp "$map.XXXXXX")
+jq --arg db "$name" 'del(.MYSQL.dbs[$db])' "$map" > "$tmp"
+mv -f "$tmp" "$map"
+rm -rf "/fake/db/dbs/$name"
+printf '%s\n' '{"apiversion":3,"func":"delete_database","module":"Mysql","result":{"data":null,"errors":null,"messages":null,"metadata":{},"status":1,"warnings":null}}'

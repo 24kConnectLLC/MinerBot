@@ -516,6 +516,7 @@ harvest_secrets() {   # the secrets of the case's state, for case 19
         done
         if [ -f /etc/nginx/minerbot/proxy-key.conf ]; then sed -n 's/.*"\([0-9a-f]\{64\}\)".*/\1/p' /etc/nginx/minerbot/proxy-key.conf; fi
         if [ -f /fake/db/password ]; then cat /fake/db/password; fi
+        if [ -f /fake/db/bot-password ]; then cat /fake/db/bot-password; fi
         if [ -f "$home/bot.env" ]; then sed -n 's/^BOTTOKEN=//p; s/^STEAMWEB_PUB_KEY=//p' "$home/bot.env"; fi
     } >> /fake/secrets.txt 2> /dev/null
 }
@@ -2555,6 +2556,330 @@ EOF
     fi
     ! grep -qF -e "$key1" -e "$key2" < <(tail -n +"$((mark + 1))" "$calls") || problem "a proxy key is in the arguments of one of this case's calls"
     ! grep -qF -e "$key1" -e "$key2" "$out"/*.out "$home"/logs/*.log || problem "a proxy key is in this case's output or the logs"
+    verdict
+}
+
+# The cPanel account that owns MinerBot's database, as cPanel keeps it, and that database, as the stand-in mariadb holds
+# a database move-database.sh deals with. /var/cpanel is no part of the saved states, so each case that needs it calls
+# this after its restore.
+cpanel_world() {
+    rm -rf /var/cpanel
+    install -d -m 755 /var/cpanel /var/cpanel/users
+    install -d -m 700 /var/cpanel/databases
+    : > /var/cpanel/users/mbtestacct
+    printf '%s\n' '{"version":1,"MYSQL":{"dbs":{"minerbot_db":"mbtestacct","mbtestacct_wp1":"mbtestacct"},"dbusers":{"mbtest_bot":{"minerbot_db":1}}}}' \
+        > /var/cpanel/databases/mbtestacct.json
+    printf '%s\n' '{"MYSQL":{"minerbot_db":"mbtestacct","mbtestacct_wp1":"mbtestacct"}}' > /var/cpanel/databases/dbindex.db.json
+    rm -rf /fake/db/dbs
+    install -d -m 700 /fake/db/dbs /fake/db/dbs/minerbot_db
+}
+
+# The state a finished move leaves: server.conf, bot.env and dashboard.env name the new database, the bot's connection
+# string has the new login and that login's password, nothing else in them changed, the migrations ran into it, the
+# dashboard's rights are there and its container runs on it, and the move's own state files are as a finished move
+# leaves them
+# shellcheck disable=SC2016 # the backticks are SQL's, never run
+expect_moved() {   # expect_moved <what>
+    local what=$1 cs pw
+    pw=$(cat /fake/db/bot-password 2> /dev/null) || pw=
+    [[ $pw =~ ^[A-Za-z0-9]{40}$ ]] || problem "$what: the bot's login has no password of 40 letters and digits"
+    [ "$(sed -n 's/^BOT_DB=//p' "$home/server.conf")" = minerbot ] || problem "$what: server.conf's BOT_DB isn't minerbot"
+    grep -qx 'SITE_DB=website_db' "$home/server.conf" && grep -qx 'BOT_READY_PATTERN=Gateway +Ready' "$home/server.conf" \
+        || problem "$what: server.conf's other lines changed"
+    cs=$(sed -n 's/^ConnectionStrings__BotConnection=//p' "$home/bot.env")
+    [ "$cs" = "Server=127.0.0.1;Port=3306;Database=minerbot;Uid=minerbot-bot;Pwd=$pw;SslMode=Disabled;Connection Timeout=30;" ] \
+        || problem "$what: bot.env's ConnectionStrings__BotConnection isn't the new database, login and that login's password, with its other parts as they were"
+    grep -qx "ConnectionStrings__DefaultConnection=Server=127.0.0.1;Port=3306;Database=website_db;Uid=mbtest_bot;Pwd=$bot_pw;SslMode=Disabled;Connection Timeout=30;" "$home/bot.env" \
+        || problem "$what: bot.env's DefaultConnection changed"
+    [ "$(sed -n 's/^ConnectionStrings__BotConnection=//p' "$home/dashboard.env")" = "Server=127.0.0.1;Port=3306;Database=minerbot;Uid=minerbot-dashboard;Pwd=$pw1;SslMode=Disabled;Connection Timeout=15;CharSet=utf8mb4;Maximum Pool Size=6;" ] \
+        || problem "$what: dashboard.env's ConnectionStrings__BotConnection isn't setup's with the new database"
+    [ -f /fake/db/dbs/minerbot/migrated ] || problem "$what: the migrations didn't run into minerbot"
+    grep -q '^ConnectionStrings__BotConnection=.*;Database=minerbot;' /fake/docker/env/minerbot-dashboard 2> /dev/null \
+        || problem "$what: the dashboard's container doesn't run on minerbot"
+    grep -qF '`minerbot`.`dashboard_sessions`' /fake/db/applied.sql 2> /dev/null && ! grep -qF '`minerbot_db`' /fake/db/applied.sql \
+        || problem "$what: the dashboard's rights weren't applied on minerbot"
+    [ -f /fake/db/bot-login-localhost ] && [ -f /fake/db/bot-login-127.0.0.1 ] || problem "$what: the bot's login isn't on both hosts"
+    [ "$(cut -d' ' -f2,3 "$home/state/database-moved" 2> /dev/null)" = "minerbot_db minerbot" ] \
+        && [ ! -e "$home/state/database-move" ] && [ ! -e "$home/state/database-move-values" ] \
+        && [ ! -e "$home/state/database-move-ran" ] || problem "$what: the move's state files aren't as a finished move leaves them"
+}
+
+keep_files() {   # keep_files: server.conf, bot.env and dashboard.env as they are now, to compare with later
+    cp -p "$home/server.conf" /tmp/mbtest-server.conf
+    cp -p "$home/bot.env" /tmp/mbtest-bot.env
+    cp -p "$home/dashboard.env" /tmp/mbtest-dashboard.env
+}
+
+same_files() {   # same_files: true when the three files are as keep_files kept them
+    cmp -s "$home/server.conf" /tmp/mbtest-server.conf && cmp -s "$home/bot.env" /tmp/mbtest-bot.env \
+        && cmp -s "$home/dashboard.env" /tmp/mbtest-dashboard.env
+}
+
+# shellcheck disable=SC2016 # the backticks are SQL's, never run
+case_66() {
+    begin 66 "move-database.sh moves MinerBot's database out of cPanel: a pre-move dump, the new database and the bot's own login with a new password on stdin only, the running dashboard's migrations into it, dashboard.env, bot.env and server.conf pointed at it with nothing else changed, the dashboard's rights moved and the dashboard recreated and ready on it, never stopped before, the bot untouched; a second run refuses; --drop-old refuses while dashboard.env names the old database or cPanel refuses, then deletes it through cPanel's own tool, once"
+    local log bot_before mark pw
+    restore deployed
+    cpanel_world
+    mark=$(wc -l < "$calls")
+    bot_before=$(fingerprint /fake/docker/ctr/minerbot-bot /fake/docker/tags/minerbot-bot@current /fake/docker/tags/minerbot-bot@previous)
+    in_home move 120 bash "$home/src/deploy/move-database.sh"
+    expect_exit 0 "the move"
+    log=$(last_log move-database)
+    expect_said "MinerBot's database, minerbot_db, belongs to the cPanel account mbtestacct. It moves to minerbot, with the bot's login minerbot-bot." "the move" "$log"
+    expect_said "The migrations of the dashboard that runs made minerbot's tables, with minerbot-bot." "the move" "$log"
+    expect_said "The dashboard is ready: /health/ready answers Healthy, and its home page 200" "the move" "$log"
+    expect_said "MinerBot's database is now minerbot, outside cPanel" "the move" "$log"
+    expect_moved "the move"
+    [ -d /fake/db/dbs/minerbot_db ] || problem "the old database is gone after the move, before --drop-old"
+    ls /srv/backups/minerbot/minerbot-*-pre-move.sql.gz > /dev/null 2>&1 || problem "no pre-move dump in /srv/backups/minerbot"
+    in_order "dump, database, login, migrations, rights, recreate" \
+        '^mariadb-dump \[timeout -k 10 300\] .*--ignore-table-data=minerbot_db\.dashboard_sessions minerbot_db$' \
+        '^mariadb \[timeout -k 10 30\] -e CREATE DATABASE `minerbot` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_520_ci$' \
+        '^mariadb \[timeout -k 10 30\] --batch --skip-print-query-on-error \{stdin: login\}' \
+        '^mariadb \[timeout -k 10 15\] --defaults-file=/dev/stdin -D minerbot -N -e SELECT 1 \{stdin: option file\}' \
+        '^docker \[timeout -k 10 180\] run --rm --pull never --name minerbot-migrate .* -e ConnectionStrings__BotConnection minerbot-dashboard:current migrate$' \
+        '\{stdin: apply\}' \
+        '^docker \[timeout -k 10 120\] compose -f /opt/minerbot/compose.yml --project-directory /opt/minerbot up -d --no-build --no-deps --force-recreate dashboard$'
+    ! run_calls | grep -qE ' (stop|rm .*) dashboard$' || problem "the move stopped or removed the dashboard"
+    same_state "the bot was touched" "$bot_before" \
+        "$(fingerprint /fake/docker/ctr/minerbot-bot /fake/docker/tags/minerbot-bot@current /fake/docker/tags/minerbot-bot@previous)"
+    grep -qP "\tmove-database\tdatabase\t-\tok\tmoved minerbot_db to minerbot(\t|$)" "$home/logs/history.log" \
+        || problem "no history line for the move" "$(tail -n 2 "$home/logs/history.log")"
+    pw=$(cat /fake/db/bot-password 2> /dev/null) || pw=
+    if [ -n "$pw" ]; then
+        ! tail -n +"$((mark + 1))" "$calls" | grep -qF "$pw" || problem "the bot's new password is in a call's arguments"
+        ! grep -qF "$pw" "$last" "$log" || problem "the bot's new password is in the move's output or log"
+    fi
+
+    in_home again 60 bash "$home/src/deploy/move-database.sh"
+    expect_exit 1 "a second move"
+    expect_said "MinerBot's database was moved already" "a second move"
+
+    sed -i 's/^\(ConnectionStrings__BotConnection=.*\);Database=minerbot;/\1;Database=minerbot_db;/' "$home/dashboard.env"
+    in_home drop-named 60 bash "$home/src/deploy/move-database.sh" --drop-old
+    expect_exit 1 "--drop-old while dashboard.env names the old database"
+    expect_said "dashboard.env's ConnectionStrings__BotConnection still names minerbot_db, so it wasn't deleted." \
+        "--drop-old while dashboard.env names the old database"
+    [ -d /fake/db/dbs/minerbot_db ] || problem "--drop-old deleted a database dashboard.env still names"
+    sed -i 's/^\(ConnectionStrings__BotConnection=.*\);Database=minerbot_db;/\1;Database=minerbot;/' "$home/dashboard.env"
+
+    cp -p /fake/docker/env/minerbot-dashboard /tmp/mbtest-dashboard-env
+    sed -i 's/^\(ConnectionStrings__BotConnection=.*\);Database=minerbot;/\1;Database=minerbot_db;/' /fake/docker/env/minerbot-dashboard
+    in_home drop-container 60 bash "$home/src/deploy/move-database.sh" --drop-old
+    expect_exit 1 "--drop-old while the dashboard's container runs on the old database"
+    expect_said "The dashboard's container still runs on minerbot_db, so it wasn't deleted." \
+        "--drop-old while the dashboard's container runs on the old database" "$(last_log move-database)"
+    cp -p /tmp/mbtest-dashboard-env /fake/docker/env/minerbot-dashboard
+    cp -p "$home/bot.env" /tmp/mbtest-bot.env
+    sed -i 's/^\(ConnectionStrings__BotConnection=.*\);Database=minerbot;/\1;Database=minerbot_db;/' "$home/bot.env"
+    in_home drop-bot-env 60 bash "$home/src/deploy/move-database.sh" --drop-old
+    expect_exit 1 "--drop-old while bot.env names the old database"
+    expect_said "bot.env's ConnectionStrings__BotConnection still names minerbot_db, so it wasn't deleted." \
+        "--drop-old while bot.env names the old database" "$(last_log move-database)"
+    cp -p /tmp/mbtest-bot.env "$home/bot.env"
+    [ -d /fake/db/dbs/minerbot_db ] || problem "--drop-old deleted a database something still names"
+
+    in_home drop-refused 60 env FAKE_UAPI=refuse bash "$home/src/deploy/move-database.sh" --drop-old
+    expect_exit 1 "--drop-old that cPanel refuses"
+    expect_said "cPanel refused to delete minerbot_db: The system could not delete the database (made up). It's still there." \
+        "--drop-old that cPanel refuses" "$(last_log move-database)"
+    [ -d /fake/db/dbs/minerbot_db ] && ! grep -q ' dropped ' "$home/state/database-moved" \
+        || problem "--drop-old that cPanel refused recorded or did a deletion"
+
+    in_home drop 60 bash "$home/src/deploy/move-database.sh" --drop-old
+    expect_exit 0 "--drop-old"
+    log=$(last_log move-database)
+    expect_said "Deleting minerbot_db with cPanel's own tool, as the account mbtestacct, so its map stays right." "--drop-old" "$log"
+    expect_said "minerbot_db is gone, and cPanel's map no longer lists it." "--drop-old" "$log"
+    in_order "cPanel's tool" '^uapi \[timeout -k 10 120\] --output=json --user=mbtestacct Mysql delete_database name=minerbot_db$'
+    [ "$(run_calls | grep -c '^uapi ')" = 1 ] || problem "uapi ran more or less than once"
+    [ ! -d /fake/db/dbs/minerbot_db ] || problem "the old database is still there"
+    ! jq -e '.MYSQL.dbs | has("minerbot_db")' /var/cpanel/databases/mbtestacct.json > /dev/null 2>&1 \
+        && jq -e '.MYSQL.dbs | has("mbtestacct_wp1")' /var/cpanel/databases/mbtestacct.json > /dev/null 2>&1 \
+        || problem "cPanel's map should lose minerbot_db and keep the account's other database"
+    grep -q ' dropped ' "$home/state/database-moved" 2> /dev/null || problem "state/database-moved doesn't say the old database went"
+    grep -qP "\tmove-database\tdatabase\t-\tok\tdeleted the old database minerbot_db(\t|$)" "$home/logs/history.log" \
+        || problem "no history line for the deletion"
+
+    in_home drop-again 60 bash "$home/src/deploy/move-database.sh" --drop-old
+    expect_exit 1 "--drop-old again"
+    expect_said "The old database was deleted already" "--drop-old again"
+    verdict
+}
+
+case_67() {
+    begin 67 "move-database.sh refuses before anything changes, each with its reason: src at another commit than the installed deploy files, --drop-old before a move, a database no cPanel map lists, no minerbot-dashboard:current for the migrations, a minerbot or minerbot-bot someone else made, a bot.env that names another database, a held lock"
+    local before what
+    refusal() {   # refusal <name> <what> <expected text> <command...>
+        local name=$1
+        what=$2
+        local text=$3
+        shift 3
+        before=$({ home_state; fingerprint /fake/db /var/cpanel /fake/docker/ctr /fake/docker/tags; })
+        in_home "$name" 60 "$@"
+        expect_exit 1 "$what"
+        said "$text" || said "$text" "$(last_log move-database 2> /dev/null)" \
+            || problem "$what: it didn't say \"$text\"" "$(excerpt; excerpt "$(last_log move-database 2> /dev/null)")"
+        same_state "$what: something changed" "$before" "$({ home_state; fingerprint /fake/db /var/cpanel /fake/docker/ctr /fake/docker/tags; })"
+    }
+
+    restore deployed
+    cpanel_world
+    G -C "$home/src" checkout -q --detach "$c5"
+    refusal src "src at another commit" "Deploy first, with ./deploy.sh main --only dashboard" bash "$home/src/deploy/move-database.sh"
+
+    restore deployed
+    cpanel_world
+    refusal drop-first "--drop-old before a move" "No move has finished on this server" bash "$home/src/deploy/move-database.sh" --drop-old
+
+    restore deployed
+    cpanel_world
+    rm -f /var/cpanel/databases/mbtestacct.json
+    refusal unmapped "a database no cPanel map lists" "isn't in any cPanel account's map, so it isn't a cPanel database" \
+        bash "$home/src/deploy/move-database.sh"
+
+    restore deployed
+    cpanel_world
+    rm -f /fake/docker/tags/minerbot-dashboard@current
+    refusal no-current "no minerbot-dashboard:current" "There's no minerbot-dashboard:current, whose migrations make the new database's tables" \
+        bash "$home/src/deploy/move-database.sh"
+
+    restore deployed
+    cpanel_world
+    install -d -m 700 /fake/db/dbs/minerbot
+    refusal theirs "a minerbot someone else made" "A database named minerbot is on this server already, and this script didn't make it" \
+        bash "$home/src/deploy/move-database.sh"
+
+    restore deployed
+    cpanel_world
+    touch /fake/db/bot-login-localhost
+    refusal their-login "a minerbot-bot someone else made" "A login named minerbot-bot is on this server already, and this script didn't make it" \
+        bash "$home/src/deploy/move-database.sh"
+
+    restore deployed
+    cpanel_world
+    sed -i 's/^\(ConnectionStrings__BotConnection=.*\);Database=minerbot_db;/\1;Database=other_db;/' "$home/bot.env"
+    refusal other-db "a bot.env that names another database" "bot.env's ConnectionStrings__BotConnection doesn't name minerbot_db" \
+        bash "$home/src/deploy/move-database.sh"
+
+    restore deployed
+    cpanel_world
+    hold_lock "$home/state/lock"
+    refusal locked "a held lock" "Another run holds the lock" bash "$home/src/deploy/move-database.sh"
+    let_go
+    verdict
+}
+
+# shellcheck disable=SC2016 # the backticks are SQL's, never run
+case_68() {
+    begin 68 "move-database.sh when something fails: migrations that fail stop before anything moves; rights that don't move to minerbot put back only the three values the move changed, and the rights on the old database, where the dashboard still runs, so a change made since stays; a dashboard that isn't ready on minerbot, once it has run there, stays there; each time the next run finishes the move"
+    local log
+    restore deployed
+    cpanel_world
+    keep_files
+    in_home migrate-fails 120 env FAKE_MIGRATE=fail bash "$home/src/deploy/move-database.sh"
+    expect_exit 1 "migrations that fail"
+    expect_said "The migrations of minerbot-dashboard:current didn't make minerbot's tables (above). Nothing was moved." \
+        "migrations that fail" "$(last_log move-database)"
+    same_files || problem "migrations that fail: a file moved"
+    ! run_calls | grep -q 'force-recreate dashboard$' || problem "migrations that fail: the dashboard was recreated"
+    [ "$(cut -d' ' -f1 "$home/state/database-move" 2> /dev/null)" = minerbot_db ] && [ ! -e "$home/state/database-move-values" ] \
+        || problem "migrations that fail: the marker isn't there, or the values are"
+    in_home migrate-again 120 bash "$home/src/deploy/move-database.sh"
+    expect_exit 0 "the move after migrations that failed"
+    expect_said "An earlier move of minerbot_db stopped before server.conf moved: this run starts it over." \
+        "the move after migrations that failed" "$(last_log move-database)"
+    expect_said "Dropping the minerbot the earlier run made, which nothing has used, to make it again." \
+        "the move after migrations that failed" "$(last_log move-database)"
+    expect_moved "the move after migrations that failed"
+
+    restore deployed
+    cpanel_world
+    keep_files
+    in_home rights-fail 120 env FAKE_APPLY=fail-minerbot bash "$home/src/deploy/move-database.sh"
+    expect_exit 1 "rights that don't move to minerbot"
+    log=$(last_log move-database)
+    expect_said "The dashboard's database rights didn't move to minerbot (above)." "rights that don't move to minerbot" "$log"
+    expect_said "They name minerbot_db again, and the dashboard, which never left it, has its rights there." \
+        "rights that don't move to minerbot" "$log"
+    same_files || problem "rights that don't move to minerbot: a file didn't go back"
+    grep -qF '`minerbot_db`.`dashboard_sessions`' /fake/db/applied.sql 2> /dev/null \
+        || problem "rights that don't move to minerbot: the rights didn't go back to minerbot_db"
+    ! run_calls | grep -q 'force-recreate dashboard$' || problem "rights that don't move to minerbot: the dashboard was recreated"
+    [ ! -e "$home/state/database-move-values" ] || problem "rights that don't move to minerbot: the values stayed after they went back"
+    grep -qP "\tmove-database\tdatabase\t-\tfailed\t" "$home/logs/history.log" || problem "no failed history line"
+    # Changes made before the next run, as setup or fill-secrets make them, stay
+    sed -i 's/^Dashboard__Admins=.*/Dashboard__Admins=123456789012345678/' "$home/dashboard.env"
+    sed -i 's/^WEBHOOKCHANNEL=.*/WEBHOOKCHANNEL=876543210987654321/' "$home/bot.env"
+    in_home rights-again 120 bash "$home/src/deploy/move-database.sh"
+    expect_exit 0 "the move after rights that didn't move"
+    expect_moved "the move after rights that didn't move"
+    grep -qx 'Dashboard__Admins=123456789012345678' "$home/dashboard.env" && grep -qx 'WEBHOOKCHANNEL=876543210987654321' "$home/bot.env" \
+        || problem "a change made between the two runs was undone"
+
+    restore deployed
+    cpanel_world
+    in_home unready 120 env FAKE_UNREADY_DB=minerbot bash "$home/src/deploy/move-database.sh"
+    expect_exit 1 "a dashboard that isn't ready on minerbot"
+    log=$(last_log move-database)
+    expect_said "The dashboard isn't ready on minerbot (above)." "a dashboard that isn't ready on minerbot" "$log"
+    expect_said "The dashboard has run on minerbot, so the move doesn't go back" "a dashboard that isn't ready on minerbot" "$log"
+    [ "$(sed -n 's/^BOT_DB=//p' "$home/server.conf")" = minerbot ] && [ -f "$home/state/database-move-ran" ] \
+        || problem "a dashboard that isn't ready on minerbot: the move went back, or no record says the dashboard ran there"
+    in_home unready-again 120 bash "$home/src/deploy/move-database.sh"
+    expect_exit 0 "the move after a dashboard that wasn't ready"
+    expect_said "An earlier move of minerbot_db stopped once server.conf named minerbot: this run finishes it." \
+        "the move after a dashboard that wasn't ready" "$(last_log move-database)"
+    expect_moved "the move after a dashboard that wasn't ready"
+
+    # Once the dashboard has run on minerbot, a later failure doesn't go back, and server.conf put back by hand is refused
+    restore deployed
+    cpanel_world
+    in_home ran-unready 120 env FAKE_UNREADY_DB=minerbot bash "$home/src/deploy/move-database.sh"
+    expect_exit 1 "the test's start: a dashboard that isn't ready on minerbot"
+    in_home ran-rights 120 env FAKE_APPLY=fail-minerbot bash "$home/src/deploy/move-database.sh"
+    expect_exit 1 "rights that fail once the dashboard has run on minerbot"
+    expect_said "The dashboard has run on minerbot, so the move doesn't go back" \
+        "rights that fail once the dashboard has run on minerbot" "$(last_log move-database)"
+    [ "$(sed -n 's/^BOT_DB=//p' "$home/server.conf")" = minerbot ] \
+        || problem "rights that fail once the dashboard has run on minerbot: the move went back"
+    sed -i 's/^BOT_DB=.*/BOT_DB=minerbot_db/' "$home/server.conf"
+    in_home ran-conf 120 bash "$home/src/deploy/move-database.sh"
+    expect_exit 1 "server.conf put back by hand once the dashboard has run on minerbot"
+    expect_said "The dashboard has run on minerbot, but server.conf names minerbot_db" \
+        "server.conf put back by hand once the dashboard has run on minerbot" "$(last_log move-database)"
+    [ -f /fake/db/dbs/minerbot/migrated ] || problem "server.conf put back by hand: minerbot was dropped"
+    verdict
+}
+
+case_69() {
+    begin 69 "move-database.sh cut off after each step: the next run starts over while server.conf still names the old database, putting back what had moved, and finishes the rest once server.conf names the new one; either way it ends as a move that ran through, with the dashboard ready on minerbot"
+    local point
+    for point in marker dump database login migrate values dashboard-env bot-env conf rights ran ready; do
+        restore deployed
+        cpanel_world
+        direct "cut-$point" 120 MINERBOT_TEST_CUT_AFTER="$point" -- bash "$home/src/deploy/move-database.sh" --apply
+        [ "$status" = 137 ] || problem "the run cut off after $point ended with exit code $status, not 137" "$(excerpt)"
+        # Changes made in between, as setup or fill-secrets make them, stay: only the move's own values go back
+        sed -i 's/^Dashboard__Admins=.*/Dashboard__Admins=123456789012345678/' "$home/dashboard.env"
+        sed -i 's/^WEBHOOKCHANNEL=.*/WEBHOOKCHANNEL=876543210987654321/' "$home/bot.env"
+        in_home "after-$point" 120 bash "$home/src/deploy/move-database.sh"
+        expect_exit 0 "the run after one cut off after $point"
+        case $point in
+            conf | rights | ran | ready)
+                expect_said "An earlier move of minerbot_db stopped once server.conf named minerbot: this run finishes it." \
+                    "the run after one cut off after $point" "$(last_log move-database)"
+                ;;
+            *)
+                expect_said "An earlier move of minerbot_db stopped before server.conf moved: this run starts it over." \
+                    "the run after one cut off after $point" "$(last_log move-database)"
+                ;;
+        esac
+        expect_moved "the run after one cut off after $point"
+        grep -qx 'Dashboard__Admins=123456789012345678' "$home/dashboard.env" && grep -qx 'WEBHOOKCHANNEL=876543210987654321' "$home/bot.env" \
+            || problem "the run after one cut off after $point undid a change made in between"
+    done
     verdict
 }
 

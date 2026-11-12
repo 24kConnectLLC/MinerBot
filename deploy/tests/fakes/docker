@@ -238,6 +238,11 @@ run() {
                 fi
             done <<< "$listing"
             echo "$highest" > "$fake/db/version"
+            # A database move-database.sh made, which the connection string names, gets its tables
+            into=$(sed -n 's/.*;Database=\([^;]*\);.*/\1/p' <<< ";$ConnectionStrings__BotConnection")
+            if [ -n "$into" ] && [ -d "$fake/db/dbs/$into" ]; then
+                : > "$fake/db/dbs/$into/migrated"
+            fi
             echo "Applied the migrations up to $highest (made up)."
             ;;
         check-settings)

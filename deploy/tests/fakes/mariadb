@@ -4,6 +4,8 @@
 #   version          schema_version's highest version; without it, the table doesn't exist yet
 #   login-<host>     the dashboard's login exists on that host; password holds its password
 #   check-login      the rehearsal's throwaway login exists; check-applied, dashboard-applied: the rights file ran
+#   dbs/<name>/      a database move-database.sh deals with exists; migrated: the stand-in docker's migrate ran into it
+#   bot-login-<host> the bot's own login, minerbot-bot, exists on that host; bot-password holds its password
 # It reads stdin only when the statement comes that way, never with -e, which matters on a terminal, and keeps every
 # statement that came on stdin in /fake/stdin.log, passwords included: the one place a secret may be. Its line in
 # calls.log names the kind of statement that came on stdin, such as {stdin: rehearsal}. These variables change it:
@@ -12,7 +14,7 @@
 #                        tables exist, and only two of the website's three
 #   FAKE_DB_DENY         a database the dashboard's login is refused on (1044), however right its password
 #   FAKE_REHEARSAL       fail: the rehearsal stops at a missing table, as MariaDB does (1146)
-#   FAKE_APPLY           fail: applying the rights to the real login fails
+#   FAKE_APPLY           fail: applying the rights to the real login fails; fail-minerbot: only an apply on minerbot fails
 #   FAKE_RIGHTS_EXTRA    1: the real login has a PROXY grant that REVOKE can't take away
 #   FAKE_DROP_CHECK      fail-once: the first plain DROP USER of the throwaway login fails, as when the connection drops
 #   FAKE_DB_EXTRAS       what MinerBot's database holds that no migration makes, one per line, as in "trigger
@@ -35,8 +37,7 @@ for arg in "$@"; do
     esac
     if [ "$prev" = -e ]; then
         sql=$arg
-    fi
-    if [ "$prev" = -D ]; then
+    elif [ "$prev" = -D ]; then
         database=$arg
     fi
     prev=$arg
@@ -79,6 +80,14 @@ refuse() {   # refuse <message>
 if [ "$password_test" = yes ]; then
     user=$(printf '%s\n' "$sql" | sed -n 's/^user=//p')
     pw=$(printf '%s\n' "$sql" | sed -n 's/^password=//p')
+    if [ "$user" = minerbot-bot ]; then
+        if [ -f "$db/bot-login-127.0.0.1" ] && [ -f "$db/bot-password" ] && [ "$pw" = "$(cat "$db/bot-password")" ]; then
+            [ -d "$db/dbs/$database" ] || refuse "ERROR 1049 (42000): Unknown database '$database'"
+            echo 1
+            exit 0
+        fi
+        refuse "ERROR 1045 (28000): Access denied for user '$user'@'localhost' (using password: YES)"
+    fi
     if [ "$user" = minerbot-dashboard ] && [ -f "$db/login-127.0.0.1" ] && [ -f "$db/password" ] \
         && [ "$pw" = "$(cat "$db/password")" ]; then
         if [ -n "$database" ] && [ "$database" = "${FAKE_DB_DENY:-}" ]; then
@@ -91,10 +100,39 @@ if [ "$password_test" = yes ]; then
 fi
 
 case $sql in
+    *"FROM information_schema.schemata WHERE schema_name = '"*)
+        name=${sql##*schema_name = \'}
+        name=${name%%\'*}
+        if [ -d "$db/dbs/$name" ]; then echo 1; else echo 0; fi
+        ;;
+    "CREATE DATABASE \`"*)
+        name=${sql#CREATE DATABASE \`}
+        name=${name%%\`*}
+        [ ! -d "$db/dbs/$name" ] || refuse "ERROR 1007 (HY000): Can't create database '$name'; database exists"
+        mkdir -p "$db/dbs/$name"
+        ;;
+    "DROP DATABASE \`"*)
+        name=${sql#DROP DATABASE \`}
+        name=${name%%\`*}
+        [ -d "$db/dbs/$name" ] || refuse "ERROR 1008 (HY000): Can't drop database '$name'; database doesn't exist"
+        rm -rf "${db:?}/dbs/$name"
+        ;;
+    *"FROM mysql.user WHERE User = 'minerbot-bot' AND Host = '"*)
+        host=${sql##*Host = \'}
+        host=${host%%\'*}
+        if [ -f "$db/bot-login-$host" ]; then echo 1; else echo 0; fi
+        ;;
+    *"FROM mysql.user WHERE User = 'minerbot-bot'")
+        n=0
+        for host in localhost 127.0.0.1; do
+            if [ -f "$db/bot-login-$host" ]; then n=$((n + 1)); fi
+        done
+        echo "$n"
+        ;;
     *"FROM information_schema.schemata"*)
         echo "${FAKE_DB_SCHEMATA:-2}"
         ;;
-    *"FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = 'minerbot_db'"*"information_schema.ROUTINES"*)
+    *"FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = '"*"information_schema.ROUTINES"*)
         [ "${FAKE_DB_EXTRAS:-}" != fail ] || refuse "ERROR 2013 (HY000): Lost connection to server during query (made up)"
         if [ -n "${FAKE_DB_EXTRAS:-}" ]; then printf '%s\n' "$FAKE_DB_EXTRAS"; fi
         ;;
@@ -153,6 +191,9 @@ case $sql in
                     refuse "ERROR 1133 (28000) at line 22: Can't find any matching row in the user table"
                 fi
                 [ "${FAKE_APPLY:-}" != fail ] || refuse "ERROR 2013 (HY000) at line 28: Lost connection to server during query"
+                if [ "${FAKE_APPLY:-}" = fail-minerbot ] && [[ $sql == *"\`minerbot\`.\`dashboard_sessions\`"* ]]; then
+                    refuse "ERROR 2013 (HY000) at line 37: Lost connection to server during query (made up, on minerbot)"
+                fi
                 printf '%s\n' "$sql" > "$db/applied.sql"
                 touch "$db/dashboard-applied"
                 ;;
@@ -173,9 +214,23 @@ case $sql in
                     echo "NO-SKIP-PRINT mariadb: a statement with a password came without --skip-print-query-on-error" >> "$calls"
                 fi
                 statement="^(CREATE|ALTER) USER 'minerbot-dashboard'@'([^']+)' IDENTIFIED BY '([A-Za-z0-9]+)';$"
+                bot_user="^(CREATE|ALTER) USER 'minerbot-bot'@'([^']+)' IDENTIFIED BY '([A-Za-z0-9]+)';$"
+                bot_rights="^(REVOKE ALL PRIVILEGES, GRANT OPTION FROM|GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP, REFERENCES ON \`minerbot\`\.\* TO) 'minerbot-bot'@'([^']+)';$"
                 while IFS= read -r line; do
                     [ -n "$line" ] || continue
-                    if [[ $line =~ $statement ]]; then
+                    if [[ $line =~ $bot_user ]]; then
+                        if [ "${BASH_REMATCH[1]}" = CREATE ]; then
+                            [ ! -f "$db/bot-login-${BASH_REMATCH[2]}" ] || refuse "ERROR 1396 (HY000) at line 1: Operation CREATE USER failed"
+                            touch "$db/bot-login-${BASH_REMATCH[2]}"
+                        else
+                            [ -f "$db/bot-login-${BASH_REMATCH[2]}" ] || refuse "ERROR 1396 (HY000) at line 1: Operation ALTER USER failed"
+                        fi
+                        printf '%s\n' "${BASH_REMATCH[3]}" > "$db/bot-password"
+                        # Every password the bot's login gets is one case 19 looks for, not only the last
+                        printf '%s\n' "${BASH_REMATCH[3]}" >> "$fake/secrets.txt"
+                    elif [[ $line =~ $bot_rights ]]; then
+                        [ -f "$db/bot-login-${BASH_REMATCH[2]}" ] || refuse "ERROR 1133 (28000) at line 2: Can't find any matching row in the user table"
+                    elif [[ $line =~ $statement ]]; then
                         if [ "${BASH_REMATCH[1]}" = CREATE ]; then
                             [ ! -f "$db/login-${BASH_REMATCH[2]}" ] || refuse "ERROR 1396 (HY000) at line 1: Operation CREATE USER failed"
                             touch "$db/login-${BASH_REMATCH[2]}"

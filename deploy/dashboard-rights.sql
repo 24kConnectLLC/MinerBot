@@ -31,8 +31,9 @@ GRANT SELECT (`guild_id`) ON `{{SITE_DB}}`.`ihvph_discord_servers` TO {{GRANTEES
 
 -- MinerBot's own database: the sign-in sessions, and adding rows to the audit log, which this login can never change or
 -- read back. Reading it comes with the audit page. That holds for this login only: the bot's own login has every right
--- in this database, and the cPanel account that owns that login can take it over, then change or delete audit rows and
--- sessions. apply_rights refuses while this database holds a trigger, event or routine, which would act with its
--- maker's rights on every row this login adds, and which no migration makes.
+-- in this database, and while it's still a cPanel database, as before move-database.sh, the cPanel account that owns
+-- it can take it over, then change or delete audit rows and sessions. apply_rights refuses while this database holds a
+-- trigger, event or routine, which would act with its maker's rights on every row this login adds, and which no
+-- migration makes.
 GRANT SELECT, INSERT, UPDATE, DELETE ON `{{BOT_DB}}`.`dashboard_sessions` TO {{GRANTEES}};
 GRANT INSERT ON `{{BOT_DB}}`.`audit_log` TO {{GRANTEES}};
