@@ -1165,7 +1165,7 @@ case_3() {
 }
 
 case_4() {
-    begin 4 "a full deploy: the settings checked in isolation, with the socket compose.yml gives, the rights rehearsed, applied and compared, then the dashboard swapped and ready (its own socket, the public check) before the bot; history ok; run logs pruned to the newest 60"
+    begin 4 "a full deploy: src checked out readable, the settings checked in isolation, with the socket compose.yml gives, the rights rehearsed, applied and compared, then the dashboard swapped and ready (its own socket, the public check) before the bot; history ok; run logs pruned to the newest 60"
     local log dash bot n expected
     restore deployed
     set_main "$c5"
@@ -1211,6 +1211,10 @@ case_4() {
         || problem "no copy of the compose.yml each service is ready under, in state/"
     [ "$(find "$home/logs" -maxdepth 1 -name '[0-9]*Z-*.log' | wc -l)" = 60 ] && [ -e "$log" ] \
         && [ ! -e "$home/logs/20260101T000010Z-deploy.log" ] || problem "the run logs weren't pruned to the newest 60"
+    # The checkout rewrote version.txt, which c5 changes, and must leave it readable: an older commit's Dockerfile
+    # publishes its files with the modes src gives them
+    [ "$(stat -c %a "$home/src/version.txt")" = 644 ] \
+        || problem "src/version.txt, which the checkout rewrote, is $(stat -c %a "$home/src/version.txt"), not 644"
     verdict
 }
 

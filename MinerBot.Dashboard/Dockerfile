@@ -30,7 +30,11 @@ RUN dotnet build "./MinerBot.Dashboard.csproj" -c $BUILD_CONFIGURATION -o /app/b
 
 FROM build AS publish
 ARG BUILD_CONFIGURATION=Release
-RUN dotnet publish "./MinerBot.Dashboard.csproj" -c $BUILD_CONFIGURATION -o /app/publish /p:UseAppHost=false
+# Every file the image gets is readable by all and writable only by root, whatever modes the build's files had:
+# deploy.sh's checkout writes each file it changes under umask 077, and dotnet publish keeps a static file's mode,
+# so the app couldn't otherwise read its own stylesheet. deploy/tests/image-files-test.sh checks it.
+RUN dotnet publish "./MinerBot.Dashboard.csproj" -c $BUILD_CONFIGURATION -o /app/publish /p:UseAppHost=false \
+    && chmod -R a+rX,go-w /app/publish
 
 FROM base AS final
 WORKDIR /app
