@@ -2084,6 +2084,9 @@ case_60() {
     begin 60 "a dashboard older than the installed deploy files keeps its rights: it gets the rights the last apply used and each GRANT of its own dashboard-rights.sql they lack, named in the log, and that is the copy setup applies; run again, nothing more is added; the next deploy of the newer dashboard applies the installed file and the GRANTs of the older dashboard's own file, since it replaces that one, and drops a right only the last apply had; before any apply kept a copy, the installed file is the base"
     local dropped line copy=$home/state/dashboard-rights.applied.sql applied=/fake/db/applied.sql
     local who="'minerbot-dashboard'@'localhost', 'minerbot-dashboard'@'127.0.0.1'" grant marker
+    # The INSERT line as the rights files and the copy hold it. The file reads the audit log too, on a line of its own, so
+    # a check for the table's name alone would pass whatever happened to this one.
+    local own_grant='GRANT INSERT ON `{{BOT_DB}}`.`audit_log` TO {{GRANTEES}};'
     rendered() { sed -e 's/{{SITE_DB}}/website_db/g' -e 's/{{BOT_DB}}/minerbot_db/g' -e "s/{{GRANTEES}}/$who/g"; }
     grant="GRANT INSERT ON \`minerbot_db\`.\`audit_log\` TO $who;"
     marker="GRANT SELECT ON \`minerbot_db\`.\`mbtest_marker\` TO $who;"
@@ -2092,7 +2095,7 @@ case_60() {
     # stopped using it, a pull request before
     dropped=$(new_commit "$c1" rights-dropped sed -i '/^GRANT INSERT ON `{{BOT_DB}}`\.`audit_log` TO {{GRANTEES}};$/d' \
         deploy/dashboard-rights.sql) || problem "couldn't make the commit that removes a right"
-    ! G -C /work/origin.git show "$dropped:deploy/dashboard-rights.sql" | grep -qF '`audit_log`' \
+    ! G -C /work/origin.git show "$dropped:deploy/dashboard-rights.sql" | grep -qxF "$own_grant" \
         || problem "the test's commit didn't remove INSERT on audit_log"
     set_main "$dropped"
     in_home newer 120 ./deploy.sh --only dashboard
@@ -2126,7 +2129,7 @@ case_60() {
     in_order "the rights, then the swap" '\{stdin: apply\}' ' up -d --no-build --no-deps dashboard$'
     [ "$(ctr_image minerbot-dashboard)" = "$(image_of "$c1" dashboard)" ] || problem "the dashboard doesn't run c1's image"
     [ "$(tag_of minerbot-dashboard:previous)" = "$(image_of "$dropped" dashboard)" ] || problem ":previous isn't the newer dashboard"
-    grep -qF '`audit_log`' "$copy" 2> /dev/null && [ "$(stat -c %a "$copy")" = 600 ] \
+    grep -qxF "$own_grant" "$copy" 2> /dev/null && [ "$(stat -c %a "$copy")" = 600 ] \
         || problem "the copy setup applies lacks INSERT on audit_log, or isn't 600"
     [ -z "$(find "$home/state/tmp" -mindepth 1 -maxdepth 1 -name 'deploy.*' 2> /dev/null)" ] \
         || problem "the deploy left its rights file in state/tmp"
@@ -2144,7 +2147,7 @@ case_60() {
     ! grep -qF -e "$marker" "$applied" 2> /dev/null || problem "the newer dashboard's deploy kept a right no dashboard's own file gives"
     grep -qxF "$grant" "$applied" 2> /dev/null \
         || problem "the newer dashboard's deploy took INSERT on audit_log from c1's dashboard, which it replaced"
-    grep -qF '`audit_log`' "$copy" 2> /dev/null && ! grep -qF mbtest_marker "$copy" 2> /dev/null \
+    grep -qxF "$own_grant" "$copy" 2> /dev/null && ! grep -qF mbtest_marker "$copy" 2> /dev/null \
         || problem "the copy setup applies isn't the installed file and c1's GRANT"
 
     # Before any apply kept a copy: a --only bot deploy installs the newer files, and c1's dashboard gets the installed

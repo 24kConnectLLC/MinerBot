@@ -5,6 +5,7 @@ using DataAccessLibrary.Armor;
 using DataAccessLibrary.Armor.Models;
 using DataAccessLibrary.Audit;
 using DataAccessLibrary.Audit.Models;
+using MinerBot.Dashboard.Audit;
 using MinerBot.Dashboard.Auth;
 using MinerBot.Dashboard.Security;
 using MinerBot.Shared.Armor;
@@ -38,11 +39,10 @@ namespace MinerBot.Dashboard.Armor
 
     // Each review action is one transaction on the website's connection: the status changes only while the armor is as
     // the reviewer saw it, and its armor_reviews row and its audit row commit with it, or nothing does. A refusal commits
-    // only its audit row.
+    // only its audit row. A change the database didn't confirm gets an audit row of its own saying so.
     internal sealed class ArmorReviews(IArmorSubmissionData submissions, IArmorReviewData reviews, IAuditLogData audit, TimeProvider time,
         ILogger<ArmorReviews> logger)
     {
-        const string TargetType = "armor";
         const string ChangedDetail = "The armor had changed since the page showed it";
 
         public async Task<ArmorReviewOutcome> ApplyAsync(ArmorReviewRequest request, HttpContext httpContext)
@@ -85,7 +85,7 @@ namespace MinerBot.Dashboard.Armor
                 actor_role = role,
                 action = action.AuditAction(),
                 outcome = outcome,
-                target_type = TargetType,
+                target_type = AuditWords.ArmorTarget,
                 target_id = target,
                 before_json = Json(before, []),
                 after_json = after == null ? null : Json(after, ticked),
@@ -100,23 +100,46 @@ namespace MinerBot.Dashboard.Armor
             var returned = 0;
             ArmorReviewOutcome outcome;
 
+            // The audit row of the change the last run made, for the row saying it may not have landed. A refusal has none,
+            // since no change was on its way. Written before returned is, so it's settled once returned reads 1.
+            AuditEntry? written = null;
+
+            // What the last run's work decided, set before returned is too
+            ArmorReviewOutcome? decided = null;
+
             try
             {
                 outcome = await DatabaseCalls.Guard(() => submissions.RunInTransaction(async transaction =>
                 {
                     // A run after a deadlock starts again, with everything the last one did rolled back
                     Interlocked.Exchange(ref returned, 0);
+                    written = null;
+                    decided = null;
                     var result = await Work(transaction);
+                    decided = result;
                     Interlocked.Exchange(ref returned, 1);
                     return result;
                 }), logger);
             }
             catch (DashboardUnavailableException) when (Volatile.Read(ref returned) == 1)
             {
+                // A refusal commits only its audit row, and an armor that isn't there commits nothing, so the armor is as
+                // the work found it whether or not the commit landed, and the page can say what the work decided
+                if (decided is { } decision && decision != ArmorReviewOutcome.Done)
+                {
+                    logger.LogWarning("Armor {ArmorId}'s {Action} ended {Outcome}, which changes nothing, and the database stopped answering at its commit (request {RequestId})",
+                        request.Id, action.AuditAction(), decision, httpContext.TraceIdentifier);
+                    return decision;
+                }
+
                 // A limit that passed during the commit doesn't stop it, so this can't say nothing changed. Before the work
                 // returned, nothing was saved, and the error page says so.
                 logger.LogWarning("Armor {ArmorId}'s {Action} may or may not have been saved, because the database stopped answering (request {RequestId})",
                     request.Id, action.AuditAction(), httpContext.TraceIdentifier);
+
+                if (written != null)
+                    await UnconfirmedChanges.RecordAsync(audit, written, logger);
+
                 return ArmorReviewOutcome.Unsure;
             }
 
@@ -156,7 +179,10 @@ namespace MinerBot.Dashboard.Armor
                 }
 
                 await reviews.AddReview(review, transaction);
-                await audit.AddAudit(Entry(AuditOutcome.Ok, null, armor.Status, action.Target(), ticked), transaction);
+
+                var entry = Entry(AuditOutcome.Ok, null, armor.Status, action.Target(), ticked);
+                await audit.AddAudit(entry, transaction);
+                written = entry;
                 return ArmorReviewOutcome.Done;
             }
 

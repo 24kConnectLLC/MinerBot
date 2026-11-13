@@ -95,6 +95,7 @@ namespace DataAccessLibrary.Tests
             var calls = new Func<Task>[]
             {
                 () => audit.ListAudit(new AuditQuery()),
+                () => audit.LatestChanges("blacklist", ["12345"]),
                 () => audit.AddAudit(new AuditEntry { at = DateTime.UtcNow, actor_role = AuditRole.Owner, action = "armor.approve", outcome = AuditOutcome.Ok }),
                 () => reviews.ListReviews(1),
                 () => reviews.AddReview(new ArmorReview { armor_id = 1, to_status = "Approved", reviewed_by = 1, reviewed_at = DateTime.UtcNow }),

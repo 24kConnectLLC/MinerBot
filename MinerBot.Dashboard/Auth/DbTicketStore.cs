@@ -8,6 +8,7 @@ using DataAccessLibrary.Dashboard.Models;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
+using MinerBot.Dashboard.Audit;
 using MinerBot.Dashboard.Security;
 
 namespace MinerBot.Dashboard.Auth
@@ -27,8 +28,6 @@ namespace MinerBot.Dashboard.Auth
 
         public const int MaxSessionsPerPerson = 5;
         public const string TicketPurpose = "MinerBot.Dashboard.SessionTicket.v1";
-
-        const string SessionTarget = "session";
 
         readonly IDataProtector tickets = protection.CreateProtector(TicketPurpose);
 
@@ -58,7 +57,7 @@ namespace MinerBot.Dashboard.Auth
                 ticket = blob
             };
 
-            var signedIn = Entry(httpContext, now, user.Id, user.Name, role.Word(), "auth.signin", AuditOutcome.Ok, null);
+            var signedIn = Entry(httpContext, now, user.Id, user.Name, role.Word(), AuditWords.SignIn, AuditOutcome.Ok, null);
 
             // The session, the cap on how many one person has, and the audit row commit together, or none of them does
             await DatabaseCalls.Guard(() => sessions.RunInTransaction(async transaction =>
@@ -157,7 +156,7 @@ namespace MinerBot.Dashboard.Auth
         public Task EndAsync(string key, ClaimsPrincipal user, HttpContext httpContext)
         {
             var signedIn = SignedInUser.From(user);
-            var entry = Entry(httpContext, time.GetUtcNow(), signedIn?.Id, signedIn?.Name, RoleClaims.RoleOf(user).Word(), "auth.signout", AuditOutcome.Ok, null);
+            var entry = Entry(httpContext, time.GetUtcNow(), signedIn?.Id, signedIn?.Name, RoleClaims.RoleOf(user).Word(), AuditWords.SignOut, AuditOutcome.Ok, null);
 
             return DatabaseCalls.Guard(() => sessions.RunInTransaction(async transaction =>
             {
@@ -180,7 +179,7 @@ namespace MinerBot.Dashboard.Auth
 
         async Task EndForUnlistedAsync(DashboardSession session, HttpContext httpContext, DateTimeOffset now)
         {
-            var refused = Entry(httpContext, now, session.user_id, session.user_name, AuditRole.Visitor, "auth.refused", AuditOutcome.Refused,
+            var refused = Entry(httpContext, now, session.user_id, session.user_name, AuditRole.Visitor, AuditWords.Refused, AuditOutcome.Refused,
                 "Taken off the dashboard's lists, so their sessions were ended");
 
             // Audited only when this request ended something, so two requests at once don't log one ending twice
@@ -232,7 +231,7 @@ namespace MinerBot.Dashboard.Auth
             actor_role = role,
             action = action,
             outcome = outcome,
-            target_type = SessionTarget,
+            target_type = AuditWords.SessionTarget,
             detail = detail,
             ip = httpContext.Connection.RemoteIpAddress?.ToString(),
             request_id = httpContext.TraceIdentifier

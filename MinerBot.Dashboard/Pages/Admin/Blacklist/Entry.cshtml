@@ -1,0 +1,147 @@
+@page "/Admin/Blacklist/{account:long}"
+@model BlacklistEntryModel
+@using System.Globalization
+@using MinerBot.Dashboard.Armor
+@using MinerBot.Dashboard.Blacklist
+@*
+    Everything someone typed into the entry goes through RevealedText, inside a bdi, and the title never holds it. The
+    forms come last, after the details and the history, and each button points at what it does. Each form sends back the
+    version of what it shows: the edit form's boxes can still hold a refused try, made from an older version.
+*@
+@{
+    var id = Model.Account.ToString(CultureInfo.InvariantCulture);
+    ViewData["Title"] = Model.Unsure ? "Not sure it was saved" : "Blacklist entry " + Model.Steam3;
+}
+@if (Model.Unsure)
+{
+    <h1>Not sure it was saved</h1>
+    <p>@BlacklistWords.Unsure</p>
+    <p><a href="@Model.PageLink">Open the entry again</a></p>
+}
+else
+{
+    var entry = Model.Entry;
+
+    <p><a href="/admin/blacklist">Back to the blacklist</a></p>
+    <h1>Blacklist entry @Model.Steam3</h1>
+
+    @if (Model.Notice != null)
+    {
+        <div class="notice @(Model.NoticeIsProblem ? "notice-problem" : "notice-done")" role="@(Model.NoticeIsProblem ? "alert" : "status")">
+            <p>@Model.Notice</p>
+        </div>
+    }
+
+    <section aria-labelledby="account">
+        <h2 id="account">Account</h2>
+        <dl class="details">
+            @if (Model.SteamId64 != null)
+            {
+                <dt>SteamID64</dt>
+                <dd>@Model.SteamId64</dd>
+            }
+            <dt>SteamID3</dt>
+            <dd>@Model.Steam3</dd>
+            @if (Model.SteamId64 != null)
+            {
+                <dt>SteamID</dt>
+                <dd>@Model.Steam2</dd>
+                <dt>Profile</dt>
+                <dd><a href="@Model.ProfileLink" rel="noreferrer">@Model.ProfileLink</a></dd>
+            }
+        </dl>
+        @if (Model.SteamId64 == null && entry != null)
+        {
+            <p>Account number 0 isn't a Steam account, so it has no SteamID64 and no profile. It can be changed or removed here, but not added again.</p>
+        }
+        else if (Model.SteamId64 == null)
+        {
+            <p>Account number 0 isn't a Steam account, so it has no SteamID64 and no profile. It can't be added again.</p>
+        }
+    </section>
+
+    @if (entry == null)
+    {
+        <section aria-labelledby="entry">
+            <h2 id="entry">Entry</h2>
+            <p>This account isn't on the blacklist. Its history on the dashboard is below.</p>
+            @if (Model.AddLink != null)
+            {
+                <p><a href="@Model.AddLink">Add it to the blacklist</a></p>
+            }
+        </section>
+    }
+    else
+    {
+        <section aria-labelledby="entry">
+            <h2 id="entry">Entry</h2>
+            <dl class="details">
+                <dt>Name</dt>
+                <dd>@if (string.IsNullOrEmpty(entry.username)) {<text>No name</text>} else {@RevealedText.Html(entry.username)}</dd>
+                <dt>Reason</dt>
+                <dd>@if (string.IsNullOrEmpty(entry.reason)) {<text>No reason</text>} else {@RevealedText.Html(entry.reason)}</dd>
+                <dt>Ends</dt>
+                <dd>
+                    @if (entry.expire_date_unreadable)
+                    {
+                        <span class="marker marker-warn">Not a real date</span> @BlacklistWords.UnreadableDate
+                    }
+                    else if (entry.expire_date is { } end)
+                    {
+                        @end.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)<text> UTC</text>
+                        @if (Model.Expired)
+                        {
+                            <span class="marker marker-warn">Expired</span>
+                        }
+                    }
+                    else
+                    {
+                        <text>No end</text>
+                    }
+                </dd>
+                <dt>Notes</dt>
+                <dd>@if (string.IsNullOrEmpty(entry.notes)) {<text>No notes</text>} else {@RevealedText.Html(entry.notes)}</dd>
+            </dl>
+            <p class="muted">Characters that show nothing or turn text around are written as their codes, such as [U+200B], and mentions, links and backticks are marked.</p>
+        </section>
+    }
+
+    <section aria-labelledby="history">
+        <h2 id="history">History</h2>
+        @if (Model.History.Rows.Count == 0)
+        {
+            <p>No changes made on the dashboard yet. Changes made on the website aren't listed here.</p>
+        }
+        else
+        {
+            <p class="muted">Newest first, the latest @BlacklistEntryModel.HistoryLimit at most. Changes made on the website aren't listed here.</p>
+            <partial name="_AuditRows" model="Model.History" />
+            @if (Model.HistoryTotal > Model.History.Rows.Count)
+            {
+                <p><a href="@Model.AuditLink">All @Model.HistoryTotal.ToString("N0", CultureInfo.InvariantCulture) of this entry's rows on the audit log</a></p>
+            }
+            else
+            {
+                <p><a href="@Model.AuditLink">This entry's rows on the audit log</a></p>
+            }
+        }
+    </section>
+
+    @if (entry != null)
+    {
+        <section aria-labelledby="change">
+            <h2 id="change">Change or remove</h2>
+            <form method="post" asp-page-handler="Edit" asp-route-account="@id" class="action">
+                <input type="hidden" name="version" value="@Model.EditVersion" />
+                <partial name="_EntryFields" model="Model.Form" />
+                <button type="submit" class="button" aria-describedby="edit-help">Save</button>
+                <p id="edit-help" class="muted">@BlacklistWords.EditHelp</p>
+            </form>
+            <form method="post" asp-page-handler="Remove" asp-route-account="@id" class="action">
+                <input type="hidden" name="version" value="@Model.Version" />
+                <button type="submit" class="button button-quiet" aria-describedby="remove-help">Remove from the blacklist</button>
+                <p id="remove-help" class="muted">@BlacklistWords.RemoveHelp</p>
+            </form>
+        </section>
+    }
+}

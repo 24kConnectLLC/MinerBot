@@ -14,5 +14,9 @@ namespace DataAccessLibrary.Audit.Models
         // From 0
         public int Page { get; set; }
         public int PageSize { get; set; } = 25;
+
+        // Each row's visitor address, which only the Owner may see. Left off, ip comes back null, so a page can't show it
+        // by mistake.
+        public bool IncludeIp { get; set; }
     }
 }

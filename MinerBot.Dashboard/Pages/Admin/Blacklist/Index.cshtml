@@ -1,0 +1,202 @@
+@page
+@model BlacklistListModel
+@using System.Globalization
+@using MinerBot.Dashboard.Armor
+@using MinerBot.Dashboard.Blacklist
+@*
+    Names, reasons and notes are whoever typed them in, here or on the website, so each goes through RevealedText, inside
+    a bdi, and the title never holds one. Each entry's link is its account, which always shows something to click.
+*@
+@{
+    ViewData["Title"] = Model.Unsure ? "Not sure it was removed" : "Blacklist";
+}
+@if (Model.Unsure)
+{
+    <h1>Not sure it was removed</h1>
+    <p>@BlacklistWords.NumberUnsure</p>
+    <p><a href="/admin/blacklist">Open the blacklist again</a></p>
+}
+else
+{
+    <h1>Blacklist</h1>
+    <div class="banner" role="note">
+        <p>@BlacklistWords.NotEnforced</p>
+    </div>
+
+    @if (Model.Notice != null)
+    {
+        <div class="notice @(Model.NoticeIsProblem ? "notice-problem" : "notice-done")" role="@(Model.NoticeIsProblem ? "alert" : "status")">
+            <p>@Model.Notice</p>
+        </div>
+    }
+
+    <p><a class="button" href="/admin/blacklist/add">Add an entry</a></p>
+
+    <form method="get" action="/admin/blacklist" class="search" role="search">
+        <label for="q">Search by SteamID or name</label>
+        <div class="search-row">
+            <input type="search" id="q" name="q" value="@Model.Search" maxlength="@BlacklistListModel.SearchLimit" aria-describedby="q-hint" />
+            <button type="submit" class="button">Search</button>
+            @if (Model.Search.Length > 0)
+            {
+                <a href="@Model.Link(keepSearch: false)">Clear the search</a>
+            }
+        </div>
+        <p id="q-hint" class="muted">A SteamID in any form, a profile link with its number, or part of a name.</p>
+    </form>
+
+    @if (Model.SearchIsCustomLink)
+    {
+        <div class="notice" role="status">
+            <p>@BlacklistWords.CustomLinkSearch</p>
+        </div>
+    }
+
+    <p>@Model.Summary</p>
+    @if (Model.Rows.Count == 0)
+    {
+        @if (Model.PageNumber > 1)
+        {
+            <p>There's nothing on page @Model.PageNumber. <a href="@Model.Link()">Go to the first page</a>.</p>
+        }
+        else if (Model.Search.Length > 0)
+        {
+            <p>No entry matches that search.</p>
+        }
+        else if (Model.Numbers.Count > 0)
+        {
+            @* The table isn't empty: it holds only rows whose number no account can be, which the box below lists *@
+            <p>No entry has a Steam account number. The rows below can't match anyone.</p>
+        }
+        else
+        {
+            <p>The blacklist is empty.</p>
+        }
+    }
+    else
+    {
+        <div class="table-wrap">
+            <table class="blacklist">
+                <thead>
+                    <tr>
+                        <th scope="col">Account</th>
+                        <th scope="col">SteamID3</th>
+                        <th scope="col">Name</th>
+                        <th scope="col">Reason</th>
+                        <th scope="col">Ends</th>
+                        <th scope="col">Last change</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var row in Model.Rows)
+                    {
+                        <tr>
+                            <td><a href="@row.Link">@row.Shown</a></td>
+                            <td>@row.Steam3</td>
+                            <td>@if (string.IsNullOrEmpty(row.Name)) {<text>No name</text>} else {@RevealedText.Html(row.Name)}</td>
+                            <td>@if (string.IsNullOrEmpty(row.Reason)) {<text>No reason</text>} else {@RevealedText.Html(row.Reason)}</td>
+                            <td>
+                                @if (row.ExpiresUnreadable)
+                                {
+                                    <span class="marker marker-warn">Not a real date</span>
+                                }
+                                else if (row.Expires is { } end)
+                                {
+                                    @end.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)<text> UTC</text>
+                                    @if (row.Expired)
+                                    {
+                                        <span class="marker marker-warn">Expired</span>
+                                    }
+                                }
+                                else
+                                {
+                                    <text>No end</text>
+                                }
+                            </td>
+                            <td>
+                                @if (row.LastChange is { } change)
+                                {
+                                    @if (string.IsNullOrEmpty(change.ActorName)) {<text>No name</text>} else {@RevealedText.Html(change.ActorName)}<text> (@change.Role), </text>@change.At.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)<text> UTC</text>
+                                }
+                                else
+                                {
+                                    <span class="muted">No change recorded here</span>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+    @if (Model.PageCount > 1 && Model.PageNumber <= Model.PageCount)
+    {
+        <nav aria-label="Pages" class="pager">
+            @if (Model.PageNumber > 1)
+            {
+                <a href="@Model.Link(page: Model.PageNumber - 1)">Previous page</a>
+            }
+            <span>Page @Model.PageNumber of @Model.PageCount</span>
+            @if (Model.PageNumber < Model.PageCount)
+            {
+                <a href="@Model.Link(page: Model.PageNumber + 1)">Next page</a>
+            }
+        </nav>
+    }
+    <p class="muted">End dates are in UTC: an entry no longer applies from that moment. The last change is the latest one made on the dashboard; changes made on the website aren't recorded.</p>
+
+    @if (Model.Numbers.Count > 0)
+    {
+        <section aria-labelledby="numbers">
+            <h2 id="numbers">Rows with no Steam account number</h2>
+            <p>@BlacklistWords.NumbersIntro</p>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th scope="col">Number</th>
+                            <th scope="col">Name</th>
+                            <th scope="col">Reason</th>
+                            <th scope="col">Ends</th>
+                            <th scope="col">Notes</th>
+                            <th scope="col"><span class="visually-hidden">Remove</span></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var row in Model.Numbers)
+                        {
+                            <tr>
+                                <td>@row.Number</td>
+                                <td>@if (string.IsNullOrEmpty(row.Name)) {<text>No name</text>} else {@RevealedText.Html(row.Name)}</td>
+                                <td>@if (string.IsNullOrEmpty(row.Reason)) {<text>No reason</text>} else {@RevealedText.Html(row.Reason)}</td>
+                                <td>
+                                    @if (row.ExpiresUnreadable)
+                                    {
+                                        <span class="marker marker-warn">Not a real date</span>
+                                    }
+                                    else if (row.Expires is { } end)
+                                    {
+                                        @end.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)<text> UTC</text>
+                                    }
+                                    else
+                                    {
+                                        <text>No end</text>
+                                    }
+                                </td>
+                                <td>@if (string.IsNullOrEmpty(row.Notes)) {<text>No notes</text>} else {@RevealedText.Html(row.Notes)}</td>
+                                <td>
+                                    <form method="post" asp-page-handler="RemoveNumber" class="inline-action">
+                                        <input type="hidden" name="number" value="@row.Number" />
+                                        <input type="hidden" name="version" value="@row.Version" />
+                                        <button type="submit" class="button button-quiet" aria-describedby="remove-number-help">Remove<span class="visually-hidden"> the row numbered @row.Number</span></button>
+                                    </form>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+            <p id="remove-number-help" class="muted">@BlacklistWords.RemoveNumberHelp</p>
+        </section>
+    }
+}

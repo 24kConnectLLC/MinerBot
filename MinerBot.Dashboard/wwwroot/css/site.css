@@ -70,6 +70,12 @@ a:hover {
     padding: 0 1rem;
 }
 
+/* For a page whose table needs the room, such as the audit log, whose rows each hold a person, an action, a change and an
+   address. The layout puts it on the header and footer too, so their edges line up with the page's. */
+.column-wide {
+    max-width: 76rem;
+}
+
 main {
     padding-top: 1.5rem;
     padding-bottom: 2rem;
@@ -111,11 +117,14 @@ code {
     border-bottom: 1px solid var(--border);
 }
 
+/* The dashboard's name on the left, and who's signed in with the Sign out button on the right, then the nav on a row of
+   its own, so a long display name or another link never leaves one item alone on a row. The layout writes them in this
+   order, which is the order the keyboard and screen readers take. */
 .header-row {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
-    gap: 0.75rem 1.25rem;
+    gap: 0.5rem 1.25rem;
     padding-top: 0.75rem;
     padding-bottom: 0.75rem;
 }
@@ -124,16 +133,37 @@ code {
     color: var(--text);
     font-weight: 700;
     text-decoration: none;
-    margin-right: auto;
 }
 
+/* A display name can be 32 characters with no space, wider than this cell, which would run under the button or widen a
+   phone's page, so it breaks where it must */
 .signed-in {
     margin: 0;
     color: var(--muted);
+    text-align: right;
+    overflow-wrap: anywhere;
 }
 
 .sign-out {
     margin: 0;
+}
+
+/* A visitor's Sign in button, at the right as Sign out is */
+.header-row > .button {
+    grid-column: -2;
+}
+
+/* On a phone the name and the button share the first row, and who's signed in gets the next one to itself */
+@media (max-width: 40rem) {
+    .header-row {
+        grid-template-columns: minmax(0, 1fr) auto;
+    }
+
+    .signed-in {
+        grid-column: 1 / -1;
+        grid-row: 2;
+        text-align: left;
+    }
 }
 
 /* A link or a button that looks like one */
@@ -164,9 +194,12 @@ code {
     font-size: 0.9rem;
 }
 
+/* The header's last row, all of it, and wraps on a narrow screen rather than pushing the page wider */
 .site-nav {
+    grid-column: 1 / -1;
     display: flex;
-    gap: 1rem;
+    flex-wrap: wrap;
+    gap: 0.25rem 1rem;
 }
 
 /* For screen readers only, such as what a marker's colour says */
@@ -246,6 +279,9 @@ h3 {
 }
 
 input[type="search"],
+input[type="text"],
+input[type="date"],
+select,
 textarea {
     font: inherit;
     color: var(--text);
@@ -256,8 +292,19 @@ textarea {
     max-width: 100%;
 }
 
-input[type="search"] {
+input[type="search"],
+input[type="text"] {
     width: 20rem;
+}
+
+/* A box whose check failed, marked by its border as well as by the message next to it. Each selector names its element,
+   as the boxes' rule above does, so this later rule's border wins over that one's: [aria-invalid] alone weighs less, and
+   never showed. */
+input[aria-invalid="true"],
+select[aria-invalid="true"],
+textarea[aria-invalid="true"] {
+    border-color: var(--danger);
+    border-width: 2px;
 }
 
 textarea {
@@ -556,4 +603,133 @@ mark {
 
 .history p {
     margin: 0 0 0.25rem;
+}
+
+/* A form's boxes, each with its label above it and its hint and any message below, side by side where there's room */
+.fields {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+    gap: 0.75rem 1.25rem;
+    margin-bottom: 0.75rem;
+}
+
+.field label {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 0.25rem;
+}
+
+.field input[type="text"],
+.field input[type="date"],
+.field select {
+    width: 100%;
+}
+
+.field p {
+    margin: 0.25rem 0 0;
+    font-size: 0.9rem;
+}
+
+.field-problem {
+    color: var(--danger);
+    font-weight: 600;
+}
+
+.filters {
+    margin-bottom: 1.5rem;
+}
+
+/* The audit log's filters side by side where there's room, each about as wide as what it holds: a day takes less room
+   than a 20-digit ID or an action's name, so all five fit on one row of the wide column, and From and To wrap together */
+.filters .fields {
+    display: flex;
+    flex-wrap: wrap;
+}
+
+.filters .field {
+    flex: 1 1 14rem;
+}
+
+.filters .field-action {
+    flex-basis: 17rem;
+}
+
+.field-days {
+    display: flex;
+    flex-wrap: wrap;
+    flex: 2 1 21.25rem;
+    gap: 0.75rem 1.25rem;
+}
+
+.field-days .field {
+    flex: 1 1 10rem;
+}
+
+.filters > p {
+    margin: 0 0 0.75rem;
+}
+
+/* What stays true on a whole page, such as the blacklist not being enforced yet */
+.banner {
+    margin: 0 0 1.5rem;
+    padding: 0.75rem 1rem;
+    border: 1px solid var(--border);
+    border-left: 6px solid var(--warn);
+    border-radius: 6px;
+    background: var(--surface);
+}
+
+.banner p {
+    margin: 0;
+}
+
+/* A button in a table's row */
+.inline-action {
+    margin: 0;
+}
+
+/* The audit log's rows: dense, since each holds a person, an action and a change */
+.audit-table {
+    font-size: 0.9rem;
+}
+
+/* Less room between the columns than other tables have, so a whole IPv6 address, one word of 39 characters, fits beside
+   the rest of a row in the wide column, and an entry's history fits in the normal one */
+.audit-table th,
+.audit-table td {
+    padding: 0.5rem;
+}
+
+.audit-table p {
+    margin: 0 0 0.25rem;
+}
+
+.audit-when {
+    white-space: nowrap;
+}
+
+.audit-side {
+    font-weight: 600;
+}
+
+.audit-change {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 0 0.5rem;
+    margin: 0 0 0.5rem;
+}
+
+.audit-change dt {
+    color: var(--muted);
+}
+
+/* Words break only when one is wider than its column. With anywhere, a column could shrink to one character, which a
+   table's other columns take the room from, so short values and addresses read in pieces. */
+.audit-change dd {
+    margin: 0;
+    overflow-wrap: break-word;
+}
+
+.audit-table td.address {
+    overflow-wrap: break-word;
 }

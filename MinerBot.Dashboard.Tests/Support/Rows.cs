@@ -24,12 +24,13 @@ namespace MinerBot.Dashboard.Tests.Support
 
     internal static class Rows
     {
-        // The database every test that starts the app needs, with no sessions, audit rows, armor or reviews left from another
-        // test
+        // The database every test that starts the app needs, with no sessions, audit rows, armor, reviews or blacklist entries
+        // left from another test
         public static async Task<MariaDbFixture> ReadyAsync(this MariaDbFixture fixture)
         {
             var db = fixture.Require();
-            await db.ClearAsync(MariaDbFixture.SessionTable, MariaDbFixture.AuditTable, MariaDbFixture.ArmorTable, MariaDbFixture.ReviewTable);
+            await db.ClearAsync(MariaDbFixture.SessionTable, MariaDbFixture.AuditTable, MariaDbFixture.ArmorTable, MariaDbFixture.ReviewTable,
+                MariaDbFixture.BlacklistTable);
             return db;
         }
 

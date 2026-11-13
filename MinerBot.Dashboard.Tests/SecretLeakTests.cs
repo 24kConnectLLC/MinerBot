@@ -60,6 +60,14 @@ namespace MinerBot.Dashboard.Tests
             await db.RootExecuteAsync($"INSERT INTO {MariaDbFixture.ReviewTable} (armor_id, from_status, to_status, reason, reviewed_by, reviewer_name, reviewed_at) " +
                 "VALUES (2, 'Pending Approval', 'Approved', 'Looks right', 1000000000000000002, 'Test Admin', UTC_TIMESTAMP(3))");
 
+            // A blacklist entry with its history, an account no longer on it, and a row no account number can be, each with
+            // the address of whoever made the change, which only the Owner's audit page shows
+            await db.AddEntriesAsync(BlacklistSteps.Entry(12345));
+            await db.RootExecuteAsync($"INSERT INTO {MariaDbFixture.BlacklistTable} (steam_id, username) VALUES (5000000000, 'Cut Player')");
+            await db.RootExecuteAsync($"INSERT INTO {MariaDbFixture.AuditTable} (at, actor_id, actor_name, actor_role, action, outcome, target_type, target_id, after_json, ip) " +
+                "VALUES (UTC_TIMESTAMP(3), 1000000000000000002, 'Test Admin', 'admin', 'blacklist.add', 'ok', 'blacklist', '12345', '{\"Name\":\"Test Player\"}', '192.0.2.50'), " +
+                "(UTC_TIMESTAMP(3), 1000000000000000002, 'Test Admin', 'admin', 'blacklist.remove', 'ok', 'blacklist', '54321', NULL, '192.0.2.51')");
+
             // Every GET endpoint without route parameters, so a new page is crawled without changing this test, and those
             // with one, here
             var pages = factory.Services.GetRequiredService<EndpointDataSource>().Endpoints.OfType<RouteEndpoint>()
@@ -67,13 +75,17 @@ namespace MinerBot.Dashboard.Tests
                 .Select(endpoint => ("/" + endpoint.RoutePattern.RawText!.Trim('/')).ToLowerInvariant())
                 .Concat(["/denied?reason=unlisted", "/denied?reason=mfa", "/denied?reason=scope", "/denied?reason=cancelled", "/denied?reason=failed",
                     "/error", "/nothing-here", "/signout", "/signin", "/css/site.css",
-                    "/admin/armor?status=all", "/admin/armor/1", "/admin/armor/2", "/admin/armor/2?done=approved", "/admin/armor/999"])
+                    "/admin/armor?status=all", "/admin/armor/1", "/admin/armor/2", "/admin/armor/2?done=approved", "/admin/armor/999",
+                    "/admin/blacklist/12345", "/admin/blacklist/12345?done=added", "/admin/blacklist/54321", "/admin/blacklist/99999",
+                    "/admin/audit?type=blacklist&id=12345"])
                 .Distinct()
                 .ToList();
 
-            // The review page's route is the one with a parameter, so a new one fails here until it's crawled too
-            Assert.Equal(["Admin/Armor/{id:long}"], factory.Services.GetRequiredService<EndpointDataSource>().Endpoints.OfType<RouteEndpoint>()
-                .Where(endpoint => endpoint.RoutePattern.Parameters.Count > 0).Select(endpoint => endpoint.RoutePattern.RawText!.Trim('/')));
+            // The review page's and a blacklist entry's routes are the ones with a parameter, so a new one fails here until
+            // it's crawled too
+            Assert.Equal(["Admin/Armor/{id:long}", "Admin/Blacklist/{account:long}"], factory.Services.GetRequiredService<EndpointDataSource>().Endpoints
+                .OfType<RouteEndpoint>().Where(endpoint => endpoint.RoutePattern.Parameters.Count > 0).Select(endpoint => endpoint.RoutePattern.RawText!.Trim('/'))
+                .Order(StringComparer.Ordinal));
 
             async Task Crawl(string who, TestBrowser browser)
             {
@@ -156,6 +168,18 @@ namespace MinerBot.Dashboard.Tests
             Assert.Contains(seen, page => page.What == "owner /admin/armor/2" && page.Response.StatusCode == HttpStatusCode.OK);
             Assert.Contains(seen, page => page.What == "admin /admin/armor/1" && page.Response.StatusCode == HttpStatusCode.OK);
             Assert.Contains(seen, page => page.What == "admin /admin/armor" && page.Response.StatusCode == HttpStatusCode.OK);
+            Assert.Contains(seen, page => page.What == "admin /admin/blacklist" && page.Response.StatusCode == HttpStatusCode.OK);
+            Assert.Contains(seen, page => page.What == "admin /admin/blacklist/add" && page.Response.StatusCode == HttpStatusCode.OK);
+            Assert.Contains(seen, page => page.What == "owner /admin/blacklist/12345" && page.Response.StatusCode == HttpStatusCode.OK);
+            Assert.Contains(seen, page => page.What == "admin /admin/blacklist/54321" && page.Response.StatusCode == HttpStatusCode.OK);
+            Assert.Contains(seen, page => page.What == "admin /admin/blacklist/99999" && page.Response.StatusCode == HttpStatusCode.NotFound);
+            Assert.Contains(seen, page => page.What == "owner /admin/audit" && page.Response.StatusCode == HttpStatusCode.OK);
+            Assert.Contains(seen, page => page.What == "admin /admin/audit" && page.Response.StatusCode == HttpStatusCode.OK);
+
+            // The visitors' addresses are the Owner's alone: on the Owner's audit page, and nowhere an Admin or a visitor sees
+            Assert.Contains("192.0.2.50", seen.Single(page => page.What == "owner /admin/audit").Text);
+            Assert.All(seen.Where(page => !page.What.StartsWith("owner ", StringComparison.Ordinal) && !page.What.StartsWith("local ", StringComparison.Ordinal)),
+                page => Assert.False(page.Text.Contains("192.0.2.5", StringComparison.Ordinal), $"{page.What} shows an address"));
         }
     }
 }

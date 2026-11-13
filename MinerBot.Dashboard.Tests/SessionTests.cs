@@ -416,6 +416,7 @@ namespace MinerBot.Dashboard.Tests
                     throw Dropped();
             }
 
+            public Task<IReadOnlyList<AuditEntry>> LatestChanges(string targetType, IReadOnlyCollection<string> targetIds) => real.LatestChanges(targetType, targetIds);
             public Task<Page<AuditEntry>> ListAudit(AuditQuery query) => real.ListAudit(query);
         }
 

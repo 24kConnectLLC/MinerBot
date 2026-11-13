@@ -1,0 +1,65 @@
+@model BlacklistFormValues
+@using DataAccessLibrary.Blacklist
+@using MinerBot.Dashboard.Blacklist
+@*
+    The name, reason, end date and notes boxes both of an entry's forms have, each with its hint, and a message by any
+    whose check failed. Each box holds what was typed, encoded, so a refused form keeps it. The boxes' limits count
+    UTF-16 units, never more characters than the columns hold, and the server counts again.
+*@
+@{
+    var nameProblem = Model.Problem(BlacklistField.Name);
+    var reasonProblem = Model.Problem(BlacklistField.Reason);
+    var expiresProblem = Model.Problem(BlacklistField.Expires);
+    var notesProblem = Model.Problem(BlacklistField.Notes);
+    var expiresHelp = (expiresProblem == null ? "" : "expires-problem ") + (Model.ExpiresUnreadable ? "expires-unreadable " : "") + "expires-hint";
+
+    // An end written elsewhere, such as 9999-12-31, is outside the box's limits, which would stop the browser sending the
+    // form at all, so they're left off for such an entry and the server checks the day
+    var limited = Model.StoredDay == null || BlacklistForm.WithinLimits(Model.StoredDay);
+}
+<div class="fields">
+    <div class="field">
+        <label for="name">Name</label>
+        <input type="text" id="name" name="name" value="@Model.Name" maxlength="@BlacklistData.UsernameLimit"
+               aria-describedby="@(nameProblem == null ? "name-hint" : "name-problem name-hint")" aria-invalid="@(nameProblem == null ? null : "true")" />
+        @if (nameProblem != null)
+        {
+            <p id="name-problem" class="field-problem">@nameProblem</p>
+        }
+        <p id="name-hint" class="muted">@BlacklistWords.NameHint</p>
+    </div>
+    <div class="field">
+        <label for="reason">Reason</label>
+        <input type="text" id="reason" name="reason" value="@Model.Reason" maxlength="@BlacklistData.ReasonLimit"
+               aria-describedby="@(reasonProblem == null ? "reason-hint" : "reason-problem reason-hint")" aria-invalid="@(reasonProblem == null ? null : "true")" />
+        @if (reasonProblem != null)
+        {
+            <p id="reason-problem" class="field-problem">@reasonProblem</p>
+        }
+        <p id="reason-hint" class="muted">@BlacklistWords.ReasonHint</p>
+    </div>
+    <div class="field">
+        <label for="expires">End date, in UTC</label>
+        <input type="date" id="expires" name="expires" value="@Model.Expires" min="@(limited ? BlacklistForm.FirstDay : null)" max="@(limited ? BlacklistForm.LastDay : null)"
+               aria-describedby="@expiresHelp" aria-invalid="@(expiresProblem == null ? null : "true")" />
+        @if (expiresProblem != null)
+        {
+            <p id="expires-problem" class="field-problem">@expiresProblem</p>
+        }
+        @if (Model.ExpiresUnreadable)
+        {
+            <p id="expires-unreadable" class="warn-text">@BlacklistWords.UnreadableDate</p>
+        }
+        <p id="expires-hint" class="muted">@BlacklistWords.ExpiresHint</p>
+    </div>
+    <div class="field">
+        <label for="notes">Notes</label>
+        <input type="text" id="notes" name="notes" value="@Model.Notes" maxlength="@BlacklistData.NotesLimit"
+               aria-describedby="@(notesProblem == null ? "notes-hint" : "notes-problem notes-hint")" aria-invalid="@(notesProblem == null ? null : "true")" />
+        @if (notesProblem != null)
+        {
+            <p id="notes-problem" class="field-problem">@notesProblem</p>
+        }
+        <p id="notes-hint" class="muted">@BlacklistWords.NotesHint</p>
+    </div>
+</div>
