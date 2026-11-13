@@ -10,6 +10,14 @@ namespace MinerBot.Shared.Armor
         string? ArmorDescription { get; }
         string? ArmorScreenshot { get; }
         string Author { get; }
+
+        // The helmet and the skin, as the website saved them: /armor lookup's card writes them inside a code block
+        string? ArmorChoice { get; }
+        string? ArmorSkin { get; }
+
+        // A save string someone stored, which the card shows as it is, instead of the one the colours give
+        string? ColorArray { get; }
+
         int? Helmet { get; }
         int? Visor { get; }
         int? Torso { get; }

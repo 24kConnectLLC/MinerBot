@@ -36,6 +36,10 @@ namespace MinerBot.Dashboard.Tests
             Assert.Superset(Public, routes);
             Assert.Contains("Admin", routes);
 
+            // The armor pages, spelt with the capital A that the check below needs
+            Assert.Contains("Admin/Armor", routes);
+            Assert.Contains("Admin/Armor/{id:long}", routes);
+
             foreach (var endpoint in endpoints)
             {
                 var route = Route(endpoint);

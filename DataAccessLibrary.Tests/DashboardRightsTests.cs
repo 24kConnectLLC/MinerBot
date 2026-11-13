@@ -46,12 +46,16 @@ namespace DataAccessLibrary.Tests
         static readonly string[] Expected =
         [
             "column SELECT website_db ihvph_discord_servers guild_id",
+            "column UPDATE website_db ihvph_armor_styles Status",
             "global USAGE",
             "limits 15 20.000000 0 0 0",
             "table DELETE minerbot_db dashboard_sessions",
+            "table INSERT minerbot_db armor_reviews",
             "table INSERT minerbot_db audit_log",
             "table INSERT minerbot_db dashboard_sessions",
+            "table SELECT minerbot_db armor_reviews",
             "table SELECT minerbot_db dashboard_sessions",
+            "table SELECT website_db ihvph_armor_styles",
             "table UPDATE minerbot_db dashboard_sessions"
         ];
 
@@ -151,6 +155,27 @@ namespace DataAccessLibrary.Tests
             target_type = "session"
         };
 
+        static ArmorSubmission Armor(long id, string status, string name) => new()
+        {
+            ID = id,
+            CreatedAt = Noon,
+            Status = status,
+            Author = "Test Author",
+            ArmorName = name,
+            ArmorScreenshot = "https://murderminershub.com/wp-content/uploads/ArmorPreviews/Test-Armor.png"
+        };
+
+        static ArmorReview Review(long armorId, string? from, string to) => new()
+        {
+            armor_id = armorId,
+            from_status = from,
+            to_status = to,
+            reason = "Testing",
+            reviewed_by = UserId,
+            reviewer_name = "Test Admin",
+            reviewed_at = Noon
+        };
+
         [Fact]
         public async Task RightsAreExactlyTheList()
         {
@@ -158,13 +183,16 @@ namespace DataAccessLibrary.Tests
         }
 
         // Every repository call the dashboard makes today, under its login: the sessions, the audit rows, on MinerBot's own
-        // connection and inside a transaction on the website's, and the readiness check of both databases
+        // connection and inside a transaction on the website's, armor review's reads and each kind of its transactions, and
+        // the readiness check of both databases
         [Fact]
         public async Task EverythingTodaysDashboardDoesWorks()
         {
             await WithLoginAsync(async (db, password) =>
             {
-                await db.ClearAsync(MariaDbFixture.SessionTable, MariaDbFixture.AuditTable);
+                await db.ClearAsync(MariaDbFixture.SessionTable, MariaDbFixture.AuditTable, MariaDbFixture.ArmorTable, MariaDbFixture.ReviewTable);
+                await db.AddArmorAsync(Armor(1, ArmorStatus.Pending, "Test Armor 1"));
+                await db.AddArmorAsync(Armor(2, ArmorStatus.Approved, "Test Armor 2"));
 
                 var connections = Connections(db, password);
                 var factory = new SQLConnectionFactory(connections);
@@ -199,20 +227,51 @@ namespace DataAccessLibrary.Tests
 
                 await audit.AddAudit(Audit("auth.refused"));
 
-                // An audit row inside a transaction on the website's connection, as a change to a website table writes one
-                Assert.True(await new ArmorSubmissionData(factory).RunInTransaction(async transaction =>
+                // Armor review's reads: the list, the search, the review page and its history
+                var submissions = new ArmorSubmissionData(factory);
+                var reviews = new ArmorReviewData(factory, names);
+
+                Assert.Equal(1, (await submissions.ListByStatus(ArmorStatus.Pending, 0, 25)).Total);
+                Assert.Equal(2, (await submissions.ListByStatus(null, 0, 25)).Total);
+                Assert.Single((await submissions.Search("Armor 2", ArmorStatus.Approved, 0, 25)).Rows);
+                Assert.NotNull(await submissions.GetSubmission(1));
+                Assert.False(await submissions.IsApprovedNameTaken("Test Armor 1", 1));
+                Assert.Empty(await reviews.ListReviews(1));
+
+                // An approval as the review page makes it: the name check first, the locked read, the status, then the review
+                // and audit rows in MinerBot's database, all in one transaction on the website's connection
+                Assert.True(await submissions.RunInTransaction(async transaction =>
                 {
+                    Assert.False(await submissions.IsApprovedNameTaken("Test Armor 1", 1, transaction));
+                    Assert.NotNull(await submissions.GetSubmission(1, transaction));
+                    Assert.True(await submissions.ChangeStatus(1, ArmorStatus.Pending, ArmorStatus.Approved, transaction));
+                    await reviews.AddReview(Review(1, ArmorStatus.Pending, ArmorStatus.Approved), transaction);
                     await audit.AddAudit(Audit("armor.approve"), transaction);
                     return true;
                 }));
+
+                // The other actions, which read and lock only their own row
+                Assert.True(await submissions.RunInTransaction(async transaction =>
+                {
+                    Assert.NotNull(await submissions.GetSubmission(2, transaction));
+                    Assert.True(await submissions.ChangeStatus(2, ArmorStatus.Approved, ArmorStatus.NotApproved, transaction));
+                    await reviews.AddReview(Review(2, ArmorStatus.Approved, ArmorStatus.NotApproved), transaction);
+                    await audit.AddAudit(Audit("armor.takedown"), transaction);
+                    return true;
+                }));
+
+                Assert.Single(await reviews.ListReviews(1));
+                Assert.Equal(ArmorStatus.Approved, (await submissions.GetSubmission(1))?.Status);
+                Assert.Equal(ArmorStatus.NotApproved, (await submissions.GetSubmission(2))?.Status);
 
                 var health = new DatabaseHealthData(factory);
                 Assert.True(await health.Answers(DBConnectionName.Armor, TimeSpan.FromSeconds(5)).WaitAsync(CallLimit, Token));
                 Assert.True(await health.Answers(DBConnectionName.Bot, TimeSpan.FromSeconds(5)).WaitAsync(CallLimit, Token));
 
-                Assert.Equal(["armor.approve", "auth.refused", "session.start"],
+                Assert.Equal(["armor.approve", "armor.takedown", "auth.refused", "session.start"],
                     (await db.RootQueryAsync<string>($"SELECT action FROM {MariaDbFixture.AuditTable}")).Order(StringComparer.Ordinal));
                 Assert.Equal(1, (await db.RootQueryAsync<long>($"SELECT COUNT(*) FROM {MariaDbFixture.SessionTable}")).Single());
+                Assert.Equal(2, (await db.RootQueryAsync<long>($"SELECT COUNT(*) FROM {MariaDbFixture.ReviewTable}")).Single());
             });
         }
 
@@ -225,9 +284,7 @@ namespace DataAccessLibrary.Tests
             { "change the audit log", $"UPDATE {Bot}.audit_log SET detail = 'changed' WHERE 1 = 0" },
             { "delete from the audit log", $"DELETE FROM {Bot}.audit_log WHERE 1 = 0" },
             { "truncate the audit log", $"TRUNCATE TABLE {Bot}.audit_log" },
-            // MinerBot's other tables
-            { "read armor_reviews", $"SELECT * FROM {Bot}.armor_reviews" },
-            { "add to armor_reviews", $"INSERT INTO {Bot}.armor_reviews (armor_id, to_status, reviewed_by, reviewed_at) VALUES (1, 'Approved', 1, NOW(3))" },
+            // MinerBot's other tables. Armor review's history is only ever added to.
             { "change armor_reviews", $"UPDATE {Bot}.armor_reviews SET reason = 'changed' WHERE 1 = 0" },
             { "delete from armor_reviews", $"DELETE FROM {Bot}.armor_reviews WHERE 1 = 0" },
             { "read schema_version", $"SELECT * FROM {Bot}.schema_version" },
@@ -251,13 +308,15 @@ namespace DataAccessLibrary.Tests
             { "create a procedure in the website's database", $"CREATE PROCEDURE {Site}.rights_check() SELECT 1" },
             { "create a temporary table in MinerBot's database", $"CREATE TEMPORARY TABLE {Bot}.rights_check (id INT)" },
             { "create a temporary table in the website's database", $"CREATE TEMPORARY TABLE {Site}.rights_check (id INT)" },
-            // The website's tables: nothing is read but the one column, and nothing is written
-            { "read the armor", $"SELECT * FROM {Site}.ihvph_armor_styles" },
+            // The website's tables: armor is read and only its status changed, the servers' one column is read, and nothing
+            // else is read or written
             { "read the blacklist", $"SELECT * FROM {Site}.ihvph_blacklist" },
             { "read another column of the servers", $"SELECT armor_channel_id FROM {Site}.ihvph_discord_servers" },
             { "read every column of the servers", $"SELECT * FROM {Site}.ihvph_discord_servers" },
             { "add armor", $"INSERT INTO {Site}.ihvph_armor_styles (Author) VALUES ('x')" },
-            { "change armor", $"UPDATE {Site}.ihvph_armor_styles SET Status = 'Approved' WHERE 1 = 0" },
+            { "change an armor's name", $"UPDATE {Site}.ihvph_armor_styles SET ArmorName = 'x' WHERE 1 = 0" },
+            { "change an armor's ID", $"UPDATE {Site}.ihvph_armor_styles SET ID = ID WHERE 1 = 0" },
+            { "change an armor's save string", $"UPDATE {Site}.ihvph_armor_styles SET ColorArray = NULL WHERE 1 = 0" },
             { "delete armor", $"DELETE FROM {Site}.ihvph_armor_styles WHERE 1 = 0" },
             { "add to the blacklist", $"INSERT INTO {Site}.ihvph_blacklist (steam_id) VALUES (1)" },
             { "change the blacklist", $"UPDATE {Site}.ihvph_blacklist SET notes = 'changed' WHERE 1 = 0" },
@@ -315,7 +374,7 @@ namespace DataAccessLibrary.Tests
             });
         }
 
-        // The repositories later pull requests use are refused, which records what PRs 4 and 5 must add to the file
+        // The repositories later pull requests use are refused, which records what PR 5 and later ones must add to the file
         [Fact]
         public async Task RepositoriesNotUsedYetAreRefused()
         {
@@ -324,16 +383,10 @@ namespace DataAccessLibrary.Tests
                 var connections = Connections(db, password);
                 var factory = new SQLConnectionFactory(connections);
                 var names = new DatabaseNames(connections);
-                var review = new ArmorReview { armor_id = 1, from_status = ArmorStatus.Pending, to_status = ArmorStatus.Approved, reviewed_by = UserId, reviewed_at = Noon };
 
                 var calls = new (string What, Func<Task> Call)[]
                 {
                     ("AuditLogData.ListAudit", () => new AuditLogData(factory, names).ListAudit(new AuditQuery())),
-                    ("ArmorReviewData.ListReviews", () => new ArmorReviewData(factory, names).ListReviews(1)),
-                    ("ArmorReviewData.AddReview", () => new ArmorReviewData(factory, names).AddReview(review)),
-                    ("ArmorSubmissionData.GetSubmission", () => new ArmorSubmissionData(factory).GetSubmission(1)),
-                    ("ArmorSubmissionData.ListByStatus", () => new ArmorSubmissionData(factory).ListByStatus(ArmorStatus.Pending, 0, 10)),
-                    ("ArmorSubmissionData.ChangeStatus", () => new ArmorSubmissionData(factory).ChangeStatus(1, ArmorStatus.Pending, ArmorStatus.Approved)),
                     ("BlacklistData.GetBlacklist", () => new BlacklistData(factory).GetBlacklist()),
                     ("BlacklistData.InsertPlayerBan", () => new BlacklistData(factory).InsertPlayerBan(new BlacklistModel { steam_id = 12345, username = "Test Player", reason = "Testing", notes = "Made up" })),
                     ("GuildData.GetAllGuilds", () => new GuildData(factory).GetAllGuilds()),
@@ -368,13 +421,14 @@ namespace DataAccessLibrary.Tests
         {
             await WithLoginAsync(async (db, _) =>
             {
-                await db.RootExecuteAsync($"GRANT SELECT ON {Bot}.armor_reviews TO {Grantee}");
+                // A right the file doesn't give, since one it gives, such as SELECT on armor_reviews, would prove nothing
+                await db.RootExecuteAsync($"GRANT DELETE ON {Bot}.armor_reviews TO {Grantee}");
                 await db.RootExecuteAsync($"GRANT ALL PRIVILEGES ON {Bot}.* TO {Grantee}");
                 await db.RootExecuteAsync($"GRANT SELECT (armor_channel_id) ON {Site}.ihvph_discord_servers TO {Grantee}");
                 await db.RootExecuteAsync($"ALTER USER {Grantee} WITH MAX_USER_CONNECTIONS 100 MAX_STATEMENT_TIME 0");
 
                 var added = await RightsAsync(db);
-                Assert.Contains("table SELECT minerbot_db armor_reviews", added);
+                Assert.Contains("table DELETE minerbot_db armor_reviews", added);
                 Assert.Contains("schema SELECT minerbot_db", added);
                 Assert.Contains("column SELECT website_db ihvph_discord_servers armor_channel_id", added);
                 Assert.Contains("limits 100 0.000000 0 0 0", added);
@@ -394,7 +448,7 @@ namespace DataAccessLibrary.Tests
             var file = DeployFile("dashboard-rights.sql");
             var tables = TableNames().Matches(file).Select(match => (Database: Database(match.Groups[1].Value), Table: match.Groups[2].Value)).Distinct().ToList();
 
-            Assert.Equal(3, tables.Count);
+            Assert.Equal(5, tables.Count);
 
             foreach (var (database, table) in tables)
             {

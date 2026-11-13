@@ -22,8 +22,9 @@
             <a class="site-name" href="/">MinerBot dashboard</a>
             @if (user != null && role != DashboardRole.None)
             {
-                <nav aria-label="Dashboard">
+                <nav aria-label="Dashboard" class="site-nav">
                     <a href="/admin">Overview</a>
+                    <a href="/admin/armor">Armor</a>
                 </nav>
                 <p class="signed-in">Signed in as @user.Name (@role.Name())</p>
                 <form method="post" asp-page="/SignOut" class="sign-out">

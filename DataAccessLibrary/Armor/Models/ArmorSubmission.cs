@@ -10,6 +10,12 @@ namespace DataAccessLibrary.Armor.Models
         public DateTime CreatedAt { get; set; }
         public long? UserID { get; set; }
         public string? Status { get; set; }
+
+        // Not a column: the website's word the table's collation reads Status as, the way the bot's queries and the list's
+        // tabs read it. That collation ignores capitals, accents, spaces at the end and characters it gives no weight, so
+        // the bot shows armor stored as 'approved ' as approved. Null when Status is null or matches none of the words.
+        public string? KnownStatus { get; set; }
+
         public string Author { get; set; } = "";
         public string? ArmorName { get; set; }
         public string? ArmorDescription { get; set; }

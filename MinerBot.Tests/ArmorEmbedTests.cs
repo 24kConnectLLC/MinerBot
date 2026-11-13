@@ -112,6 +112,73 @@ namespace MinerBot.Tests
             Assert.Equal(["First", "", "Last"], NamesIn(message.Embed.Description));
             Assert.Equal(3, message.ArmorCount);
         }
+
+        // The colour and the footer of every armor message, and the post's one field, written out. The dashboard's review
+        // page previews the post from a copy in MinerBot.Dashboard/Armor/BotMessages.cs, whose ArmorPreviewTests write out
+        // the same strings, so a change here has to be made there too.
+        [Fact]
+        public void PostHasTheBotsColourFieldAndFooter()
+        {
+            var embed = Assert.Single(ArmorService.NewArmorListEmbeds([Armor(1, "Ninja")])).Embed;
+
+            Assert.Equal(0x206694u, embed.Color?.RawValue);
+            Assert.Equal("MinerBot by 24kConnect - Version 2.0", embed.Footer?.Text);
+            Assert.Equal("https://24kconnect.com/wp-content/uploads/24kConnectLogoRemadeBlackx512.png", embed.Footer?.IconUrl);
+            Assert.Equal([("Upload your own Armor Style", "https://murderminershub.com/upload-armor-style/", false)],
+                embed.Fields.Select(field => (field.Name, field.Value, field.Inline)));
+        }
+
+        static ArmorStyle Ninja() => new()
+        {
+            ID = 7,
+            ArmorName = "Ninja",
+            ArmorDescription = "A dark set for night raids.",
+            Author = "Test Author",
+            ArmorChoice = "Bug",
+            ArmorSkin = "Default",
+            Helmet = 1, Visor = 2, Torso = 3, Shoulders = 4, Biceps = 5, Forearms = 6, Hands = 7,
+            Pelvis = 8, Thighs = 9, Legs = 10, Boots = 11, Shields = 12, Other = 13
+        };
+
+        // /armor lookup's card, written out: its title, description, both fields, colour and footer. Nothing pinned the
+        // Armor Style field before, and the dashboard's review page previews this card from a copy in
+        // MinerBot.Dashboard/Armor/BotMessages.cs, whose ArmorPreviewTests.LookupCardIsTheBotsCard writes out the same
+        // strings, so a change here has to be made there too. With no screenshot, nothing is fetched.
+        [Fact]
+        public async Task LookupCardIsWrittenOut()
+        {
+            var service = new ArmorService(new FakeArmorData(_ => { }), new HttpClient());
+
+            var (embed, image) = await service.ArmorEmbed(Ninja());
+
+            Assert.Null(image);
+            Assert.Equal("Ninja", embed.Title);
+            Assert.Equal("```\nA dark set for night raids.\nMade by Test Author```", embed.Description);
+            Assert.Equal(
+            [
+                ("Armor Style",
+                    "```\nHelmet Type: Bug\n\nArmor Skin Type: Default\n\nArmor Colors:\n" +
+                    "HELMET       1\nVISOR        2\nTORSO        3\nSHOULDERS    4\nBICEPS       5\nFOREARMS     6\nHANDS        7\n" +
+                    "PELVIS       8\nTHIGHS       9\nLEGS         10\nBOOTS        11\nSHIELDS      12\nOTHER        13\n```", false),
+                ("For Save File (Colors)", "`AQIDBAUGBwgJCgsMDQ==`", true)
+            ], embed.Fields.Select(field => (field.Name, field.Value, field.Inline)));
+            Assert.Equal(0x206694u, embed.Color?.RawValue);
+            Assert.Equal("MinerBot by 24kConnect - Version 2.0", embed.Footer?.Text);
+            Assert.Equal("https://24kconnect.com/wp-content/uploads/24kConnectLogoRemadeBlackx512.png", embed.Footer?.IconUrl);
+        }
+
+        // A save string the colour job stored is shown as it is, whatever the colours say
+        [Fact]
+        public async Task LookupCardShowsAStoredSaveStringAsItIs()
+        {
+            var service = new ArmorService(new FakeArmorData(_ => { }), new HttpClient());
+            var armor = Ninja();
+            armor.ColorArray = "stored";
+
+            var (embed, _) = await service.ArmorEmbed(armor);
+
+            Assert.Equal("`stored`", embed.Fields[1].Value);
+        }
     }
 
     // Each run is a new job object on the real Discord.Net pipeline, the same as JobHandler runs it

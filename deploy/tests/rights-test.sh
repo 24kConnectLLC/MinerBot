@@ -199,8 +199,10 @@ extras_refused() {
 
 forbidden_refused() {
     local statement out
+    # The login may read the armor and its review history, so these two try what it may not: deleting history and
+    # changing an armor's name
     for statement in "SELECT * FROM $bot.audit_log" "UPDATE $bot.audit_log SET outcome = 'x'" \
-        "SELECT * FROM $bot.armor_reviews" "SELECT * FROM $site.ihvph_armor_styles" \
+        "DELETE FROM $bot.armor_reviews" "UPDATE $site.ihvph_armor_styles SET ArmorName = 'x'" \
         "SELECT armor_channel_id FROM $site.ihvph_discord_servers" \
         "UPDATE $site.ihvph_discord_servers SET armor_channel_id = 1" "CREATE TABLE $bot.rights_check (a INT)" \
         "SELECT * FROM mysql.user"; do
@@ -469,7 +471,7 @@ inside_container() {
     throwaway_gone || true
     verdict "2. The throwaway login is gone afterwards."
     connects || true
-    verdict "3. The one-column right lets the login open the website's database, and it opens MinerBot's."
+    verdict "3. The login can open the website's database and MinerBot's."
     sessions_work || true
     verdict "4. Sessions can be added, changed, read and deleted, the LIMIT subquery included."
     audit_adds || true

@@ -387,22 +387,24 @@ namespace MinerBot.Dashboard.Tests
         public async Task LinksToAdminPagesAndTheWayBackAreLowercase()
         {
             var access = new FakeCloudflareAccess(keys);
-            await using var factory = Factory(await fixture.ReadyAsync(), access, on: false);
+            var db = await fixture.ReadyAsync();
+            await db.AddArmorAsync(ArmorSteps.Submission(1));
+            await using var factory = Factory(db, access, on: false);
 
-            // Each admin page's address, as the app makes it
+            // Each admin page's address, as the app makes it, with a value for each part of its route, such as an armor's ID
             var links = factory.Services.GetRequiredService<LinkGenerator>();
-            var pages = factory.Services.GetRequiredService<EndpointDataSource>().Endpoints
-                .Select(endpoint => endpoint.Metadata.GetMetadata<PageActionDescriptor>()?.ViewEnginePath)
-                .OfType<string>()
-                .Where(page => page.StartsWith("/Admin", StringComparison.OrdinalIgnoreCase))
-                .Distinct()
+            var pages = factory.Services.GetRequiredService<EndpointDataSource>().Endpoints.OfType<RouteEndpoint>()
+                .Select(endpoint => (Page: endpoint.Metadata.GetMetadata<PageActionDescriptor>()?.ViewEnginePath, endpoint.RoutePattern.Parameters))
+                .Where(page => page.Page?.StartsWith("/Admin", StringComparison.OrdinalIgnoreCase) == true)
+                .DistinctBy(page => page.Page)
                 .ToList();
 
             Assert.NotEmpty(pages);
+            Assert.Contains(pages, page => page.Parameters.Count > 0);
 
-            foreach (var page in pages)
+            foreach (var (page, parameters) in pages)
             {
-                var path = links.GetPathByPage(page);
+                var path = links.GetPathByPage(page!, values: new RouteValueDictionary(parameters.ToDictionary(parameter => parameter.Name, _ => (object?)1)));
 
                 Assert.NotNull(path);
                 Assert.StartsWith(AdminPath, path, StringComparison.Ordinal);
@@ -424,6 +426,8 @@ namespace MinerBot.Dashboard.Tests
                 await anonymous.Client.GetStringAsync("/signout", Token),
                 await admin.Client.GetStringAsync("/", Token),
                 await admin.Client.GetStringAsync("/admin", Token),
+                await admin.Client.GetStringAsync("/admin/armor", Token),
+                await admin.Client.GetStringAsync("/admin/armor/1", Token),
                 await admin.Client.GetStringAsync("/signout", Token));
 
             var targets = Targets().Matches(html)

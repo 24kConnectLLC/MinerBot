@@ -135,6 +135,51 @@ namespace DataAccessLibrary.Tests
             Assert.Equal(1, await CountAsync(MariaDbFixture.BlacklistTable));
         }
 
+        // An approval as the review page runs it, name check and locked read included, is all or nothing: a statement that
+        // fails after the status, review and audit writes undoes them all. Fails if any of them used a connection of its own.
+        [Fact]
+        public async Task ReviewWithItsLockedReadIsAllOrNothing()
+        {
+            var db = await StartAsync();
+            var armor = db.Submissions();
+            await db.Blacklist().InsertPlayerBan(Player());
+
+            var duplicate = await Assert.ThrowsAsync<MySqlException>(() => armor.RunInTransaction(async transaction =>
+            {
+                Assert.False(await armor.IsApprovedNameTaken("Test Armor 5", ArmorId, transaction));
+                Assert.Equal(ArmorStatus.Pending, (await armor.GetSubmission(ArmorId, transaction))?.Status);
+                Assert.True(await armor.ChangeStatus(ArmorId, ArmorStatus.Pending, ArmorStatus.Approved, transaction));
+                await db.Reviews().AddReview(Review(), transaction);
+                await db.Audit().AddAudit(Audit(), transaction);
+
+                // Inside the transaction, its own changes show
+                Assert.Equal(ArmorStatus.Approved, (await armor.GetSubmission(ArmorId, transaction))?.Status);
+
+                await db.Blacklist().InsertPlayerBan(Player(), transaction);
+                return true;
+            }));
+
+            Assert.Equal((int)MySqlErrorCode.DuplicateKeyEntry, duplicate.Number);
+            Assert.Equal(ArmorStatus.Pending, await StatusAsync());
+            Assert.Equal(0, await CountAsync(MariaDbFixture.ReviewTable));
+            Assert.Equal(0, await CountAsync(MariaDbFixture.AuditTable));
+
+            // And the same work without the failing statement commits all of it
+            Assert.True(await armor.RunInTransaction(async transaction =>
+            {
+                Assert.False(await armor.IsApprovedNameTaken("Test Armor 5", ArmorId, transaction));
+                Assert.NotNull(await armor.GetSubmission(ArmorId, transaction));
+                Assert.True(await armor.ChangeStatus(ArmorId, ArmorStatus.Pending, ArmorStatus.Approved, transaction));
+                await db.Reviews().AddReview(Review(), transaction);
+                await db.Audit().AddAudit(Audit(), transaction);
+                return true;
+            }));
+
+            Assert.Equal(ArmorStatus.Approved, await StatusAsync());
+            Assert.Equal(1, await CountAsync(MariaDbFixture.ReviewTable));
+            Assert.Equal(1, await CountAsync(MariaDbFixture.AuditTable));
+        }
+
         // Another install, or a test, can name MinerBot's database anything, even something that needs quoting. Fails if a
         // repository names the real database in its SQL instead of taking the name from the connection string.
         [Fact]

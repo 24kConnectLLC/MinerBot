@@ -6,8 +6,15 @@ namespace DataAccessLibrary.Armor
     // Armor submissions whatever their status, for reviewing them. The bot's own queries stay in ArmorData.
     public class ArmorSubmissionData : DbBaseConnection, IArmorSubmissionData
     {
+        // The status as the bot's queries and the list's tabs read it. Their Status = 'Approved' goes through the column's
+        // collation, which also matches 'approved ' or 'APPROVED', so the same comparison here decides which word a row has,
+        // rather than the dashboard guessing at the collation's rules.
+        const string KnownStatus = $@"CASE WHEN Status = '{ArmorStatus.Pending}' THEN '{ArmorStatus.Pending}'
+                            WHEN Status = '{ArmorStatus.Approved}' THEN '{ArmorStatus.Approved}'
+                            WHEN Status = '{ArmorStatus.NotApproved}' THEN '{ArmorStatus.NotApproved}' END AS KnownStatus";
+
         // Every column, in two parts around the screenshot, which lists read differently
-        const string ColumnsBefore = "ID, CreatedAt, UserID, Status, Author, ArmorName, ArmorDescription";
+        const string ColumnsBefore = $"ID, CreatedAt, UserID, Status, {KnownStatus}, Author, ArmorName, ArmorDescription";
         const string ColumnsAfter = @"ArmorChoice, ArmorSkin,
                             Helmet, Visor, Torso, Shoulders, Biceps, Forearms, Hands, Pelvis, Thighs, Legs, Boots, Shields, Other, ColorArray";
 
@@ -54,17 +61,24 @@ namespace DataAccessLibrary.Armor
             return LoadPage<ArmorSubmission, dynamic>(sql, new { status, pattern, take, skip });
         }
 
-        public Task<ArmorSubmission?> GetSubmission(long id)
+        // In a transaction it's a locking read of the one row, so the website can't change the armor between a review's
+        // checks of it and the change of its status. An approval runs IsApprovedNameTaken first, which already holds it.
+        public Task<ArmorSubmission?> GetSubmission(long id, DataTransaction? transaction = null)
         {
             string sql = $@"SELECT {Columns}
                             FROM ihvph_armor_styles
                             WHERE ID = @id";
 
-            return LoadFirstData<ArmorSubmission?, dynamic>(sql, new { id });
+            if (transaction != null)
+                sql += " FOR UPDATE";
+
+            return LoadFirstData<ArmorSubmission?, dynamic>(sql, new { id }, transaction);
         }
 
         // Only while the armor still has the status the caller saw, so when two reviewers act at once one of them wins and
-        // the other is told. A null expected status is an armor that has none.
+        // the other is told. A null expected status is an armor that has none. The comparison goes through the column's
+        // collation, as KnownStatus does, so an expected Approved also matches a status stored as 'approved ', and the
+        // change saves the website's own word.
         public async Task<bool> ChangeStatus(long id, string? expectedStatus, string newStatus, DataTransaction? transaction = null)
         {
             RequireStatus(newStatus, nameof(newStatus), allowNone: false);

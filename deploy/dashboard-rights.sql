@@ -25,8 +25,9 @@ REVOKE ALL PRIVILEGES, GRANT OPTION FROM {{GRANTEES}};
 -- than 20 seconds, which also ends one that MySql.Data stopped waiting for after its own 15
 ALTER USER {{GRANTEES}} WITH MAX_USER_CONNECTIONS 15 MAX_STATEMENT_TIME 20;
 
--- The website's database: nothing is read there yet, but MariaDB lets a login open a database only with a right in it,
--- and the readiness check opens it. One column that holds nothing private.
+-- The website's database. This one column came first, so the readiness check could open the database, which MariaDB
+-- allows a login only with a right in it. Armor review's rights below do that now, but a right goes only in a later
+-- pull request than the one that stopped needing it, and it holds nothing private.
 GRANT SELECT (`guild_id`) ON `{{SITE_DB}}`.`ihvph_discord_servers` TO {{GRANTEES}};
 
 -- MinerBot's own database: the sign-in sessions, and adding rows to the audit log, which this login can never change or
@@ -37,3 +38,13 @@ GRANT SELECT (`guild_id`) ON `{{SITE_DB}}`.`ihvph_discord_servers` TO {{GRANTEES
 -- migration makes.
 GRANT SELECT, INSERT, UPDATE, DELETE ON `{{BOT_DB}}`.`dashboard_sessions` TO {{GRANTEES}};
 GRANT INSERT ON `{{BOT_DB}}`.`audit_log` TO {{GRANTEES}};
+
+-- Armor review reads every submission, whatever its status, for its list and its review page, and changes nothing but
+-- the status. An approval's name check reads with FOR UPDATE, which needs no more than SELECT. The website stays the
+-- only one that adds, edits or deletes armor.
+GRANT SELECT ON `{{SITE_DB}}`.`ihvph_armor_styles` TO {{GRANTEES}};
+GRANT UPDATE (`Status`) ON `{{SITE_DB}}`.`ihvph_armor_styles` TO {{GRANTEES}};
+
+-- Each status change adds its row to the armor's review history, in the same transaction, and the review page reads the
+-- history back. A row is never changed or deleted.
+GRANT SELECT, INSERT ON `{{BOT_DB}}`.`armor_reviews` TO {{GRANTEES}};

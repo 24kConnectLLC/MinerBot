@@ -1,0 +1,306 @@
+@page "/Admin/Armor/{id:long}"
+@model ArmorReviewModel
+@using System.Globalization
+@using DataAccessLibrary.Armor
+@using MinerBot.Dashboard.Armor
+@using MinerBot.Shared.Armor
+@*
+    Everything the submitter wrote goes through RevealedText, inside a bdi, and the title never holds it. The previews show
+    it raw, as Discord would, but isolated the same way. The rules and the forms come last, after the previews and the
+    history, so a reviewer reaches the buttons having passed everything, and the warnings' ticks stay next to Approve.
+*@
+@{
+    var id = Model.Id.ToString(CultureInfo.InvariantCulture);
+    ViewData["Title"] = Model.Unsure ? "Not sure it was saved" : "Armor " + id;
+}
+@if (Model.Unsure || Model.Armor == null || Model.Check == null)
+{
+    <h1>Not sure it was saved</h1>
+    <p>@ArmorWords.Unsure</p>
+    <p><a href="@Model.PageLink">Open the armor's page again</a></p>
+}
+else
+{
+    var armor = Model.Armor;
+    var check = Model.Check;
+    var approved = Model.IsApproved;
+
+    <p><a href="@Model.ListLink">Back to the list</a></p>
+    <h1>Armor @id</h1>
+
+    @if (Model.Notice != null)
+    {
+        <div class="notice @(Model.NoticeIsProblem ? "notice-problem" : "notice-done")" role="@(Model.NoticeIsProblem ? "alert" : "status")">
+            <p>@Model.Notice</p>
+        </div>
+    }
+
+    <section aria-labelledby="submission">
+        <h2 id="submission">Submission</h2>
+        <dl class="details">
+            <dt>Name</dt>
+            <dd>@if (string.IsNullOrEmpty(armor.ArmorName)) {<text>No name</text>} else {@RevealedText.Html(armor.ArmorName)}</dd>
+            <dt>Description</dt>
+            <dd class="multiline">@if (string.IsNullOrEmpty(armor.ArmorDescription)) {<text>No description</text>} else {@RevealedText.Html(armor.ArmorDescription)}</dd>
+            <dt>Author</dt>
+            <dd>@if (string.IsNullOrEmpty(armor.Author)) {<text>No author</text>} else {@RevealedText.Html(armor.Author)}</dd>
+            <dt>Status</dt>
+            <dd>
+                @if (armor.Status == null)
+                {
+                    <text>No status</text>
+                }
+                else if (Model.StatusUnknown)
+                {
+                    @RevealedText.Html(armor.Status) <span class="muted">(not one the website uses)</span>
+                }
+                else if (Model.SpeltDifferently)
+                {
+                    @armor.KnownStatus <span class="muted">(stored as @RevealedText.Html(armor.Status))</span>
+                }
+                else
+                {
+                    @armor.Status
+                }
+            </dd>
+            <dt>Sent</dt>
+            <dd>@armor.CreatedAt.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture), by the website's clock</dd>
+        </dl>
+        <p class="muted">Characters that show nothing or turn text around are written as their codes, such as [U+200B], and mentions, links and backticks are marked.</p>
+    </section>
+
+    <section aria-labelledby="screenshot">
+        <h2 id="screenshot">Screenshot</h2>
+        @if (Model.ScreenshotShown)
+        {
+            <figure class="screenshot">
+                <img src="@armor.ArmorScreenshot" alt="The armor's screenshot, as the website saved it" />
+            </figure>
+        }
+        else if (string.IsNullOrWhiteSpace(armor.ArmorScreenshot))
+        {
+            <p>There's no screenshot.</p>
+        }
+        else
+        {
+            @if (approved)
+            {
+                <p>Not shown. It isn't an upload on the website, an https address under @ArmorRules.ScreenshotPath on murderminershub.com, so this page doesn't load it. @ArmorWords.ScreenshotFetchedNow</p>
+            }
+            else
+            {
+                <p>Not shown. It isn't an upload on the website, an https address under @ArmorRules.ScreenshotPath on murderminershub.com, so this page doesn't load it, @ArmorWords.ScreenshotBlocksApproval</p>
+            }
+            <p>Its address, as text, is @armor.ArmorScreenshot.Length.ToString("N0", CultureInfo.InvariantCulture) characters long:</p>
+            <p class="address">@RevealedText.Html(Model.ScreenshotText)</p>
+        }
+    </section>
+
+    <section aria-labelledby="armor-style">
+        <h2 id="armor-style">Armor</h2>
+        <dl class="details">
+            <dt>Helmet</dt>
+            <dd>@if (string.IsNullOrEmpty(armor.ArmorChoice)) {<text>None</text>} else {@RevealedText.Html(armor.ArmorChoice)}</dd>
+            <dt>Skin</dt>
+            <dd>@if (string.IsNullOrEmpty(armor.ArmorSkin)) {<text>None</text>} else {@RevealedText.Html(armor.ArmorSkin)}</dd>
+        </dl>
+        <div class="table-wrap">
+            <table class="colours">
+                <caption>Colours, as the game numbers them</caption>
+                <thead>
+                    <tr>
+                        <th scope="col">Part</th>
+                        <th scope="col">Colour</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var (part, color) in Model.Colors)
+                    {
+                        <tr>
+                            <th scope="row">@part</th>
+                            <td>@(color?.ToString(CultureInfo.InvariantCulture) ?? "None, which the bot reads as 0")</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+        <h3>Save string</h3>
+        @if (armor.ColorArray != null)
+        {
+            <p>Stored: <code>@RevealedText.Html(armor.ColorArray)</code>, which the bot shows as it is.</p>
+            @if (armor.ColorArray != Model.SaveString)
+            {
+                <p class="warn-text">It isn't the one the colours give, which is @(Model.SaveString == null ? "none" : Model.SaveString).</p>
+            }
+        }
+        else if (Model.SaveString != null)
+        {
+            <p><code>@Model.SaveString</code>, from the colours, as the bot works it out. Its hourly job stores it once the armor is approved.</p>
+        }
+        else
+        {
+            <p>None: a colour is outside 0 to 255, so the bot couldn't read this armor.</p>
+        }
+    </section>
+
+    <section aria-labelledby="previews">
+        <h2 id="previews">How the bot will show it</h2>
+        <h3>The new-armor post</h3>
+        <p class="muted">@(Model.MayNotPost ? ArmorWords.PostMayNotComeNote : ArmorWords.PostNote)</p>
+        <partial name="_Embed" model="Model.Post" />
+        <h3>/armor lookup</h3>
+        <p class="muted">The picture is the screenshot, which the bot attaches when it can fetch it.</p>
+        <partial name="_Embed" model="Model.Card" />
+    </section>
+
+    <section aria-labelledby="history">
+        <h2 id="history">History</h2>
+        @if (Model.History.Count == 0)
+        {
+            <p>No reviews on the dashboard yet. Changes made on the website aren't listed here.</p>
+        }
+        else
+        {
+            <p class="muted">Newest first. Changes made on the website aren't listed here.</p>
+            <ul class="history">
+                @foreach (var review in Model.History)
+                {
+                    <li>
+                        <p>
+                            <strong>From @(review.from_status ?? "no status") to @review.to_status</strong>,
+                            by @if (string.IsNullOrEmpty(review.reviewer_name)) {<text>a reviewer with no name</text>} else {@RevealedText.Html(review.reviewer_name)},
+                            @review.reviewed_at.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) UTC
+                        </p>
+                        @if (review.reason != null)
+                        {
+                            <p class="multiline">@RevealedText.Html(review.reason)</p>
+                        }
+                    </li>
+                }
+            </ul>
+        }
+    </section>
+
+    <section aria-labelledby="rules">
+        <h2 id="rules">Rules</h2>
+        @if (check.Blocking.Count == 0 && check.Warnings.Count == 0)
+        {
+            <p>The rules found nothing to stop or question an approval, the name check included.</p>
+        }
+        @if (check.Blocking.Count > 0)
+        {
+            <h3>@(approved ? "What would stop an approval now" : "What stops an approval")</h3>
+            <ul class="checklist checklist-block">
+                @foreach (var problem in check.Blocking)
+                {
+                    <li><bdi>@problem.Message</bdi></li>
+                }
+            </ul>
+        }
+        @if (check.Warnings.Count > 0)
+        {
+            <h3>What to look at</h3>
+            @if (Model.CanApprove)
+            {
+                <p>Tick each one once you've looked, to approve.</p>
+            }
+            <ul class="checklist checklist-warn">
+                @foreach (var problem in check.Warnings)
+                {
+                    var key = ArmorForm.TickKey(problem);
+                    var box = "tick-" + key.Replace(':', '-');
+
+                    <li>
+                        @if (Model.CanApprove)
+                        {
+                            <input type="checkbox" id="@box" name="ticks" value="@key" form="approve-form" required />
+                            <label for="@box"><bdi>@problem.Message</bdi></label>
+                        }
+                        else
+                        {
+                            <bdi>@problem.Message</bdi>
+                        }
+                    </li>
+                }
+            </ul>
+        }
+    </section>
+
+    <section aria-labelledby="decide">
+        <h2 id="decide">Decide</h2>
+        @if (Model.StatusUnknown)
+        {
+            <p>@ArmorWords.UnknownStatus</p>
+        }
+        else
+        {
+            @if (Model.SpeltDifferently)
+            {
+                <p>@ArmorWords.SpeltDifferently(armor.KnownStatus!)</p>
+            }
+            @if (check.Blocking.Count > 0 && (approved || Model.Actions.Contains(ArmorAction.Approve)))
+            {
+                <p>@(approved ? ArmorWords.ApprovedButBlocked : ArmorWords.NotOffered)</p>
+                <ul class="next-steps">
+                    @if (Model.Blocks(ArmorProblemKind.NameTaken))
+                    {
+                        <li>
+                            @ArmorWords.NameTakenStep(armor.KnownStatus)
+                            @if (Model.NameSearchLink != null)
+                            {
+                                <a href="@Model.NameSearchLink">Look for it among the approved armor</a>
+                            }
+                        </li>
+                    }
+                    @if (Model.Blocks(ArmorProblemKind.ScreenshotNotAllowed))
+                    {
+                        <li>@ArmorWords.ScreenshotStep(armor.KnownStatus)</li>
+                    }
+                    @if (Model.BlocksOtherwise)
+                    {
+                        <li>@ArmorWords.OtherStep(armor.KnownStatus)</li>
+                    }
+                </ul>
+            }
+            @if (Model.CanApprove)
+            {
+                <form method="post" asp-page-handler="Approve" asp-route-id="@id" asp-route-list="@Model.FromTab?.Word" asp-route-q="@Model.FromSearch" id="approve-form" class="action">
+                    <input type="hidden" name="expected" value="@(armor.KnownStatus ?? "")" />
+                    <input type="hidden" name="version" value="@Model.Version" />
+                    <button type="submit" class="button" aria-describedby="approve-help">Approve</button>
+                    <p id="approve-help" class="muted">@(Model.MayNotPost ? ArmorWords.ApproveAgainHelp : ArmorWords.ApproveHelp)</p>
+                </form>
+            }
+            @if (Model.Actions.Contains(ArmorAction.Reject))
+            {
+                <form method="post" asp-page-handler="Reject" asp-route-id="@id" asp-route-list="@Model.FromTab?.Word" asp-route-q="@Model.FromSearch" class="action">
+                    <input type="hidden" name="expected" value="@(armor.KnownStatus ?? "")" />
+                    <input type="hidden" name="version" value="@Model.Version" />
+                    <label for="reason">Reason for rejecting</label>
+                    <textarea id="reason" name="reason" rows="3" maxlength="@ArmorReviewData.ReasonLimit" aria-describedby="reason-hint"></textarea>
+                    <p id="reason-hint" class="muted">@ArmorWords.ReasonHint</p>
+                    <button type="submit" class="button button-quiet" aria-describedby="reject-help">Reject</button>
+                    <p id="reject-help" class="muted">@ArmorWords.RejectHelp</p>
+                </form>
+            }
+            @if (Model.Actions.Contains(ArmorAction.TakeDown))
+            {
+                <form method="post" asp-page-handler="TakeDown" asp-route-id="@id" asp-route-list="@Model.FromTab?.Word" asp-route-q="@Model.FromSearch" class="action">
+                    <input type="hidden" name="expected" value="@(armor.KnownStatus ?? "")" />
+                    <input type="hidden" name="version" value="@Model.Version" />
+                    <button type="submit" class="button button-quiet" aria-describedby="takedown-help">Take down</button>
+                    <p id="takedown-help" class="muted">@ArmorWords.TakeDownHelp</p>
+                </form>
+            }
+            @if (Model.Actions.Contains(ArmorAction.BackToPending))
+            {
+                <form method="post" asp-page-handler="BackToPending" asp-route-id="@id" asp-route-list="@Model.FromTab?.Word" asp-route-q="@Model.FromSearch" class="action">
+                    <input type="hidden" name="expected" value="@(armor.KnownStatus ?? "")" />
+                    <input type="hidden" name="version" value="@Model.Version" />
+                    <button type="submit" class="button button-quiet" aria-describedby="pending-help">Back to pending</button>
+                    <p id="pending-help" class="muted">@(approved ? ArmorWords.BackToPendingFromApprovedHelp : ArmorWords.BackToPendingHelp)</p>
+                </form>
+            }
+        }
+    </section>
+}

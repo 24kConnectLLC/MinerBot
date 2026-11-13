@@ -216,7 +216,9 @@ namespace MinerBot_2._0.Services
             return formattedName + imageType;
         }
 
-        // Without an image when there's no screenshot or it can't be fetched, so the lookup still answers
+        // Without an image when there's no screenshot or it can't be fetched, so the lookup still answers. The dashboard's
+        // review page previews this card and the new-armor post from copies in MinerBot.Dashboard/Armor/BotMessages.cs, so a
+        // change to either has to be made there too.
         public async Task<(Embed ArmorEmbed, FileAttachment? ArmorImage)> ArmorEmbed(ArmorStyle armor = null, string armorName = "Free Palestine")
         {
             if (armor == null)

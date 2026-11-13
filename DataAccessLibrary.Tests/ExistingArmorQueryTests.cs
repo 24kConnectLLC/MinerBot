@@ -92,8 +92,8 @@ namespace DataAccessLibrary.Tests
             Assert.Equal(2, read.Visor);
         }
 
-        // Why the approval rules block a colour outside a byte: one such approved armor stops the armor posts, the colour
-        // job and /armor list for every server
+        // Why the approval rules block a colour outside a byte: one such approved armor stops the armor posts and the colour
+        // job for every server, and /armor lookup of that armor. /armor list reads only names, so it goes on.
         [Theory]
         [InlineData(300)]
         [InlineData(-1)]

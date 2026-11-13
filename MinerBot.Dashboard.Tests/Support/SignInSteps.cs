@@ -74,12 +74,18 @@ namespace MinerBot.Dashboard.Tests.Support
             return await PostAsync(browser, "/signout", token, origin: DashboardFactory.PublicOrigin);
         }
 
-        public static Task<HttpResponseMessage> PostAsync(TestBrowser browser, string path, string? token, string? origin = null, string? fetchSite = null, HttpMethod? method = null)
+        // The token, when given, and any other fields of the form
+        public static Task<HttpResponseMessage> PostAsync(TestBrowser browser, string path, string? token, string? origin = null, string? fetchSite = null, HttpMethod? method = null,
+            IEnumerable<KeyValuePair<string, string>>? fields = null)
         {
-            var request = new HttpRequestMessage(method ?? HttpMethod.Post, path)
-            {
-                Content = new FormUrlEncodedContent(token == null ? [] : [new KeyValuePair<string, string>("__RequestVerificationToken", token)])
-            };
+            var form = new List<KeyValuePair<string, string>>();
+
+            if (token != null)
+                form.Add(new("__RequestVerificationToken", token));
+
+            form.AddRange(fields ?? []);
+
+            var request = new HttpRequestMessage(method ?? HttpMethod.Post, path) { Content = new FormUrlEncodedContent(form) };
 
             if (origin != null)
                 request.Headers.Add("Origin", origin);
