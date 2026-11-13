@@ -67,11 +67,15 @@ record mariadb "$@"
 
 the_rights() {   # what the rights file gives, one per line, as deploy/rights-list.sql lists it
     printf '%s\n' "column SELECT website_db ihvph_discord_servers guild_id" "column UPDATE website_db ihvph_armor_styles Status" \
+        "column UPDATE website_db ihvph_blacklist expire_date" "column UPDATE website_db ihvph_blacklist notes" \
+        "column UPDATE website_db ihvph_blacklist reason" "column UPDATE website_db ihvph_blacklist username" \
         "global USAGE" "limits 15 20.000000 0 0 0" \
-        "table DELETE minerbot_db dashboard_sessions" "table INSERT minerbot_db armor_reviews" "table INSERT minerbot_db audit_log" \
-        "table INSERT minerbot_db dashboard_sessions" "table SELECT minerbot_db armor_reviews" \
+        "table DELETE minerbot_db dashboard_sessions" "table DELETE website_db ihvph_blacklist" \
+        "table INSERT minerbot_db armor_reviews" "table INSERT minerbot_db audit_log" \
+        "table INSERT minerbot_db dashboard_sessions" "table INSERT website_db ihvph_blacklist" \
+        "table SELECT minerbot_db armor_reviews" "table SELECT minerbot_db audit_log" \
         "table SELECT minerbot_db dashboard_sessions" "table SELECT website_db ihvph_armor_styles" \
-        "table UPDATE minerbot_db dashboard_sessions"
+        "table SELECT website_db ihvph_blacklist" "table UPDATE minerbot_db dashboard_sessions"
 }
 
 refuse() {   # refuse <message>

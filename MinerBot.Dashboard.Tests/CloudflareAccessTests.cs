@@ -389,6 +389,7 @@ namespace MinerBot.Dashboard.Tests
             var access = new FakeCloudflareAccess(keys);
             var db = await fixture.ReadyAsync();
             await db.AddArmorAsync(ArmorSteps.Submission(1));
+            await db.AddEntriesAsync(BlacklistSteps.Entry(1));
             await using var factory = Factory(db, access, on: false);
 
             // Each admin page's address, as the app makes it, with a value for each part of its route, such as an armor's ID
@@ -428,6 +429,10 @@ namespace MinerBot.Dashboard.Tests
                 await admin.Client.GetStringAsync("/admin", Token),
                 await admin.Client.GetStringAsync("/admin/armor", Token),
                 await admin.Client.GetStringAsync("/admin/armor/1", Token),
+                await admin.Client.GetStringAsync("/admin/blacklist", Token),
+                await admin.Client.GetStringAsync("/admin/blacklist/add", Token),
+                await admin.Client.GetStringAsync("/admin/blacklist/1", Token),
+                await admin.Client.GetStringAsync("/admin/audit", Token),
                 await admin.Client.GetStringAsync("/signout", Token));
 
             var targets = Targets().Matches(html)

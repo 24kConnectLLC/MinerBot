@@ -241,8 +241,15 @@ namespace MinerBot.Dashboard.Tests
                 Assert.Equal(HttpStatusCode.OK, (await reviewer.Client.GetAsync("/admin/armor/501", Token)).StatusCode);
             }
 
-            // The layout's link, for both roles
-            Assert.Contains("<a href=\"/admin/armor\">Armor</a>", await owner.Client.GetStringAsync("/admin", Token));
+            // The layout's links, for both roles, in the nav's order
+            foreach (var reviewer in new[] { owner, admin })
+            {
+                var nav = System.Text.RegularExpressions.Regex.Match(await reviewer.Client.GetStringAsync("/admin", Token),
+                    "<nav aria-label=\"Dashboard\" class=\"site-nav\">(.*?)</nav>", System.Text.RegularExpressions.RegexOptions.Singleline).Groups[1].Value;
+
+                Assert.Equal(["<a href=\"/admin\">Overview</a>", "<a href=\"/admin/armor\">Armor</a>", "<a href=\"/admin/blacklist\">Blacklist</a>",
+                    "<a href=\"/admin/audit\">Audit log</a>"], nav.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+            }
         }
 
         [GeneratedRegex("href=\"/admin/armor/([0-9]+)[?\"]")]

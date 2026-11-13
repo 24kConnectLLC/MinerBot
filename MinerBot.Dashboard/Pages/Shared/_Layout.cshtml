@@ -5,6 +5,9 @@
 @{
     var user = SignedInUser.From(User);
     var role = RoleClaims.RoleOf(User);
+
+    // A page whose table needs more room than a line of text, such as the audit log, asks for the wide column
+    var column = ViewData["Wide"] is true ? "column column-wide" : "column";
 }
 <!DOCTYPE html>
 <html lang="en">
@@ -18,18 +21,21 @@
 <body>
     <a class="skip-link" href="#main">Skip to the content</a>
     <header class="site-header">
-        <div class="column header-row">
+        <div class="@column header-row">
             <a class="site-name" href="/">MinerBot dashboard</a>
             @if (user != null && role != DashboardRole.None)
             {
-                <nav aria-label="Dashboard" class="site-nav">
-                    <a href="/admin">Overview</a>
-                    <a href="/admin/armor">Armor</a>
-                </nav>
+                @* In the order they're shown: who's signed in and Sign out beside the name, and the nav on the row under them *@
                 <p class="signed-in">Signed in as @user.Name (@role.Name())</p>
                 <form method="post" asp-page="/SignOut" class="sign-out">
                     <button type="submit" class="button">Sign out</button>
                 </form>
+                <nav aria-label="Dashboard" class="site-nav">
+                    <a href="/admin">Overview</a>
+                    <a href="/admin/armor">Armor</a>
+                    <a href="/admin/blacklist">Blacklist</a>
+                    <a href="/admin/audit">Audit log</a>
+                </nav>
             }
             else
             {
@@ -38,11 +44,11 @@
             }
         </div>
     </header>
-    <main id="main" class="column">
+    <main id="main" class="@column">
         @RenderBody()
     </main>
     <footer class="site-footer">
-        <div class="column">
+        <div class="@column">
             <p><a href="https://murderminershub.com/discord-bot/">About MinerBot on murderminershub.com</a></p>
         </div>
     </footer>

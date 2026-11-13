@@ -72,12 +72,14 @@ namespace DataAccessLibrary.Audit
             }, transaction);
         }
 
-        // Newest first, with the order the rows were written breaking ties
+        // Newest first, with the order the rows were written breaking ties. The visitor's address only when the query asks
+        // for it, so every other caller gets none.
         public Task<Page<AuditEntry>> ListAudit(AuditQuery query)
         {
             var (take, skip) = RequirePage(query.Page, query.PageSize);
             DateTime? from = query.From is { } start ? RequireUtc(start, nameof(query.From)) : null;
             DateTime? to = query.To is { } end ? RequireUtc(end, nameof(query.To)) : null;
+            var ip = query.IncludeIp ? "ip" : "NULL AS ip";
 
             string where = @"WHERE (@actorId IS NULL OR actor_id = @actorId)
                             AND (@action IS NULL OR action = @action)
@@ -88,7 +90,7 @@ namespace DataAccessLibrary.Audit
                             AND (@to IS NULL OR at < @to)";
 
             string sql = $@"SELECT id, at, actor_id, actor_name, actor_role, action, outcome, guild_id, target_type, target_id,
-                            before_json, after_json, detail, ip, request_id
+                            before_json, after_json, detail, {ip}, request_id
                             FROM {_names.Bot}.audit_log
                             {where}
                             ORDER BY at DESC, id DESC
@@ -109,6 +111,29 @@ namespace DataAccessLibrary.Audit
                 take,
                 skip
             });
+        }
+
+        // The latest change that went through for each of these targets, such as the entries on one page of the blacklist,
+        // in one call. Refused, failed and unknown rows don't count, and neither the JSON nor the visitor's address is read.
+        // Latest in ListAudit's order: the time, then the order the rows were written. A change's time is set before its
+        // transaction, which can run again after a deadlock, so the highest ID alone isn't always the latest.
+        public async Task<IReadOnlyList<AuditEntry>> LatestChanges(string targetType, IReadOnlyCollection<string> targetIds)
+        {
+            ArgumentNullException.ThrowIfNull(targetType);
+            ArgumentNullException.ThrowIfNull(targetIds);
+
+            // MariaDB takes the empty list Dapper writes, but there's nothing to ask
+            if (targetIds.Count == 0)
+                return [];
+
+            string sql = $@"SELECT id, at, actor_id, actor_name, actor_role, action, outcome, target_type, target_id
+                            FROM (SELECT id, at, actor_id, actor_name, actor_role, action, outcome, target_type, target_id,
+                                ROW_NUMBER() OVER (PARTITION BY target_id ORDER BY at DESC, id DESC) AS n
+                                FROM {_names.Bot}.audit_log
+                                WHERE target_type = @targetType AND target_id IN @targetIds AND outcome = @ok) latest
+                            WHERE n = 1";
+
+            return (await LoadDataEnum<AuditEntry, dynamic>(sql, new { targetType, targetIds, ok = AuditOutcome.Ok }).ConfigureAwait(false)).ToList();
         }
 
         static void RequireFits(string? text, int limit, string what)

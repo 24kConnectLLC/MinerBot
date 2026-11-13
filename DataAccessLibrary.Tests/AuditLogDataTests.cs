@@ -58,7 +58,7 @@ namespace DataAccessLibrary.Tests
 
             await audit.AddAudit(stored);
 
-            var page = await audit.ListAudit(new AuditQuery());
+            var page = await audit.ListAudit(new AuditQuery { IncludeIp = true });
             var entry = Assert.Single(page.Rows);
 
             Assert.True(entry.id > 0);
@@ -195,6 +195,77 @@ namespace DataAccessLibrary.Tests
             Assert.Equal(entry.detail[..300], stored.detail);
             Assert.Equal(new string('n', 100), stored.actor_name);
             Assert.Equal(new string('r', 64), stored.request_id);
+        }
+
+        // The visitor's address comes back only for a caller that asks, which only the audit page does, for the Owner
+        [Fact]
+        public async Task AddressOnlyWhenAskedFor()
+        {
+            var db = await StartAsync();
+            var audit = db.Audit();
+            var entry = Entry(Noon);
+            entry.ip = "203.0.113.9";
+            await audit.AddAudit(entry);
+
+            Assert.Null(Assert.Single((await audit.ListAudit(new AuditQuery())).Rows).ip);
+            Assert.Null(Assert.Single((await audit.ListAudit(new AuditQuery { TargetType = "armor", TargetId = "12" })).Rows).ip);
+            Assert.Equal("203.0.113.9", Assert.Single((await audit.ListAudit(new AuditQuery { IncludeIp = true })).Rows).ip);
+            Assert.Null(Assert.Single(await audit.LatestChanges("armor", ["12"])).ip);
+        }
+
+        // The latest change that went through for each target, in ListAudit's order: the time, then the order the rows were
+        // written. A refusal, a failure and a change that may not have landed don't count, and neither do other targets.
+        [Fact]
+        public async Task LatestChangeOfEachTarget()
+        {
+            var db = await StartAsync();
+            var audit = db.Audit();
+
+            AuditEntry Row(string target, string action, DateTime at, string outcome = AuditOutcome.Ok, string type = "blacklist")
+            {
+                var entry = Entry(at, action, targetType: type, targetId: target);
+                entry.outcome = outcome;
+                return entry;
+            }
+
+            // A change whose transaction ran again after a deadlock keeps the time it was given before its first run, so a
+            // later ID can have an earlier time
+            await audit.AddAudit(Row("1", "blacklist.edit", Noon.AddMinutes(5)));
+            await audit.AddAudit(Row("1", "blacklist.add", Noon));
+            await audit.AddAudit(Row("1", "blacklist.remove", Noon.AddMinutes(6), AuditOutcome.Refused));
+
+            // Two at the same moment: the one written last
+            await audit.AddAudit(Row("2", "blacklist.add", Noon));
+            await audit.AddAudit(Row("2", "blacklist.edit", Noon));
+
+            // Only refused, unknown and failed rows, and a row about armor with the same ID
+            await audit.AddAudit(Row("3", "blacklist.add", Noon, AuditOutcome.Refused));
+            await audit.AddAudit(Row("3", "blacklist.add", Noon, AuditOutcome.Unknown));
+            await audit.AddAudit(Row("3", "blacklist.add", Noon, AuditOutcome.Failed));
+            await audit.AddAudit(Row("3", "armor.approve", Noon.AddHours(1), type: "armor"));
+
+            var latest = (await audit.LatestChanges("blacklist", ["1", "2", "3", "4"])).ToDictionary(entry => entry.target_id!);
+
+            Assert.Equal(["1", "2"], latest.Keys.Order(StringComparer.Ordinal));
+            Assert.Equal("blacklist.edit", latest["1"].action);
+            Assert.Equal(Noon.AddMinutes(5), DateTime.SpecifyKind(latest["1"].at, DateTimeKind.Utc));
+            Assert.Equal("blacklist.edit", latest["2"].action);
+            Assert.Equal("Test Admin", latest["2"].actor_name);
+            Assert.Equal(AuditRole.Admin, latest["2"].actor_role);
+            Assert.All(latest.Values, entry => Assert.Equal(AuditOutcome.Ok, entry.outcome));
+
+            Assert.Equal("armor.approve", Assert.Single(await audit.LatestChanges("armor", ["3"])).action);
+            Assert.Empty(await audit.LatestChanges("blacklist", ["5"]));
+        }
+
+        // A page with no rows asks for nothing, so no connection is made
+        [Fact]
+        public async Task LatestChangesOfNoTargetsAsksNothing()
+        {
+            var database = new NoDatabase();
+
+            Assert.Empty(await new AuditLogData(database, NoDatabase.Names).LatestChanges("blacklist", []));
+            Assert.Equal(0, database.Created);
         }
 
         // TEXT holds at least 16,000 characters of any kind, which is the limit the code checks

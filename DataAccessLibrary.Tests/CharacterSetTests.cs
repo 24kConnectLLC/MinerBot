@@ -115,6 +115,26 @@ namespace DataAccessLibrary.Tests
                 $"SELECT username FROM {MariaDbFixture.BlacklistTable} UNION ALL SELECT reason FROM {MariaDbFixture.BlacklistTable} UNION ALL SELECT notes FROM {MariaDbFixture.BlacklistTable}"));
         }
 
+        // An edit of a blacklist entry, inside a transaction as the entry's page makes it, keeps them too
+        [Fact]
+        public async Task BlacklistEditKeepsEveryCharacter()
+        {
+            var db = fixture.Require();
+            await db.ClearAsync(MariaDbFixture.BlacklistTable);
+            await db.Blacklist().InsertPlayerBan(new BlacklistModel { steam_id = 12345, username = "Test Player", reason = "Testing", notes = "Made up" });
+
+            var blacklist = new BlacklistData(new SQLConnectionFactory(WithoutCharacterSet()));
+            var edited = new BlacklistModel { steam_id = 12345, username = Name, reason = Name, notes = Name };
+
+            Assert.True(await blacklist.UpdatePlayerBan(edited));
+            Assert.Equal([Name, Name, Name], await db.RootQueryAsync<string>(
+                $"SELECT username FROM {MariaDbFixture.BlacklistTable} UNION ALL SELECT reason FROM {MariaDbFixture.BlacklistTable} UNION ALL SELECT notes FROM {MariaDbFixture.BlacklistTable}"));
+
+            edited.reason = "Edited " + Emoji + (char)0x200B;
+            Assert.True(await blacklist.RunInTransaction(transaction => blacklist.UpdatePlayerBan(edited, transaction)));
+            Assert.Equal(edited.reason, (await blacklist.GetBannedPlayer(12345))?.reason);
+        }
+
         // A change and its audit row travel on the website's connection
         [Fact]
         public async Task TransactionOnTheWebsitesConnectionKeepsEveryCharacter()

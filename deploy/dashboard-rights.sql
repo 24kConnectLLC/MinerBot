@@ -30,14 +30,17 @@ ALTER USER {{GRANTEES}} WITH MAX_USER_CONNECTIONS 15 MAX_STATEMENT_TIME 20;
 -- pull request than the one that stopped needing it, and it holds nothing private.
 GRANT SELECT (`guild_id`) ON `{{SITE_DB}}`.`ihvph_discord_servers` TO {{GRANTEES}};
 
--- MinerBot's own database: the sign-in sessions, and adding rows to the audit log, which this login can never change or
--- read back. Reading it comes with the audit page. That holds for this login only: the bot's own login has every right
--- in this database, and while it's still a cPanel database, as before move-database.sh, the cPanel account that owns
--- it can take it over, then change or delete audit rows and sessions. apply_rights refuses while this database holds a
--- trigger, event or routine, which would act with its maker's rights on every row this login adds, and which no
--- migration makes.
+-- MinerBot's own database: the sign-in sessions, and the audit log, which this login adds rows to and reads back, but
+-- can never change or delete. That holds for this login only: the bot's own login has every right in this database,
+-- and while it's still a cPanel database, as before move-database.sh, the cPanel account that owns it can take it
+-- over, then change or delete audit rows and sessions. apply_rights refuses while this database holds a trigger, event
+-- or routine, which would act with its maker's rights on every row this login adds, and which no migration makes.
 GRANT SELECT, INSERT, UPDATE, DELETE ON `{{BOT_DB}}`.`dashboard_sessions` TO {{GRANTEES}};
 GRANT INSERT ON `{{BOT_DB}}`.`audit_log` TO {{GRANTEES}};
+
+-- The audit page reads the log back, and so does each blacklist entry's history. On a line of its own, so the INSERT
+-- line above stays word for word what older dashboards' own files have, which deploy.sh compares statement by statement.
+GRANT SELECT ON `{{BOT_DB}}`.`audit_log` TO {{GRANTEES}};
 
 -- Armor review reads every submission, whatever its status, for its list and its review page, and changes nothing but
 -- the status. An approval's name check reads with FOR UPDATE, which needs no more than SELECT. The website stays the
@@ -48,3 +51,9 @@ GRANT UPDATE (`Status`) ON `{{SITE_DB}}`.`ihvph_armor_styles` TO {{GRANTEES}};
 -- Each status change adds its row to the armor's review history, in the same transaction, and the review page reads the
 -- history back. A row is never changed or deleted.
 GRANT SELECT, INSERT ON `{{BOT_DB}}`.`armor_reviews` TO {{GRANTEES}};
+
+-- The blacklist's pages list and search every entry, add one, change its name, reason, end date or notes, and remove it,
+-- each change in one transaction with its audit row. The locked read before a change needs no more than SELECT. UPDATE
+-- leaves out steam_id, so an edit can't move an entry to another account: a wrong number is removed and added again.
+GRANT SELECT, INSERT, DELETE ON `{{SITE_DB}}`.`ihvph_blacklist` TO {{GRANTEES}};
+GRANT UPDATE (`username`, `reason`, `expire_date`, `notes`) ON `{{SITE_DB}}`.`ihvph_blacklist` TO {{GRANTEES}};

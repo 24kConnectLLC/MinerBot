@@ -4,6 +4,7 @@ using DataAccessLibrary.Audit;
 using DataAccessLibrary.Audit.Models;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.OAuth;
+using MinerBot.Dashboard.Audit;
 using MinerBot.Dashboard.Security;
 using MinerBot.Dashboard.Services;
 
@@ -162,9 +163,9 @@ namespace MinerBot.Dashboard.Auth
                 actor_id = user?.Id,
                 actor_name = user?.DisplayName,
                 actor_role = role,
-                action = "auth.refused",
+                action = AuditWords.Refused,
                 outcome = AuditOutcome.Refused,
-                target_type = "session",
+                target_type = AuditWords.SessionTarget,
                 detail = refusal.Detail(),
                 ip = httpContext.Connection.RemoteIpAddress?.ToString(),
                 request_id = httpContext.TraceIdentifier

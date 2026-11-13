@@ -1,0 +1,115 @@
+@model AuditTable
+@using System.Globalization
+@using MinerBot.Dashboard.Armor
+@using MinerBot.Dashboard.Audit
+@*
+    Audit rows as a table, for the audit page and a blacklist entry's history. Names, JSON values and details go through
+    RevealedText, which encodes them inside a bdi, and every link is one AuditRows made from a number it parsed. The
+    address column is there only when the page shows addresses, which only the Owner's audit page does; anyone else's
+    rows hold none.
+*@
+<div class="table-wrap">
+    <table class="audit-table">
+        <thead>
+            <tr>
+                <th scope="col">When</th>
+                <th scope="col">Who</th>
+                <th scope="col">What</th>
+                <th scope="col">Change</th>
+                <th scope="col">Detail</th>
+                @if (Model.ShowIp)
+                {
+                    <th scope="col">Address</th>
+                }
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var row in Model.Rows)
+            {
+                <tr>
+                    <td class="audit-when">@row.At.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) UTC</td>
+                    <td>
+                        @if (row.NoActor)
+                        {
+                            @* Written before Discord said who it was, so no list was checked, and a role would say one was *@
+                            <p>Someone Discord didn't name</p>
+                        }
+                        else
+                        {
+                            if (row.ActorId is { } actor)
+                            {
+                                var actorId = actor.ToString(CultureInfo.InvariantCulture);
+                                <p>@if (string.IsNullOrEmpty(row.ActorName)) {<text>No name</text>} else {@RevealedText.Html(row.ActorName)}</p>
+                                <p><a href="/admin/audit?person=@actorId">Discord ID @actorId</a></p>
+                            }
+                            <p class="muted">@row.Role</p>
+                        }
+                    </td>
+                    <td>
+                        <p><strong>@row.Action</strong></p>
+                        <p>@row.Outcome</p>
+                        @if (row.Target is { } target)
+                        {
+                            <p>
+                                @if (target.Link != null)
+                                {
+                                    <a href="@target.Link">@target.Text</a>
+                                }
+                                else
+                                {
+                                    @target.Text
+                                }
+                            </p>
+                        }
+                        @if (row.GuildId is { } guild)
+                        {
+                            var guildId = guild.ToString(CultureInfo.InvariantCulture);
+                            <p><a href="/admin/audit?server=@guildId">Server @guildId</a></p>
+                        }
+                    </td>
+                    <td>
+                        @foreach (var (label, change) in Sides(row))
+                        {
+                            <p class="audit-side">@label</p>
+                            @if (change.Text != null)
+                            {
+                                <p class="address">@RevealedText.Html(change.Text)</p>
+                            }
+                            else if (change.Fields.Count == 0)
+                            {
+                                <p>Nothing</p>
+                            }
+                            else
+                            {
+                                @* An empty text apart from none: the website can save '' where the dashboard saves NULL *@
+                                <dl class="audit-change">
+                                    @foreach (var field in change.Fields)
+                                    {
+                                        <dt>@RevealedText.Html(field.Label)</dt>
+                                        <dd>@if (field.Value == null) {<text>none</text>} else if (field.Value.Length == 0) {<text>empty</text>} else {@RevealedText.Html(field.Value)}</dd>
+                                    }
+                                </dl>
+                            }
+                        }
+                    </td>
+                    <td>@if (!string.IsNullOrEmpty(row.Detail)) {@RevealedText.Html(row.Detail)}</td>
+                    @if (Model.ShowIp)
+                    {
+                        <td class="address">@row.Ip</td>
+                    }
+                </tr>
+            }
+        </tbody>
+    </table>
+</div>
+@functions {
+    // Before and after, in that order, leaving out a side the row has no JSON for
+    static IEnumerable<(string Label, AuditChange Change)> Sides(AuditRow row)
+    {
+        if (row.Before != null)
+            yield return ("Before", row.Before);
+
+        if (row.After != null)
+            yield return ("After", row.After);
+    }
+}

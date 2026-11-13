@@ -199,9 +199,9 @@ extras_refused() {
 
 forbidden_refused() {
     local statement out
-    # The login may read the armor and its review history, so these two try what it may not: deleting history and
-    # changing an armor's name
-    for statement in "SELECT * FROM $bot.audit_log" "UPDATE $bot.audit_log SET outcome = 'x'" \
+    # The login may read the audit log, the armor and its review history, and the blacklist, so these try what it may
+    # not: moving a ban to another account, changing an audit row, deleting history and changing an armor's name
+    for statement in "UPDATE $site.ihvph_blacklist SET steam_id = 1" "UPDATE $bot.audit_log SET outcome = 'x'" \
         "DELETE FROM $bot.armor_reviews" "UPDATE $site.ihvph_armor_styles SET ArmorName = 'x'" \
         "SELECT armor_channel_id FROM $site.ihvph_discord_servers" \
         "UPDATE $site.ihvph_discord_servers SET armor_channel_id = 1" "CREATE TABLE $bot.rights_check (a INT)" \
@@ -222,7 +222,8 @@ statement_time() {
 
 proxy_caught() {
     local out
-    out=$(sql "GRANT SELECT ON $site.ihvph_blacklist TO '$login'@'localhost';
+    # A table right the file doesn't give, since it gives SELECT on the servers' guild_id alone
+    out=$(sql "GRANT SELECT ON $site.ihvph_discord_servers TO '$login'@'localhost';
         GRANT ALL ON $bot.* TO '$login'@'127.0.0.1';
         GRANT PROXY ON 'someone'@'localhost' TO '$login'@'localhost';") \
         || problem "couldn't add the rights by hand" "$out"
@@ -234,7 +235,7 @@ proxy_caught() {
 hand_rights_gone() {
     local now
     now=$(login_rights)
-    if grep -E 'ihvph_blacklist|^schema ' <<< "$now" > /dev/null; then
+    if grep -E "^table SELECT $site ihvph_discord_servers\$|^schema " <<< "$now" > /dev/null; then
         problem "a right added by hand is still there" "$now"
     fi
 }
@@ -255,7 +256,7 @@ missing_table_stops() {
     { cat /opt/minerbot/dashboard-rights.sql; echo 'GRANT INSERT ON `{{BOT_DB}}`.`bot_commands` TO {{GRANTEES}};'; } \
         > /work/rights-missing.sql
     # A right the file would take away, so a REVOKE that reached the real login would show
-    out=$(sql "GRANT SELECT ON $site.ihvph_blacklist TO '$login'@'localhost';") || problem "couldn't add a right by hand" "$out"
+    out=$(sql "GRANT SELECT ON $site.ihvph_discord_servers TO '$login'@'localhost';") || problem "couldn't add a right by hand" "$out"
     before=$(login_rights)
     run_common apply_rights /work/rights-missing.sql
     [ "$status" != 0 ] || problem "apply_rights passed a right on a table that doesn't exist" "$said"

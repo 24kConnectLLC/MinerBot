@@ -1,0 +1,57 @@
+@page
+@model BlacklistAddModel
+@using MinerBot.Dashboard.Blacklist
+@*
+    The form posts to this page through asp-page, never an action attribute, so the form tag helper adds its token, and an
+    address that brought a SteamID into the box isn't sent again. A refused form comes back with what was typed in the
+    boxes, encoded, and a message by each field it was refused for.
+*@
+@{
+    ViewData["Title"] = Model.Unsure ? "Not sure it was saved" : "Add to the blacklist";
+    var steamIdProblem = Model.Form.Problem(BlacklistField.SteamId);
+}
+@if (Model.Unsure)
+{
+    <h1>Not sure it was saved</h1>
+    <p>@BlacklistWords.AddUnsure</p>
+    <p><a href="@Model.SearchLink">Search the blacklist for the account</a></p>
+}
+else
+{
+    <p><a href="/admin/blacklist">Back to the blacklist</a></p>
+    <h1>Add to the blacklist</h1>
+    <div class="banner" role="note">
+        <p>@BlacklistWords.NotEnforced</p>
+    </div>
+
+    @if (Model.Notice != null)
+    {
+        <div class="notice @(Model.NoticeIsProblem ? "notice-problem" : "notice-done")" role="@(Model.NoticeIsProblem ? "alert" : "status")">
+            <p>@Model.Notice <a href="@Model.EntryLink">Open its entry to change it</a>.</p>
+        </div>
+    }
+    else if (Model.Form.Problems.Count > 0)
+    {
+        <div class="notice notice-problem" role="alert">
+            <p>@BlacklistWords.NotAdded</p>
+        </div>
+    }
+
+    <form method="post" asp-page="/Admin/Blacklist/Add" class="action">
+        <div class="fields">
+            <div class="field">
+                <label for="steamid">SteamID</label>
+                <input type="text" id="steamid" name="steamid" value="@Model.Form.SteamId" maxlength="@BlacklistForm.SteamIdLimit" required
+                       aria-describedby="@(steamIdProblem == null ? "steamid-hint" : "steamid-problem steamid-hint")" aria-invalid="@(steamIdProblem == null ? null : "true")" />
+                @if (steamIdProblem != null)
+                {
+                    <p id="steamid-problem" class="field-problem">@steamIdProblem</p>
+                }
+                <p id="steamid-hint" class="muted">@BlacklistWords.SteamIdHint</p>
+            </div>
+        </div>
+        <partial name="_EntryFields" model="Model.Form" />
+        <button type="submit" class="button" aria-describedby="add-help">Add to the blacklist</button>
+        <p id="add-help" class="muted">@BlacklistWords.AddHelp</p>
+    </form>
+}

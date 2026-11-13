@@ -6,7 +6,9 @@ namespace DataAccessLibrary.Blacklist
     {
         Task<BlacklistModel?> GetBannedPlayer(uint steamID, DataTransaction? transaction = null);
         Task<IEnumerable<BlacklistModel>> GetBlacklist();
+        Task<OutOfRangeBan?> GetOutOfRangeBan(decimal steamId, DataTransaction? transaction = null);
         Task InsertPlayerBan(BlacklistModel player, DataTransaction? transaction = null);
+        Task<IReadOnlyList<OutOfRangeBan>> ListOutOfRangeBans();
         Task<IReadOnlyList<decimal>> ListOutOfRangeSteamIds();
         Task<bool> RemoveOutOfRangeSteamId(decimal steamId, DataTransaction? transaction = null);
         Task<bool> RemovePlayerBan(uint steamID, DataTransaction? transaction = null);

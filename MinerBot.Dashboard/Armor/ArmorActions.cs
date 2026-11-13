@@ -1,4 +1,5 @@
 using DataAccessLibrary.Armor.Models;
+using MinerBot.Dashboard.Audit;
 using MinerBot.Shared.Armor;
 
 namespace MinerBot.Dashboard.Armor
@@ -24,10 +25,10 @@ namespace MinerBot.Dashboard.Armor
         // The audit log's words, fixed, because the audit page filters on them
         public static string AuditAction(this ArmorAction action) => action switch
         {
-            ArmorAction.Approve => "armor.approve",
-            ArmorAction.Reject => "armor.reject",
-            ArmorAction.TakeDown => "armor.takedown",
-            _ => "armor.pending"
+            ArmorAction.Approve => AuditWords.ArmorApprove,
+            ArmorAction.Reject => AuditWords.ArmorReject,
+            ArmorAction.TakeDown => AuditWords.ArmorTakeDown,
+            _ => AuditWords.ArmorPending
         };
 
         // The status an armor's actions start from: the website's word the table reads its status as, which the bot and the

@@ -47,15 +47,23 @@ namespace DataAccessLibrary.Tests
         [
             "column SELECT website_db ihvph_discord_servers guild_id",
             "column UPDATE website_db ihvph_armor_styles Status",
+            "column UPDATE website_db ihvph_blacklist expire_date",
+            "column UPDATE website_db ihvph_blacklist notes",
+            "column UPDATE website_db ihvph_blacklist reason",
+            "column UPDATE website_db ihvph_blacklist username",
             "global USAGE",
             "limits 15 20.000000 0 0 0",
             "table DELETE minerbot_db dashboard_sessions",
+            "table DELETE website_db ihvph_blacklist",
             "table INSERT minerbot_db armor_reviews",
             "table INSERT minerbot_db audit_log",
             "table INSERT minerbot_db dashboard_sessions",
+            "table INSERT website_db ihvph_blacklist",
             "table SELECT minerbot_db armor_reviews",
+            "table SELECT minerbot_db audit_log",
             "table SELECT minerbot_db dashboard_sessions",
             "table SELECT website_db ihvph_armor_styles",
+            "table SELECT website_db ihvph_blacklist",
             "table UPDATE minerbot_db dashboard_sessions"
         ];
 
@@ -144,7 +152,7 @@ namespace DataAccessLibrary.Tests
             ticket = [1, 2, 3]
         };
 
-        static AuditEntry Audit(string action) => new()
+        static AuditEntry Audit(string action, string targetType = "session", string? targetId = null) => new()
         {
             at = Noon,
             actor_id = UserId,
@@ -152,7 +160,18 @@ namespace DataAccessLibrary.Tests
             actor_role = AuditRole.Admin,
             action = action,
             outcome = AuditOutcome.Ok,
-            target_type = "session"
+            target_type = targetType,
+            target_id = targetId,
+            ip = "203.0.113.7"
+        };
+
+        static BlacklistModel Player(uint accountNumber, string reason = "Testing") => new()
+        {
+            steam_id = accountNumber,
+            username = "Test Player",
+            reason = reason,
+            expire_date = new DateTime(2027, 1, 2),
+            notes = "Made up"
         };
 
         static ArmorSubmission Armor(long id, string status, string name) => new()
@@ -183,14 +202,16 @@ namespace DataAccessLibrary.Tests
         }
 
         // Every repository call the dashboard makes today, under its login: the sessions, the audit rows, on MinerBot's own
-        // connection and inside a transaction on the website's, armor review's reads and each kind of its transactions, and
-        // the readiness check of both databases
+        // connection and inside a transaction on the website's, and the audit page's reads of them, armor review's reads and
+        // each kind of its transactions, the blacklist's reads and each kind of its changes, and the readiness check of both
+        // databases
         [Fact]
         public async Task EverythingTodaysDashboardDoesWorks()
         {
             await WithLoginAsync(async (db, password) =>
             {
-                await db.ClearAsync(MariaDbFixture.SessionTable, MariaDbFixture.AuditTable, MariaDbFixture.ArmorTable, MariaDbFixture.ReviewTable);
+                await db.ClearAsync(MariaDbFixture.SessionTable, MariaDbFixture.AuditTable, MariaDbFixture.ArmorTable, MariaDbFixture.ReviewTable,
+                    MariaDbFixture.BlacklistTable);
                 await db.AddArmorAsync(Armor(1, ArmorStatus.Pending, "Test Armor 1"));
                 await db.AddArmorAsync(Armor(2, ArmorStatus.Approved, "Test Armor 2"));
 
@@ -264,12 +285,73 @@ namespace DataAccessLibrary.Tests
                 Assert.Equal(ArmorStatus.Approved, (await submissions.GetSubmission(1))?.Status);
                 Assert.Equal(ArmorStatus.NotApproved, (await submissions.GetSubmission(2))?.Status);
 
+                // The blacklist's reads: the list and its search, an entry, and the rows no account number can be, which only
+                // something else can type in
+                var blacklist = new BlacklistData(factory);
+                await db.RootExecuteAsync($"INSERT INTO {MariaDbFixture.BlacklistTable} (steam_id, username) VALUES (5000000000, 'Test Typo')");
+
+                Assert.Equal(0, (await blacklist.SearchBlacklist(null, null, 0, 25)).Total);
+                Assert.Empty((await blacklist.SearchBlacklist(12345, "Test", 0, 25)).Rows);
+                Assert.Null(await blacklist.GetBannedPlayer(12345));
+                Assert.Empty(await blacklist.GetBlacklist());
+                Assert.Equal([5000000000m], await blacklist.ListOutOfRangeSteamIds());
+                Assert.Equal("Test Typo", Assert.Single(await blacklist.ListOutOfRangeBans()).username);
+                Assert.NotNull(await blacklist.GetOutOfRangeBan(5000000000));
+
+                // An add, an edit and a removal as the blacklist's pages make them: the locked read, the write, and the audit
+                // row in MinerBot's database, each in one transaction on the website's connection
+                Assert.True(await blacklist.RunInTransaction(async transaction =>
+                {
+                    Assert.Null(await blacklist.GetBannedPlayer(12345, transaction));
+                    await blacklist.InsertPlayerBan(Player(12345), transaction);
+                    await audit.AddAudit(Audit("blacklist.add", "blacklist", "12345"), transaction);
+                    return true;
+                }));
+
+                Assert.True(await blacklist.RunInTransaction(async transaction =>
+                {
+                    Assert.NotNull(await blacklist.GetBannedPlayer(12345, transaction));
+                    Assert.True(await blacklist.UpdatePlayerBan(Player(12345, "Edited"), transaction));
+                    await audit.AddAudit(Audit("blacklist.edit", "blacklist", "12345"), transaction);
+                    return true;
+                }));
+
+                Assert.Equal("Edited", (await blacklist.GetBannedPlayer(12345))?.reason);
+
+                Assert.True(await blacklist.RunInTransaction(async transaction =>
+                {
+                    Assert.NotNull(await blacklist.GetBannedPlayer(12345, transaction));
+                    Assert.True(await blacklist.RemovePlayerBan(12345, transaction));
+                    await audit.AddAudit(Audit("blacklist.remove", "blacklist", "12345"), transaction);
+                    return true;
+                }));
+
+                // The row no account number can be, with a locked read of its own
+                Assert.True(await blacklist.RunInTransaction(async transaction =>
+                {
+                    Assert.NotNull(await blacklist.GetOutOfRangeBan(5000000000, transaction));
+                    Assert.True(await blacklist.RemoveOutOfRangeSteamId(5000000000, transaction));
+                    await audit.AddAudit(Audit("blacklist.remove", "blacklist", "5000000000"), transaction);
+                    return true;
+                }));
+
+                Assert.Empty(await blacklist.ListOutOfRangeSteamIds());
+
+                // The audit page's reads, with and without the visitors' addresses, an entry's history, and the latest change
+                // of each entry on a page of the list
+                Assert.Equal(8, (await audit.ListAudit(new AuditQuery())).Total);
+                Assert.Null((await audit.ListAudit(new AuditQuery())).Rows[0].ip);
+                Assert.Equal("203.0.113.7", (await audit.ListAudit(new AuditQuery { IncludeIp = true })).Rows[0].ip);
+                Assert.Equal(3, (await audit.ListAudit(new AuditQuery { TargetType = "blacklist", TargetId = "12345" })).Total);
+                Assert.Equal("blacklist.remove", Assert.Single(await audit.LatestChanges("blacklist", ["12345", "54321"])).action);
+
                 var health = new DatabaseHealthData(factory);
                 Assert.True(await health.Answers(DBConnectionName.Armor, TimeSpan.FromSeconds(5)).WaitAsync(CallLimit, Token));
                 Assert.True(await health.Answers(DBConnectionName.Bot, TimeSpan.FromSeconds(5)).WaitAsync(CallLimit, Token));
 
-                Assert.Equal(["armor.approve", "armor.takedown", "auth.refused", "session.start"],
+                Assert.Equal(["armor.approve", "armor.takedown", "auth.refused", "blacklist.add", "blacklist.edit", "blacklist.remove", "blacklist.remove", "session.start"],
                     (await db.RootQueryAsync<string>($"SELECT action FROM {MariaDbFixture.AuditTable}")).Order(StringComparer.Ordinal));
+                Assert.Equal(0, (await db.RootQueryAsync<long>($"SELECT COUNT(*) FROM {MariaDbFixture.BlacklistTable}")).Single());
                 Assert.Equal(1, (await db.RootQueryAsync<long>($"SELECT COUNT(*) FROM {MariaDbFixture.SessionTable}")).Single());
                 Assert.Equal(2, (await db.RootQueryAsync<long>($"SELECT COUNT(*) FROM {MariaDbFixture.ReviewTable}")).Single());
             });
@@ -278,9 +360,8 @@ namespace DataAccessLibrary.Tests
         // Everything else is refused, checked by MariaDB's error number. {root} is root's own session, for KILL.
         public static TheoryData<string, string> Forbidden => new()
         {
-            // This login only ever adds to the audit log. The bot's own login, which the cPanel account owns, can still
-            // change it.
-            { "read the audit log", $"SELECT * FROM {Bot}.audit_log" },
+            // This login adds to the audit log and reads it back, but never changes or deletes a row. The bot's own login,
+            // which the cPanel account owns, can still change it.
             { "change the audit log", $"UPDATE {Bot}.audit_log SET detail = 'changed' WHERE 1 = 0" },
             { "delete from the audit log", $"DELETE FROM {Bot}.audit_log WHERE 1 = 0" },
             { "truncate the audit log", $"TRUNCATE TABLE {Bot}.audit_log" },
@@ -308,9 +389,9 @@ namespace DataAccessLibrary.Tests
             { "create a procedure in the website's database", $"CREATE PROCEDURE {Site}.rights_check() SELECT 1" },
             { "create a temporary table in MinerBot's database", $"CREATE TEMPORARY TABLE {Bot}.rights_check (id INT)" },
             { "create a temporary table in the website's database", $"CREATE TEMPORARY TABLE {Site}.rights_check (id INT)" },
-            // The website's tables: armor is read and only its status changed, the servers' one column is read, and nothing
-            // else is read or written
-            { "read the blacklist", $"SELECT * FROM {Site}.ihvph_blacklist" },
+            // The website's tables: armor is read and only its status changed, the blacklist is read, added to and deleted
+            // from and four of its columns changed, but never an entry's account, the servers' one column is read, and
+            // nothing else is read or written
             { "read another column of the servers", $"SELECT armor_channel_id FROM {Site}.ihvph_discord_servers" },
             { "read every column of the servers", $"SELECT * FROM {Site}.ihvph_discord_servers" },
             { "add armor", $"INSERT INTO {Site}.ihvph_armor_styles (Author) VALUES ('x')" },
@@ -318,9 +399,10 @@ namespace DataAccessLibrary.Tests
             { "change an armor's ID", $"UPDATE {Site}.ihvph_armor_styles SET ID = ID WHERE 1 = 0" },
             { "change an armor's save string", $"UPDATE {Site}.ihvph_armor_styles SET ColorArray = NULL WHERE 1 = 0" },
             { "delete armor", $"DELETE FROM {Site}.ihvph_armor_styles WHERE 1 = 0" },
-            { "add to the blacklist", $"INSERT INTO {Site}.ihvph_blacklist (steam_id) VALUES (1)" },
-            { "change the blacklist", $"UPDATE {Site}.ihvph_blacklist SET notes = 'changed' WHERE 1 = 0" },
-            { "delete from the blacklist", $"DELETE FROM {Site}.ihvph_blacklist WHERE 1 = 0" },
+            { "change a ban's account number", $"UPDATE {Site}.ihvph_blacklist SET steam_id = steam_id WHERE 1 = 0" },
+            { "truncate the blacklist", $"TRUNCATE TABLE {Site}.ihvph_blacklist" },
+            { "alter the blacklist", $"ALTER TABLE {Site}.ihvph_blacklist ADD COLUMN rights_check INT" },
+            { "lock the blacklist", $"LOCK TABLES {Site}.ihvph_blacklist WRITE" },
             { "add a server", $"INSERT INTO {Site}.ihvph_discord_servers (guild_id, armor_channel_id, map_channel_id, lobby_channel_id, announcements_channel_id) VALUES (1, 1, 1, 1, 1)" },
             { "change a server's channel", $"UPDATE {Site}.ihvph_discord_servers SET armor_channel_id = 1 WHERE 1 = 0" },
             { "change a server's ID", $"UPDATE {Site}.ihvph_discord_servers SET guild_id = guild_id WHERE 1 = 0" },
@@ -374,21 +456,17 @@ namespace DataAccessLibrary.Tests
             });
         }
 
-        // The repositories later pull requests use are refused, which records what PR 5 and later ones must add to the file
+        // The repositories later pull requests use are refused, which records what the server channels page and later ones
+        // must add to the file
         [Fact]
         public async Task RepositoriesNotUsedYetAreRefused()
         {
             await WithLoginAsync(async (db, password) =>
             {
-                var connections = Connections(db, password);
-                var factory = new SQLConnectionFactory(connections);
-                var names = new DatabaseNames(connections);
+                var factory = new SQLConnectionFactory(Connections(db, password));
 
                 var calls = new (string What, Func<Task> Call)[]
                 {
-                    ("AuditLogData.ListAudit", () => new AuditLogData(factory, names).ListAudit(new AuditQuery())),
-                    ("BlacklistData.GetBlacklist", () => new BlacklistData(factory).GetBlacklist()),
-                    ("BlacklistData.InsertPlayerBan", () => new BlacklistData(factory).InsertPlayerBan(new BlacklistModel { steam_id = 12345, username = "Test Player", reason = "Testing", notes = "Made up" })),
                     ("GuildData.GetAllGuilds", () => new GuildData(factory).GetAllGuilds()),
                     ("GuildData.SaveGuild", () => new GuildData(factory).SaveGuild(new Guild { guild_id = 1000000000000000005, armor_channel_id = 1 }))
                 };
@@ -448,7 +526,7 @@ namespace DataAccessLibrary.Tests
             var file = DeployFile("dashboard-rights.sql");
             var tables = TableNames().Matches(file).Select(match => (Database: Database(match.Groups[1].Value), Table: match.Groups[2].Value)).Distinct().ToList();
 
-            Assert.Equal(5, tables.Count);
+            Assert.Equal(6, tables.Count);
 
             foreach (var (database, table) in tables)
             {

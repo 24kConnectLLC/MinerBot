@@ -196,5 +196,45 @@ namespace DataAccessLibrary.Tests
         {
             await RefusedAsync(() => new BlacklistData(database).InsertPlayerBan(new BlacklistModel { steam_id = 0, username = "Test Player", reason = "Testing", notes = "Made up" }));
         }
+
+        // One character past each column's size, counted as MariaDB counts them, so an emoji is one. Strict mode would refuse
+        // it with an error that looks like an outage, and the change it travels with would go too.
+        [Theory]
+        [InlineData("name", "a")]
+        [InlineData("reason", "a")]
+        [InlineData("notes", "a")]
+        [InlineData("name", "\U0001F600")]
+        [InlineData("reason", "\U0001F600")]
+        [InlineData("notes", "\U0001F600")]
+        public async Task BanTextPastTheColumnsIsRefused(string field, string character)
+        {
+            var limit = field switch
+            {
+                "name" => BlacklistData.UsernameLimit,
+                "reason" => BlacklistData.ReasonLimit,
+                _ => BlacklistData.NotesLimit
+            };
+
+            BlacklistModel Player(int length)
+            {
+                var text = string.Concat(Enumerable.Repeat(character, length));
+
+                return new BlacklistModel
+                {
+                    steam_id = 12345,
+                    username = field == "name" ? text : "Test Player",
+                    reason = field == "reason" ? text : "Testing",
+                    notes = field == "notes" ? text : "Made up"
+                };
+            }
+
+            var blacklist = new BlacklistData(database);
+
+            await RefusedAsync(() => blacklist.InsertPlayerBan(Player(limit + 1)));
+            await RefusedAsync(() => blacklist.UpdatePlayerBan(Player(limit + 1)));
+
+            // At the limit it gets as far as the database, which this one isn't
+            await Assert.ThrowsAsync<InvalidOperationException>(() => blacklist.InsertPlayerBan(Player(limit)));
+        }
     }
 }

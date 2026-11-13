@@ -1,0 +1,130 @@
+@page
+@model AuditLogModel
+@using MinerBot.Dashboard.Audit
+@using MinerBot.Dashboard.Blacklist
+@*
+    A GET form, so a filtered page is an address that can be kept or shared. Its boxes' patterns, the select and the date
+    boxes' limits stop anything the page would refuse, which works without scripts. An ID box's pattern lets through 20
+    digits too big for any Discord ID, which the page answers as a filter no row matches. The type and ID filters come
+    from links, such as a blacklist entry's history, and stay hidden in the form.
+*@
+@{
+    ViewData["Title"] = "Audit log";
+
+    // Each row holds a person, an action, a change and, for the Owner, an address, which a column for reading squeezes
+    // into pieces
+    ViewData["Wide"] = true;
+    var filters = Model.Filters;
+}
+<h1>Audit log</h1>
+<p>Every change made on the dashboard, every sign-in and sign-out, and the changes and sign-ins it refused, newest first. Times are in UTC.</p>
+<p class="muted">A form sent back to correct a field, a form that had expired or was incomplete, an action on armor that had since been removed, a cancelled or failed sign-in, and a request turned away before it reached its page, such as one from another site or one over the rate limit, aren't recorded, but the request that ends the sessions of someone taken off the lists is.</p>
+
+<form method="get" action="/admin/audit" class="filters" role="search" aria-label="Filter the audit log">
+    @if (filters.Type.Length > 0)
+    {
+        <input type="hidden" name="type" value="@filters.Type" />
+    }
+    @if (filters.Id.Length > 0)
+    {
+        <input type="hidden" name="id" value="@filters.Id" />
+    }
+    <div class="fields">
+        <div class="field">
+            <label for="person">Discord ID</label>
+            <input type="text" id="person" name="person" value="@filters.Person" inputmode="numeric" pattern="[0-9]{1,20}" maxlength="20" aria-describedby="person-hint" />
+            <p id="person-hint" class="muted">Only this person's rows. Each row's Discord ID links here.</p>
+        </div>
+        <div class="field field-action">
+            <label for="action">Action</label>
+            <select id="action" name="action">
+                <option value="">Any action</option>
+                @foreach (var word in AuditLogModel.Actions)
+                {
+                    @if (word.Word == filters.Action)
+                    {
+                        <option value="@word.Word" selected>@word.Label</option>
+                    }
+                    else
+                    {
+                        <option value="@word.Word">@word.Label</option>
+                    }
+                }
+            </select>
+        </div>
+        <div class="field">
+            <label for="server">Server ID</label>
+            <input type="text" id="server" name="server" value="@filters.Server" inputmode="numeric" pattern="[0-9]{1,20}" maxlength="20" aria-describedby="server-hint" />
+            <p id="server-hint" class="muted">Only rows about this Discord server. None has one yet.</p>
+        </div>
+        @* From and To together, so one never sits on a row without the other *@
+        <div class="field-days">
+            <div class="field">
+                <label for="from">From</label>
+                <input type="date" id="from" name="from" value="@filters.From" min="@BlacklistForm.FirstDay" max="@BlacklistForm.LastDay" aria-describedby="days-hint" />
+            </div>
+            <div class="field">
+                <label for="to">To</label>
+                <input type="date" id="to" name="to" value="@filters.To" min="@BlacklistForm.FirstDay" max="@BlacklistForm.LastDay" aria-describedby="days-hint" />
+            </div>
+        </div>
+    </div>
+    <p id="days-hint" class="muted">Days in UTC, both included.</p>
+    <div class="search-row">
+        <button type="submit" class="button">Filter</button>
+        @if (filters.Any)
+        {
+            <a href="/admin/audit">Clear the filters</a>
+        }
+    </div>
+</form>
+
+@if (Model.About is { } about)
+{
+    <p>Only the rows about @if (about.Link != null) {<a href="@about.Link">@about.Text</a>} else {@about.Text}.</p>
+}
+
+@if (Model.StartAfterEnd)
+{
+    <p>The From day is after the To day, so no row can match. Change one of them.</p>
+}
+else if (Model.Table.Rows.Count == 0)
+{
+    @if (Model.PageNumber > 1)
+    {
+        <p>There's nothing on page @Model.PageNumber. <a href="@Model.Link()">Go to the first page</a>.</p>
+    }
+    else if (filters.Any)
+    {
+        <p>No row matches these filters.</p>
+    }
+    else
+    {
+        <p>The audit log is empty.</p>
+    }
+}
+else
+{
+    <p>@Model.Summary</p>
+    <partial name="_AuditRows" model="Model.Table" />
+}
+
+@if (!Model.StartAfterEnd && Model.PageCount > 1 && Model.PageNumber <= Model.PageCount)
+{
+    <nav aria-label="Pages" class="pager">
+        @if (Model.PageNumber > 1)
+        {
+            <a href="@Model.Link(page: Model.PageNumber - 1)">Previous page</a>
+        }
+        <span>Page @Model.PageNumber of @Model.PageCount</span>
+        @if (Model.PageNumber < Model.PageCount)
+        {
+            <a href="@Model.Link(page: Model.PageNumber + 1)">Next page</a>
+        }
+    </nav>
+}
+
+@if (!Model.ShowsAddresses)
+{
+    <p class="muted">Each row's visitor address is shown to the Owner alone.</p>
+}

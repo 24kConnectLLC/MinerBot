@@ -11,6 +11,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 using MinerBot.Dashboard.Armor;
+using MinerBot.Dashboard.Audit;
 using MinerBot.Dashboard.Security;
 using MinerBot.Dashboard.Tests.Support;
 using MinerBot.Shared.Armor;
@@ -667,12 +668,76 @@ namespace MinerBot.Dashboard.Tests
             Assert.Single(await db.ReviewsAsync());
             Assert.Equal(ArmorStatus.Approved, (await OpenAsync(admin, 46)).Expected);
 
+            // The change's own row, and one written after it, outside the transaction, saying it may not have landed, with
+            // the same action, target and before and after
+            var rows = await ArmorAuditAsync(db);
+            Assert.Equal([AuditOutcome.Ok, AuditOutcome.Unknown], rows.Select(row => row.outcome));
+            Assert.Equal("armor.approve", rows[1].action);
+            Assert.Equal("46", rows[1].target_id);
+            Assert.Equal("""{"Status":"Pending Approval"}""", rows[1].before_json);
+            Assert.Equal("""{"Status":"Approved"}""", rows[1].after_json);
+            Assert.Equal(UnconfirmedChanges.Detail, rows[1].detail);
+            Assert.Equal(rows[0].request_id, rows[1].request_id);
+            Assert.Equal("203.0.113.155", rows[1].ip);
+
             faults.TimeOutAfterCommit = false;
             var again = await PostAsync(admin, 46, "Approve", page);
             await Refused(again, HttpStatusCode.Conflict, ArmorWords.Already(ArmorStatus.Approved));
             Assert.DoesNotContain(ArmorWords.Changed, await TextAsync(again));
             Assert.Contains("class=\"notice notice-done\" role=\"status\"", await again.Content.ReadAsStringAsync(Token));
             Assert.Single(await db.ReviewsAsync());
+            Assert.Equal(AuditOutcome.Refused, (await ArmorAuditAsync(db))[^1].outcome);
+        }
+
+        // A refusal commits only its audit row, so a commit that times out after one leaves the armor as the work found it.
+        // The page says why nothing was done, not that it can't tell, and no row says the approval may have landed.
+        [Fact]
+        public async Task TimeoutAfterARefusalStillShowsTheRefusal()
+        {
+            var db = await fixture.ReadyAsync();
+            await db.AddAsync(Submission(58));
+            var faults = new Faults();
+            await using var factory = Faulty(db, faults);
+            var admin = await ReviewerAsync(factory, "203.0.113.165");
+            var page = await OpenAsync(admin, 58);
+
+            await db.RootExecuteAsync($"UPDATE {MariaDbFixture.ArmorTable} SET ArmorDescription = 'Changed after the page opened' WHERE ID = 58");
+            faults.TimeOutAfterCommit = true;
+
+            var response = await PostAsync(admin, 58, "Approve", page);
+
+            await Refused(response, HttpStatusCode.Conflict, ArmorWords.Changed);
+            Assert.DoesNotContain(ArmorWords.Unsure, await TextAsync(response));
+            Assert.Equal(ArmorStatus.Pending, await db.StatusAsync(58));
+            Assert.Empty(await db.ReviewsAsync());
+            Assert.Equal([AuditOutcome.Refused], (await ArmorAuditAsync(db)).Select(row => row.outcome));
+            Assert.Contains(factory.Logs.Entries, entry => entry.Level == LogLevel.Warning && entry.Message.Contains("which changes nothing"));
+        }
+
+        // The row saying a change may not have landed is best effort: when it can't be written either, the page still says
+        // the change may or may not have been saved, and the warning is logged
+        [Fact]
+        public async Task UnsureRowThatCantBeWrittenStillShowsUnsure()
+        {
+            var db = await fixture.ReadyAsync();
+            await db.AddAsync(Submission(57));
+            var faults = new Faults { TimeOutAfterCommit = true };
+            await using var factory = new DashboardFactory(db, new DashboardFactoryOptions
+            {
+                Services = services =>
+                {
+                    services.Replace(ServiceDescriptor.Transient<IArmorSubmissionData>(provider => new Submissions(ActivatorUtilities.CreateInstance<ArmorSubmissionData>(provider), faults)));
+                    services.Replace(ServiceDescriptor.Transient<IAuditLogData>(provider => new FailingAudit(ActivatorUtilities.CreateInstance<AuditLogData>(provider), "armor.approve", AuditOutcome.Unknown)));
+                }
+            });
+            var admin = await ReviewerAsync(factory, "203.0.113.164");
+
+            var unsure = await PostAsync(admin, 57, "Approve", await OpenAsync(admin, 57));
+
+            await Refused(unsure, HttpStatusCode.ServiceUnavailable, ArmorWords.Unsure);
+            Assert.Equal(ArmorStatus.Approved, await db.StatusAsync(57));
+            Assert.Equal([AuditOutcome.Ok], (await ArmorAuditAsync(db)).Select(row => row.outcome));
+            Assert.Contains(factory.Logs.Entries, entry => entry.Level == LogLevel.Warning && entry.Message.Contains("couldn't be written either"));
         }
 
         // A transaction that loses a deadlock runs again from the start, and its rows are written once
@@ -727,16 +792,24 @@ namespace MinerBot.Dashboard.Tests
             public Task<IReadOnlyList<ArmorReview>> ListReviews(long armorId) => real.ListReviews(armorId);
         }
 
-        sealed class FailingAudit(AuditLogData real, string action) : IAuditLogData
+        // Fails for one action's rows with one outcome: after writing an ok row, as a dropped connection would after the
+        // statement ran, and before writing any other
+        sealed class FailingAudit(AuditLogData real, string action, string outcome = AuditOutcome.Ok) : IAuditLogData
         {
             public async Task AddAudit(AuditEntry entry, DataTransaction? transaction = null)
             {
+                var failing = entry.action == action && entry.outcome == outcome;
+
+                if (failing && outcome != AuditOutcome.Ok)
+                    throw Dropped();
+
                 await real.AddAudit(entry, transaction);
 
-                if (entry.action == action)
+                if (failing)
                     throw Dropped();
             }
 
+            public Task<IReadOnlyList<AuditEntry>> LatestChanges(string targetType, IReadOnlyCollection<string> targetIds) => real.LatestChanges(targetType, targetIds);
             public Task<Page<AuditEntry>> ListAudit(AuditQuery query) => real.ListAudit(query);
         }
 
