@@ -175,6 +175,66 @@ namespace SteamWebAPIAccess.Tests
             Assert.Equal("NONAME", decode(withAllMapNameSlots(value)).map);
         }
 
+        // The Christmas Event is Update 39's official playlist, which also sets Infection. No vector has its flag.
+
+        static Dictionary<string, string> withChristmasFlag(Dictionary<string, string> meta, string boolsProperty = "prop_12")
+        {
+            // In the second of the two uints that hold the bools
+            int bit = (int)NetSettingType1.boolIsChristmasPlaylist - 1 - 32;
+
+            return new Dictionary<string, string>(meta) { [boolsProperty] = (uint.Parse(meta[boolsProperty]) | 1u << bit).ToString() };
+        }
+
+        [Theory]
+        [InlineData("87")]
+        [InlineData("39")]
+        public void ChristmasEventIsNamedInPlaceOfItsInfection(string version)
+        {
+            var vector = findVector("U39 v87", "toggle boolIsInfection");
+
+            Assert.Equal("Christmas Event", decode(withChristmasFlag(withProperty(vector, "prop_7", version))).modes);
+        }
+
+        [Fact]
+        public void ChristmasEventKeepsItsTeams()
+        {
+            var vector = findVector("U39 v87", "boolIsTeams+boolIsInfection");
+
+            Assert.Equal("Team Christmas Event", decode(withChristmasFlag(vector.Meta)).modes);
+        }
+
+        // The event is the mode, so it isn't also a Murder Match
+        [Fact]
+        public void ChristmasFlagWithoutInfectionIsStillTheChristmasEvent()
+        {
+            var vector = findVector("U39 v87", "default lobby");
+
+            Assert.Equal("Christmas Event", decode(withChristmasFlag(vector.Meta)).modes);
+        }
+
+        // 88 and 89 decode with the same layout, but the flag is only known to be right for 87 and 39
+        [Theory]
+        [InlineData("88")]
+        [InlineData("89")]
+        public void ChristmasFlagIsOnlyReadFor87And39(string version)
+        {
+            var vector = findVector("U39 v87", "toggle boolIsInfection");
+
+            Assert.Equal("Infection", decode(withChristmasFlag(withProperty(vector, "prop_7", version))).modes);
+        }
+
+        // Later builds use that bit for other settings, the latest one for its time limit
+        [Theory]
+        [InlineData("U40.1 v92", "prop_12")]
+        [InlineData("U41 beta18 v101", "prop_12")]
+        [InlineData("U41 typo v200", "prop_12")]
+        [InlineData("U41 beta29 v105", "prop_15")]
+        public void ChristmasFlagIsNotReadForLaterBuilds(string build, string boolsProperty)
+        {
+            foreach (var vector in vectors.Where(vector => vector.Build == build))
+                Assert.DoesNotContain("Christmas", decode(withChristmasFlag(vector.Meta, boolsProperty)).modes);
+        }
+
         // The bools are stored in 2 uints, a 65th bool would silently overwrite the first one
         [Fact]
         public void BoolsFitInTheLobbyMetadata()

@@ -2,6 +2,7 @@
 using Discord.WebSocket;
 using MinerBot_2._0.Services;
 using MinerBot_2._0.Attributes;
+using SteamWebAPIAccess;
 using SteamWebAPIAccess.Models;
 using DataAccessLibrary.Armor.Models;
 using DataAccessLibrary.Discord.Models;
@@ -15,6 +16,7 @@ namespace MinerBot_2._0.Jobs
         private readonly ArmorService _ArmorService;
         private readonly DiscordService _DiscordService;
         private readonly NotificationState _state;
+        private readonly TimeProvider _clock;
 
         private readonly DiscordSocketClient _discord;
         private readonly IServiceProvider _services;
@@ -27,14 +29,18 @@ namespace MinerBot_2._0.Jobs
             _SteamAPIService = services.GetRequiredService<SteamAPIService>();
             _DiscordService = services.GetRequiredService<DiscordService>();
             _state = services.GetRequiredService<NotificationState>();
+            _clock = services.GetRequiredService<TimeProvider>();
             _services = services;
         }
 
         [Job("*/5 * * * *")] // Every 5 Minutes
         public async Task NotifyAllGuilds()
         {
+            // One time for the whole run, so the map cooldown is checked and recorded with the same one
+            var now = _clock.GetUtcNow();
+
             var newArmor = await GetNewArmor();
-            var newMaps = await GetNewMaps();
+            var newMaps = await GetNewMaps(now);
             var newLobbies = await GetNewLobbies();
 
             int armorDelivered = 0, mapsDelivered = 0, lobbiesDelivered = 0;
@@ -51,8 +57,11 @@ namespace MinerBot_2._0.Jobs
             // Only now, so a failure before this point leaves these new for the next run.
             // A kind that no server has on has nobody to wait for, so its new items are all recorded as seen. Otherwise they'd be
             // tried again for an hour and then logged as a failure, and the first server to turn that kind on would get them as new.
+            // Maps that no server wants aren't posted, so they start no cooldown.
+            bool mapsOn = AnyServerHasItOn(guild => guild.map_channel_id);
+
             _state.Armor.Commit(newArmor, AnyServerHasItOn(guild => guild.armor_channel_id) ? armorDelivered : newArmor?.Count ?? 0);
-            _state.Maps.Commit(newMaps, AnyServerHasItOn(guild => guild.map_channel_id) ? mapsDelivered : newMaps?.Count ?? 0);
+            _state.Maps.Commit(newMaps, mapsOn ? mapsDelivered : newMaps?.Count ?? 0, postedAt: mapsOn ? now : null);
             _state.Lobbies.Commit(newLobbies, AnyServerHasItOn(guild => guild.lobby_channel_id) ? lobbiesDelivered : newLobbies?.Count ?? 0);
 
             bool AnyServerHasItOn(Func<Guild, ulong> channelId) => guilds.Any(guild => channelId(guild) != Guild.ChannelOff);
@@ -107,7 +116,7 @@ namespace MinerBot_2._0.Jobs
             return sentArmor;
         }
 
-        public async Task<List<Steam.Models.PublishedFileDetailsModel>?> GetNewMaps()
+        public async Task<List<MapPost>?> GetNewMaps(DateTimeOffset now)
         {
             try
             {
@@ -117,11 +126,7 @@ namespace MinerBot_2._0.Jobs
                 if (mapList.Count == 0)
                     return null;
 
-                // The read is only the top of Steam's ranking by last update, so a map moves into it from below when one above is
-                // deleted or hidden. That map is no newer than the oldest one of the first read, unlike a map that was added or updated.
-                _state.MapBaselineTime ??= mapList.Min(map => map.TimeUpdated);
-
-                return _state.Maps.FindNew(mapList).Where(map => map.TimeUpdated > _state.MapBaselineTime).ToList();
+                return _state.Maps.FindNew(mapList, now);
             }
             catch (Exception e)
             {
@@ -130,7 +135,7 @@ namespace MinerBot_2._0.Jobs
             }
         }
 
-        public async Task<int> NotifyNewMap(ulong guildId, ulong channelId, List<Steam.Models.PublishedFileDetailsModel>? newMaps)
+        public async Task<int> NotifyNewMap(ulong guildId, ulong channelId, List<MapPost>? newMaps)
         {
             if (channelId == Guild.ChannelOff)
                 return 0;
@@ -144,7 +149,7 @@ namespace MinerBot_2._0.Jobs
             {
                 var channel = await _discord.GetChannelAsync(channelId) as IMessageChannel;
 
-                foreach (var (text, embeds) in await _SteamAPIService.GetLatestMapsMessages("__**New & Updated Map(s)!**__", newMaps))
+                foreach (var (text, embeds) in await _SteamAPIService.GetLatestMapsMessages(newMaps.Select(post => (post.Map, post.IsNew)).ToList()))
                 {
                     await channel.SendMessageAsync(text: text, embeds: embeds);
                     sentMaps += embeds.Length;
@@ -167,17 +172,12 @@ namespace MinerBot_2._0.Jobs
                 if (!lobbyList.Available)
                     return null;
 
-                return _state.Lobbies.FindNew(lobbyList.Lobbies).Where(lobby => IsInValidVersion(lobby.VersionNumber)).ToList();
+                return _state.Lobbies.FindNew(lobbyList.Lobbies).Where(lobby => GameVersions.Notifies(lobby.VersionNumber)).ToList();
             }
             catch (Exception e)
             {
                 Console.WriteLine($"Couldn't read the lobby list for notifications\n{e.Message}");
                 return null;
-            }
-
-            bool IsInValidVersion(uint versionNumber)
-            {
-                return (versionNumber < 90 && versionNumber >= 87) || versionNumber >= 90;
             }
         }
 

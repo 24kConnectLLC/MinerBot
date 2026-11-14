@@ -19,11 +19,15 @@ namespace SteamWebAPIAccess
 
         public bool IsConnected => _steamAPI.steamClient.IsConnected;
 
+        // GetData is a singleton, so these warnings and the one alert are per run
+        internal UnseenVersions UnseenVersions { get; }
+
         public GetData(ISteamAPIAccess steamAPI, HttpClient httpClient, WebRetryHandler webHandler)
         {
             _steamAPI = steamAPI;
             _httpClient = httpClient;
             _webHandler = webHandler;
+            UnseenVersions = new UnseenVersions(steamAPI);
         }
 
         public void Initilization()
@@ -145,6 +149,9 @@ namespace SteamWebAPIAccess
                     continue;
                 }
 
+                // A version the bot doesn't know is still listed, under Other versions with Modes Unknown
+                UnseenVersions.Report(versionNumber);
+
                 lobbyList.Add(new LobbyInfo()
                 {
                     HostName = hostName,
@@ -231,12 +238,8 @@ namespace SteamWebAPIAccess
 
         // Use WEBAPI Query Files, k_PublishedFileQueryType_RankedByLastUpdatedDate (21), k_PFI_MatchingFileType_Items (0)
         // Learn more: https://partner.steamgames.com/doc/webapi/IPublishedFileService#EPublishedFileInfoMatchingFileType
-        // Ideas:
-        // - Every 15 minutes, run a query that fetches the first 5 latest published items. Have an old list to compare to. If any changes are made then display the differences.
-        // - Make a model for this (if not going to use ids only)
-        // Notes:
-        // - Currently the query type is correct but is going from oldest. Need newest. Maybe get last page.
-        // - Should Probably return ids only. Then use the other steam web api lib to get publishedfiledetails for each one.
+        // The first page has the most recently updated maps, whether they're new or updated. Pages are read until there
+        // are numPerPage public maps, and each map's details come from GetPublishedFileDetails.
         public async Task<List<PublishedFileDetailsModel>> GetLatestWorkshopItems(int numPerPage)
         {
             int pageNum = 1;

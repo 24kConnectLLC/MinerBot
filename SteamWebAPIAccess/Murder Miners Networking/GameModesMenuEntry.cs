@@ -17,7 +17,7 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
         //    Text = "Mode: " + t;
         //}
 
-        public static string GetGameModeText(ulong netSettingsBools, int bonusBools, int maxChars = 999999, uint version = 105)
+        public static string GetGameModeText(ulong netSettingsBools, int bonusBools, int maxChars = 999999, uint version = GameVersions.Current)
         {
             string t = GetGameModeText(netSettingsBools, bonusBools, false, version);
 
@@ -29,6 +29,9 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
         public static string GetGameModeText(ulong netSettingsBools, int bonusBools, bool abbreviate, uint version)
         {
             bool a = abbreviate;
+
+            // Which bools this version has
+            LobbyLayout layout = GameVersions.LayoutOf(version);
 
             bool isMission = (bonusBools & (1 << 0)) != 0;
             bool isInvasion = (bonusBools & (1 << 1)) != 0;
@@ -70,7 +73,10 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
             if (isOn(NetSettingType.boolIsZombies))
                 t += "Horde ";
 
-            if (isOn(NetSettingType.boolIsInfection))
+            // The official Christmas playlist also sets Infection, and the game calls it the Christmas Event
+            if (isChristmasEvent())
+                t += "Christmas Event ";
+            else if (isOn(NetSettingType.boolIsInfection))
                 t += "Infection ";
 
             if (isOn(NetSettingType.boolIsGamenight))
@@ -131,13 +137,13 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
 
             bool isOn(NetSettingType nst)
             {
-                if (NetPropertiesFunctions.UsesLatestLayout(version))
+                if (layout == LobbyLayout.Latest)
                     return GameSettings.GetBool(netSettingsBools, (int)nst - 1);
 
-                if (version >= 93)
+                if (layout == LobbyLayout.Update41Beta || layout == LobbyLayout.Update41BetaShortName)
                     return isOnInOlderBuild<NetSettingType3>(nst.ToString());
 
-                if (version >= 90)
+                if (layout == LobbyLayout.Update40)
                     return isOnInOlderBuild<NetSettingType2>(nst.ToString());
 
                 // If there is a rename in the netsetting then we compensate over here
@@ -154,11 +160,20 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
                     GameSettings.GetBool(netSettingsBools, Convert.ToInt32(olderNst) - 1);
             }
 
+            // Only Update 39 has this flag, and later builds use its bit for other settings
+            bool isChristmasEvent()
+            {
+                return
+                    GameVersions.HasChristmasFlag(version) &&
+                    GameSettings.GetBool(netSettingsBools, (int)NetSettingType1.boolIsChristmasPlaylist - 1);
+            }
+
             bool isMurderMatch()
             {
                 return
                     !isOn(NetSettingType.boolIsCTF) &&
                     !isOn(NetSettingType.boolIsInfection) &&
+                    !isChristmasEvent() &&
                     !isOn(NetSettingType.boolIsZombies) &&
                     !isOn(NetSettingType.boolIsMurderGames) &&
                     !isOn(NetSettingType.boolIsZombienaut) &&

@@ -32,7 +32,7 @@ namespace MinerBot.Tests
         public Exception? Failure { get; set; }
         public ulong? RequestedId { get; private set; }
 
-        // Steam's IDs grow over time, so a higher ID is also a newer map
+        // Steam's IDs grow over time, so a higher ID is also a newer map, and it hasn't been updated since it was made
         public static PublishedFileDetailsModel CreateItem(int id) => new()
         {
             PublishedFileId = (ulong)id,
@@ -40,6 +40,7 @@ namespace MinerBot.Tests
             Description = "A map",
             FileUrl = new Uri("https://example.com/map"),
             Tags = new List<string>(),
+            TimeCreated = DateTime.UnixEpoch.AddDays(id),
             TimeUpdated = DateTime.UnixEpoch.AddDays(id)
         };
 
@@ -163,8 +164,11 @@ namespace MinerBot.Tests
         }
     }
 
-    internal sealed class FakeClock : ISystemClock
+    // A memory cache takes an ISystemClock and the notification job a TimeProvider, so one clock can drive both
+    internal sealed class FakeClock : TimeProvider, ISystemClock
     {
         public DateTimeOffset UtcNow { get; set; } = DateTimeOffset.UtcNow;
+
+        public override DateTimeOffset GetUtcNow() => UtcNow;
     }
 }

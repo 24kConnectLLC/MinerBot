@@ -11,11 +11,8 @@ namespace MinerBot_2._0.Jobs
         public const int MaxFailedRuns = 12;
 
         public SeenItems<ArmorStyle> Armor { get; } = new("armor styles", armor => (ulong)armor.ID);
-        public SeenItems<PublishedFileDetailsModel> Maps { get; } = new("maps", map => map.PublishedFileId);
+        public SeenMaps Maps { get; } = new();
         public SeenItems<LobbyInfo> Lobbies { get; } = new("lobbies", lobby => lobby.LobbyId);
-
-        // When the oldest map of the first good read was last updated, see GuildNotificationJob.GetNewMaps
-        public DateTime? MapBaselineTime { get; set; }
     }
 
     public class SeenItems<T>(string name, Func<T, ulong> getID)
@@ -55,6 +52,102 @@ namespace MinerBot_2._0.Jobs
             {
                 Console.WriteLine($"Gave up on {droppedIDs.Count} new {name} after {NotificationState.MaxFailedRuns} runs that reached no guild");
                 seenIDs.UnionWith(droppedIDs);
+            }
+        }
+    }
+
+    // A map to post, and the update time it's recorded with. That's a copy, because /maps latest shares the map's object.
+    public record MapPost(PublishedFileDetailsModel Map, bool IsNew, DateTime UpdatedAt);
+
+    // Maps are posted when they're new and again when they're updated, so each one's last update is kept, and the time of
+    // its last post for the cooldown. Steam's times are only compared with Steam's, and the bot's time only with the bot's.
+    public class SeenMaps
+    {
+        // So a map that's updated again and again is posted once a day at most
+        public static readonly TimeSpan Cooldown = TimeSpan.FromHours(24);
+
+        record SeenMap(DateTime UpdatedAt, DateTimeOffset? PostedAt);
+
+        private readonly Dictionary<ulong, SeenMap> seen = new();
+        private Dictionary<ulong, int> failedRuns = new();
+
+        public int Count => seen.Count;
+
+        // When the oldest map of the first good read was last updated
+        public DateTime? BaselineTime { get; private set; }
+
+        public List<MapPost> FindNew(List<PublishedFileDetailsModel> maps, DateTimeOffset now)
+        {
+            // Only the first good read records anything, because all of it was there before the bot looked.
+            // The read is only the top of Steam's ranking by last update, so a map moves into it from below when one above is
+            // deleted or hidden. That map is no newer than the oldest one of the first read, unlike a map that was added or updated.
+            if (BaselineTime == null)
+            {
+                BaselineTime = maps.Min(map => map.TimeUpdated);
+
+                foreach (var map in maps)
+                    seen[map.PublishedFileId] = new(map.TimeUpdated, null);
+
+                return [];
+            }
+
+            List<MapPost> posts = new();
+
+            foreach (var map in maps.DistinctBy(map => map.PublishedFileId))
+            {
+                bool isNew;
+
+                if (seen.TryGetValue(map.PublishedFileId, out var record))
+                {
+                    if (map.TimeUpdated <= record.UpdatedAt)
+                        continue;
+
+                    // Not recorded either, so the first read after the cooldown posts the update
+                    if (record.PostedAt is DateTimeOffset postedAt && now - postedAt < Cooldown)
+                        continue;
+
+                    isNew = false;
+                }
+                else if (map.TimeCreated > BaselineTime)
+                    isNew = true;
+                else if (map.TimeUpdated > BaselineTime)
+                    isNew = false;
+                else
+                    continue;
+
+                posts.Add(new(map, isNew, map.TimeUpdated));
+            }
+
+            return posts;
+        }
+
+        // For after the guild loop, with how many of the maps reached a guild, and when, or no time when no server has maps
+        // on. The rest aren't recorded, so the next run finds them again, and runs are counted per map as in SeenItems.
+        public void Commit(List<MapPost>? posts, int delivered, DateTimeOffset? postedAt)
+        {
+            if (posts == null)
+                return;
+
+            foreach (var post in posts.Take(delivered))
+                seen[post.Map.PublishedFileId] = new(post.UpdatedAt, postedAt);
+
+            var undelivered = posts.Skip(delivered).ToList();
+
+            failedRuns = undelivered.ToDictionary(post => post.Map.PublishedFileId, post => failedRuns.GetValueOrDefault(post.Map.PublishedFileId) + 1);
+
+            var dropped = undelivered.Where(post => failedRuns[post.Map.PublishedFileId] >= NotificationState.MaxFailedRuns).ToList();
+
+            if (dropped.Count > 0)
+            {
+                Console.WriteLine($"Gave up on {dropped.Count} new or updated maps after {NotificationState.MaxFailedRuns} runs that reached no guild");
+
+                // With its update, so it isn't found again, but not as a post. Unlike an armor style or a lobby, it's found
+                // again when it's updated, so its count goes too, and that update gets runs of its own.
+                foreach (var post in dropped)
+                {
+                    seen[post.Map.PublishedFileId] = new(post.UpdatedAt, null);
+                    failedRuns.Remove(post.Map.PublishedFileId);
+                }
             }
         }
     }

@@ -13,7 +13,7 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
 
     // Should be filtered by an attribute, but easy new enum instead
     // Latest Build, U41.. usually public build or beta build. Beta build takes priority.
-    // Version 104 and up
+    // GameVersions says which version uses which of these enums.
     enum NetSettingType
     {
         BEGIN_BOOLS,

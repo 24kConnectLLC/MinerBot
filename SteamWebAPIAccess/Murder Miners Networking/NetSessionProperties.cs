@@ -410,27 +410,20 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
 
     public static class NetPropertiesFunctions
     {
-        public static byte GameVersionNumber = 105;
-        public static byte GameVersionNumberOld = 87;
         public const uint INVALID_GAME_VERSION = 42069;
 
-        // Published builds from before version 104 have no Mission, Invasion or BTS properties,
-        // so they keep every property after BTS 3 indices lower.
-        // Version 200 is not newer, it was a typo on an Update 41 branch that still uses the older layout.
-        public const uint LATEST_LAYOUT_VERSION = 104;
-        public const uint TYPO_GAME_VERSION = 200;
+        // Builds before the latest layout have no Mission, Invasion or BTS properties,
+        // so they keep every property after BTS 3 indices lower. GameVersions says which layout a version has.
         public const int MODE_PROPERTIES_COUNT = 3;
 
         public static bool UsesLatestLayout(uint version)
         {
-            return version >= LATEST_LAYOUT_VERSION && version != TYPO_GAME_VERSION;
+            return GameVersions.LayoutOf(version) == LobbyLayout.Latest;
         }
 
         public const int MAP_NAME_LEN = 32;       // max characters
         public const int MAP_NAME_UINT_SLOTS = 8; // 5 uints = 20 bytes
 
-        // Versions before 101 pack a short upper case name into ZMapName0 and ZMapName1 only.
-        public const uint MAP_NAME_SLOTS_VERSION = 101;
         public const int LEGACY_MAP_NAME_LEN = 12;
         public static readonly char[] LegacyValidCharacters = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ ".ToCharArray();
 
@@ -470,7 +463,7 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
             properties.SetProperty(PropertyUsage.Invasion, null);
             properties.SetProperty(PropertyUsage.BTS, null);
 
-            properties.SetVersion(GameVersionNumber);
+            properties.SetVersion((byte)GameVersions.Current);
         }
 
         #region Game Values
@@ -743,7 +736,7 @@ namespace SteamWebAPIAccess.Murder_Miners_Networking
 
         public static string GetMapName(this NetworkSessionProperties properties)
         {
-            if (properties.GetVersion() < MAP_NAME_SLOTS_VERSION)
+            if (!GameVersions.HasLongMapName(GameVersions.LayoutOf(properties.GetVersion())))
                 return getLegacyMapName(properties);
 
             // Ensure all 5 slots exist
