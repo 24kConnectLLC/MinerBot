@@ -36,6 +36,16 @@ jobs:
           MINERBOT_DB_TESTS: required
         run: dotnet test --solution "MinerBot 2.0.sln" --no-build
 
+      # Steam's map times carry no zone and are read as UTC. This runner is on UTC, where reading them in the machine's
+      # zone gives the same answer, so the map embeds are tested again in another zone. The date check fails the step if
+      # the zone didn't take.
+      - name: Test the map times in another zone
+        env:
+          TZ: America/New_York
+        run: |
+          test "$(date +%z)" != "+0000"
+          dotnet test --project MinerBot.Tests --no-build --filter-class "*.MapEmbedTests"
+
       - name: Check the deploy scripts
         run: shellcheck -x -P SCRIPTDIR deploy/*.sh deploy/tests/*.sh deploy/tests/fakes/*
 

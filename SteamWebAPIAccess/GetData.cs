@@ -19,6 +19,8 @@ namespace SteamWebAPIAccess
 
         public bool IsConnected => _steamAPI.steamClient.IsConnected;
 
+        public uint AppID => _steamAPI.appID;
+
         // GetData is a singleton, so these warnings and the one alert are per run
         internal UnseenVersions UnseenVersions { get; }
 
@@ -207,7 +209,11 @@ namespace SteamWebAPIAccess
 
             hostName = string.Join(' ', hostName.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
-            return hostName.Length > MAX_HOST_NAME_LENGTH ? hostName.Substring(0, MAX_HOST_NAME_LENGTH) : hostName;
+            if (hostName.Length <= MAX_HOST_NAME_LENGTH)
+                return hostName;
+
+            // Half of a surrogate pair isn't a valid character
+            return hostName.Substring(0, char.IsHighSurrogate(hostName[MAX_HOST_NAME_LENGTH - 1]) ? MAX_HOST_NAME_LENGTH - 1 : MAX_HOST_NAME_LENGTH);
         }
 
         // Map names are shown inside inline code, and a backtick is the only character of the game's table that ends it
@@ -230,25 +236,43 @@ namespace SteamWebAPIAccess
             return "";
         }
 
-        public async Task<PublishedFileDetailsModel> GetWorkshopItem(ulong id)
+        // Null when Steam's reply has no details for the ID. Steam answers an ID it doesn't have with a placeholder whose
+        // result isn't OK, which WorkshopItems.Check turns down.
+        public async Task<PublishedFileDetailsModel?> GetWorkshopItem(ulong id)
         {
-            var callback = await steamRemoteStorage.GetPublishedFileDetailsAsync(id);
-            return callback.Data.FirstOrDefault();
+            return (await GetWorkshopDetails([id])).FirstOrDefault(item => item.PublishedFileId == id);
         }
+
+        // SteamWebAPI2 catches a failed request and gives no response at all, which says nothing about the maps, so it's
+        // an error here like a timeout, and a lookup can't tell a user that a map doesn't exist while Steam is down.
+        // Steam's list has an entry for every ID it's asked about, so a reply without a list (an empty body, or a failed
+        // result) says nothing about the maps either.
+        async Task<IReadOnlyCollection<PublishedFileDetailsModel>> GetWorkshopDetails(List<ulong> ids)
+        {
+            var response = await steamRemoteStorage.GetPublishedFileDetailsAsync(ids)
+                ?? throw new HttpRequestException("Steam didn't answer the Workshop details request");
+
+            return response.Data ?? throw new InvalidDataException("Steam's Workshop details reply held no list");
+        }
+
+        // Each page of QueryFiles also holds private and unlisted items, so a page of 20 almost always holds five public maps
+        const int QueryPageSize = 20;
+
+        // Steam can list fewer public maps than asked for, so the read stops here with what it has
+        const int MaxQueryPages = 3;
 
         // Use WEBAPI Query Files, k_PublishedFileQueryType_RankedByLastUpdatedDate (21), k_PFI_MatchingFileType_Items (0)
         // Learn more: https://partner.steamgames.com/doc/webapi/IPublishedFileService#EPublishedFileInfoMatchingFileType
         // The first page has the most recently updated maps, whether they're new or updated. Pages are read until there
-        // are numPerPage public maps, and each map's details come from GetPublishedFileDetails.
+        // are numPerPage public maps, and all of their details come from one GetPublishedFileDetails call.
         public async Task<List<PublishedFileDetailsModel>> GetLatestWorkshopItems(int numPerPage)
         {
-            int pageNum = 1;
             var uriArgs = new Dictionary<string, object?>
             {
                 ["query_type"] = 21, //SteamKit2.Internal.EPublishedFileQueryType.k_PublishedFileQueryType_RankedByLastUpdatedDate
-                ["page"] = pageNum,
+                ["page"] = 1,
                 ["cursor"] = "",//*
-                ["numperpage"] = numPerPage,
+                ["numperpage"] = QueryPageSize,
                 ["creator_app_id"] = _steamAPI.appID,
                 ["appid"] = _steamAPI.appID,
                 ["requiretags"] = "",
@@ -277,28 +301,62 @@ namespace SteamWebAPIAccess
 
             try
             {
+                // In Steam's ranking, which the maps keep
+                List<ulong> ids = new();
+
                 using (var steamuser = GetSteamInterface("IPublishedFileService"))
                 {
-                    List<PublishedFileDetailsModel> workshopItems = new List<PublishedFileDetailsModel>();
-
-                    while (workshopItems.Count != numPerPage)
+                    for (int pageNum = 1; pageNum <= MaxQueryPages && ids.Count < numPerPage; pageNum++)
                     {
                         uriArgs["page"] = pageNum;
                         var callback = await steamuser.CallAsync(HttpMethod.Get, "QueryFiles", args: uriArgs);
 
-                        var items = callback.Children[1].Children;
+                        // Read by name, because Steam leaves out the fields an item doesn't have and the rest move up
+                        var items = callback["publishedfiledetails"].Children;
+
+                        if (items.Count == 0)
+                            break;
 
                         foreach (var item in items)
                         {
-                            // Need to filter if visibility is public
-                            if (item.Children[18].Value == "0" && workshopItems.Count < numPerPage)
-                                workshopItems.Add(await GetWorkshopItem(ulong.Parse(item.Children[1].Value)));
-                        }
-                        pageNum++;
-                    }
+                            ulong id = item["publishedfileid"].AsUnsignedLong();
 
-                    return workshopItems;
+                            // Only public maps are listed, and an item without a readable ID or visibility is skipped.
+                            // A page can repeat an item of the one before, if Steam pages by its cursor instead.
+                            if (id == 0 || item["visibility"].AsInteger(-1) != 0 || ids.Contains(id))
+                                continue;
+
+                            ids.Add(id);
+
+                            if (ids.Count == numPerPage)
+                                break;
+                        }
+
+                        // total counts every item of the query, so no later page holds any
+                        int total = callback["total"].AsInteger(-1);
+                        if (total >= 0 && pageNum * QueryPageSize >= total)
+                            break;
+                    }
                 }
+
+                List<PublishedFileDetailsModel> workshopItems = new();
+
+                // GetPublishedFileDetails refuses an empty list
+                if (ids.Count > 0)
+                {
+                    var details = (await GetWorkshopDetails(ids)).DistinctBy(item => item.PublishedFileId).ToDictionary(item => item.PublishedFileId);
+
+                    // A map removed or hidden since the query is left out, so it can't be posted with empty fields
+                    foreach (var id in ids)
+                        if (details.TryGetValue(id, out var item) && WorkshopItems.Check(item, _steamAPI.appID, unlistedAllowed: false) == WorkshopItemCheck.Shown)
+                            workshopItems.Add(item);
+                }
+
+                // The callers read an empty list as Steam failing
+                if (workshopItems.Count == 0)
+                    Console.WriteLine("Error getting the latest Workshop Items: Steam listed no public maps");
+
+                return workshopItems;
             }
             catch(Exception e)
             {
@@ -379,19 +437,23 @@ namespace SteamWebAPIAccess
             return sessionProperties;
         }
 
-        public async Task<PlayerSummaryModel> GetPlayerSummaries(ulong steamid)
+        // Null when Steam has no such player, which SteamWebAPI2 answers with no response at all
+        public async Task<PlayerSummaryModel?> GetPlayerSummaries(ulong steamid)
         {
             var playerSummaryResponse = await steamUser.GetPlayerSummaryAsync(steamid);
-            return playerSummaryResponse.Data;
+            return playerSummaryResponse?.Data;
         }
 
-        public async Task<ulong> ResolveVanityURL(string vanityURL)
+        // Null when nobody has the name. Steam answers that with success 42 and "No match", and the fields come in any order.
+        public async Task<ulong?> ResolveVanityURL(string vanityURL)
         {
             var uriArgs = new Dictionary<string, object?> { ["vanityurl"] = vanityURL };
             using (var steamuser = GetSteamInterface("ISteamUser"))
             {
                 var callback = await steamuser.CallAsync(HttpMethod.Get, "ResolveVanityURL", args: uriArgs);
-                return ulong.Parse(callback.Children[0].Value);
+
+                ulong steamId = callback["steamid"].AsUnsignedLong();
+                return callback["success"].AsInteger() == 1 && steamId != 0 ? steamId : null;
             }
         }
 

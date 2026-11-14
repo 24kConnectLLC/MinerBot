@@ -59,7 +59,9 @@ namespace MinerBot_2._0.Attributes
             if (TryUse((id, contextId), now, out var usableAt))
                 return Task.FromResult(PreconditionResult.FromSuccess());
 
-            return Task.FromResult(PreconditionResult.FromError($"This command is usable <t:{((DateTimeOffset)usableAt).ToUnixTimeSeconds()}:R>."));
+            // A refused click is about the buttons, not the command that made them, which has its own cooldown
+            var refused = context.Interaction is IComponentInteraction ? "You can use these buttons again" : "This command is usable";
+            return Task.FromResult(PreconditionResult.FromError($"{refused} <t:{((DateTimeOffset)usableAt).ToUnixTimeSeconds()}:R>."));
         }
 
         // The decision and the use it adds are stored in one step, so two uses at the same moment can't both get through.

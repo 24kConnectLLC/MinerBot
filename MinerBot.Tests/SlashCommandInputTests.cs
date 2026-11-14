@@ -2,6 +2,7 @@ using System.Text.Json;
 using MinerBot_2._0;
 using MinerBot_2._0.Extensions;
 using MinerBot_2._0.Services;
+using Steam.Models;
 
 namespace MinerBot.Tests
 {
@@ -135,50 +136,131 @@ namespace MinerBot.Tests
             Assert.Equal(["Armor List: All"], discord.Single("followup").EmbedTitles);
         }
 
+        const string BadMapTitle = "Error: Please Provide a valid Steam Workshop Map URL/Link...";
+        const string NoPublicMapTitle = "Error: Steam has no public map with that ID...";
+        const string OtherGameTitle = "Error: That isn't a Murder Miners map...";
+        const string UnreachableTitle = "Error: Steam can't be reached right now...";
+        const string BadProfileTitle = "Error: Please Provide a valid Steam User Profile URL/Link...";
+        const string NoProfileTitle = "Error: Steam has no profile for that link or ID...";
+
+        // Steam isn't asked about anything but a Workshop link or a map's ID
         [Theory]
         [InlineData("not a link")]
-        [InlineData("1234567890")]
+        [InlineData("0")]
         [InlineData("https://steamcommunity.com/sharedfiles/filedetails/")]
         [InlineData("https://steamcommunity.com/sharedfiles/filedetails/?id=abc")]
         [InlineData("https://steamcommunity.com/sharedfiles/filedetails/?id=-1")]
         [InlineData("https://steamcommunity.com/sharedfiles/filedetails/?id=99999999999999999999999")]
+        [InlineData("https://steamcommunity.com.example.com/sharedfiles/filedetails/?id=1234567890")]
+        [InlineData("https://example.com/steamcommunity.com/sharedfiles/filedetails/?id=1234567890")]
         public async Task BadMapLinkGetsAFriendlyReply(string link)
         {
             await using var discord = await FakeDiscord.StartAsync();
 
             await discord.SendSlashCommandAsync("maps", "lookup", Option("map-url", link));
 
-            Assert.StartsWith("Error: Please Provide a valid Steam Workshop Map", Assert.Single(discord.Single("followup").EmbedTitles));
+            Assert.Equal(["defer", "followup"], discord.StepNames);
+            var reply = discord.Single("followup");
+            Assert.Equal([BadMapTitle], reply.EmbedTitles);
+            Assert.Contains("only the map's ID", Assert.Single(reply.EmbedDescriptions));
             Assert.Null(discord.Steam.RequestedId);
         }
 
-        [Fact]
-        public async Task MapLinkWorks()
+        [Theory]
+        [InlineData(MapUrl)]
+        [InlineData("1234567890")]
+        [InlineData("<https://steamcommunity.com/workshop/filedetails/?id=1234567890>")]
+        [InlineData("http://www.steamcommunity.com/sharedfiles/filedetails?id=1234567890&searchtext=")]
+        public async Task MapLinkWorks(string link)
         {
             await using var discord = await FakeDiscord.StartAsync();
 
-            await discord.SendSlashCommandAsync("maps", "lookup", Option("map-url", MapUrl));
+            await discord.SendSlashCommandAsync("maps", "lookup", Option("map-url", link));
 
             Assert.Equal(1234567890UL, discord.Steam.RequestedId);
             Assert.Equal(["Map 1"], discord.Single("followup").EmbedTitles);
         }
 
+        // An unlisted map is meant to be shared by its link
         [Fact]
-        public async Task MapThatSteamDoesNotReturnGetsAFriendlyReply()
+        public async Task UnlistedMapIsShown()
         {
             await using var discord = await FakeDiscord.StartAsync();
-            discord.Steam.WorkshopItem = null!;
+            discord.Steam.WorkshopItem!.Visibility = PublishedFileVisibility.Unknown;
 
             await discord.SendSlashCommandAsync("maps", "lookup", Option("map-url", MapUrl));
 
-            Assert.StartsWith("Error: Please Provide a valid Steam Workshop Map", Assert.Single(discord.Single("followup").EmbedTitles));
+            Assert.Equal(["Map 1"], discord.Single("followup").EmbedTitles);
         }
 
+        // The same reply whatever the reason, so the bot never confirms that a private map exists
+        [Theory]
+        [InlineData("no details")]
+        [InlineData("removed")]
+        [InlineData("banned")]
+        [InlineData("friends-only")]
+        [InlineData("private")]
+        [InlineData("another game's private item")]
+        public async Task MapThatSteamDoesNotShowGetsAFriendlyReply(string reason)
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+            var map = discord.Steam.WorkshopItem!;
+
+            switch (reason)
+            {
+                case "no details": discord.Steam.WorkshopItem = null; break;
+                case "removed": discord.Steam.WorkshopItem = new PublishedFileDetailsModel { PublishedFileId = 1234567890, Result = 9, Visibility = PublishedFileVisibility.Unknown }; break;
+                case "banned": map.Banned = true; break;
+                case "friends-only": map.Visibility = PublishedFileVisibility.FriendsOnly; break;
+                case "private": map.Visibility = PublishedFileVisibility.Private; break;
+                case "another game's private item": map.Visibility = PublishedFileVisibility.Private; map.ConsumerAppId = 4000; break;
+            }
+
+            await discord.SendSlashCommandAsync("maps", "lookup", Option("map-url", MapUrl));
+
+            Assert.Equal(["defer", "GetWorkshopItem", "followup"], discord.StepNames);
+            var reply = discord.Single("followup");
+            Assert.Equal([NoPublicMapTitle], reply.EmbedTitles);
+            Assert.Equal(["It may have been removed or hidden."], reply.EmbedDescriptions);
+        }
+
+        [Fact]
+        public async Task MapOfAnotherGameGetsItsOwnReply()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+            discord.Steam.WorkshopItem!.ConsumerAppId = 4000;
+
+            await discord.SendSlashCommandAsync("maps", "lookup", Option("map-url", MapUrl));
+
+            Assert.Equal([OtherGameTitle], discord.Single("followup").EmbedTitles);
+        }
+
+        [Fact]
+        public async Task MapLookupWhileSteamCanNotBeReachedSaysSo()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+            discord.Steam.Failure = new HttpRequestException("Steam didn't answer the Workshop details request");
+
+            await discord.SendSlashCommandAsync("maps", "lookup", Option("map-url", MapUrl));
+
+            Assert.Equal(["defer", "GetWorkshopItem", "followup"], discord.StepNames);
+            var reply = discord.Single("followup");
+            Assert.Equal([UnreachableTitle], reply.EmbedTitles);
+            Assert.Equal(["Please try again later."], reply.EmbedDescriptions);
+            Assert.Contains("Couldn't look up a map on Steam: HttpRequestException: Steam didn't answer the Workshop details request", discord.ConsoleText);
+        }
+
+        // Steam isn't asked about anything but a profile link or a SteamID64
         [Theory]
         [InlineData("https://steamcommunity.com/profiles/abc")]
         [InlineData("https://steamcommunity.com/profiles/")]
         [InlineData("https://steamcommunity.com/profiles/99999999999999999999999")]
-        [InlineData("https://steamcommunity.com/profiles/76561197960265729/games")]
+        [InlineData("https://steamcommunity.com/profiles/1234567890")]
+        [InlineData("https://steamcommunity.com/id/")]
+        [InlineData("https://steamcommunity.com/id/foo.bar")]
+        [InlineData("https://steamcommunity.com.example.com/id/foo")]
+        [InlineData("https://example.com/steamcommunity.com/id/foo")]
+        [InlineData("42")]
         [InlineData("not a link")]
         public async Task BadProfileLinkGetsAFriendlyReply(string link)
         {
@@ -186,21 +268,88 @@ namespace MinerBot.Tests
 
             await discord.SendSlashCommandAsync("more", "steam_id", Option("profile-url", link));
 
-            Assert.StartsWith("Error: Please Provide a valid Steam User Profile", Assert.Single(discord.Single("followup").EmbedTitles));
+            Assert.Equal(["defer", "followup"], discord.StepNames);
+            Assert.Equal([BadProfileTitle], discord.Single("followup").EmbedTitles);
             Assert.Null(discord.Steam.RequestedId);
+            Assert.Null(discord.Steam.RequestedName);
         }
 
         [Theory]
         [InlineData("https://steamcommunity.com/profiles/76561197960265729")]
         [InlineData("https://steamcommunity.com/profiles/76561197960265729/")]
+        [InlineData("https://steamcommunity.com/profiles/76561197960265729/games")]
+        [InlineData("<http://www.steamcommunity.com/profiles/76561197960265729>")]
+        [InlineData("76561197960265729")]
         public async Task ProfileLinkWorks(string link)
         {
             await using var discord = await FakeDiscord.StartAsync();
 
             await discord.SendSlashCommandAsync("more", "steam_id", Option("profile-url", link));
 
+            Assert.Equal(["defer", "GetPlayerSummaries", "followup"], discord.StepNames);
             Assert.Equal(76561197960265729UL, discord.Steam.RequestedId);
             Assert.Equal(["Steam IDs for Player:"], discord.Single("followup").EmbedTitles);
+        }
+
+        // .../id/foo/games was once looked up as foogames, which can be someone else's name
+        [Fact]
+        public async Task CustomUrlIsLookedUpByItsName()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+
+            await discord.SendSlashCommandAsync("more", "steam_id", Option("profile-url", "https://steamcommunity.com/id/foo/games"));
+
+            Assert.Equal(["defer", "ResolveVanityURL", "GetPlayerSummaries", "followup"], discord.StepNames);
+            Assert.Equal("foo", discord.Steam.RequestedName);
+            Assert.Equal(FakeGetData.VanitySteamId, discord.Steam.RequestedId);
+            Assert.Equal(["Steam IDs for Player:"], discord.Single("followup").EmbedTitles);
+            Assert.Contains($"SteamID 64: `{FakeGetData.VanitySteamId}`", Assert.Single(discord.Single("followup").EmbedDescriptions));
+        }
+
+        // A name nobody has once became SteamID 42, and the friendly reply never showed
+        [Fact]
+        public async Task CustomUrlThatNobodyHasGetsAFriendlyReply()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+            discord.Steam.VanityId = null;
+
+            await discord.SendSlashCommandAsync("more", "steam_id", Option("profile-url", "https://steamcommunity.com/id/nobody"));
+
+            Assert.Equal(["defer", "ResolveVanityURL", "followup"], discord.StepNames);
+            Assert.Equal([NoProfileTitle], discord.Single("followup").EmbedTitles);
+        }
+
+        // A SteamID64 on its own is read too, so the reply speaks of a link or an ID
+        [Theory]
+        [InlineData("https://steamcommunity.com/profiles/76561197960265729")]
+        [InlineData("76561197960265729")]
+        public async Task ProfileThatSteamDoesNotHaveGetsAFriendlyReply(string link)
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+            discord.Steam.PlayerSummary = null;
+
+            await discord.SendSlashCommandAsync("more", "steam_id", Option("profile-url", link));
+
+            Assert.Equal(["defer", "GetPlayerSummaries", "followup"], discord.StepNames);
+            Assert.Equal(76561197960265729UL, discord.Steam.RequestedId);
+            Assert.Equal([NoProfileTitle], discord.Single("followup").EmbedTitles);
+        }
+
+        [Theory]
+        [InlineData("https://steamcommunity.com/id/foo", "ResolveVanityURL")]
+        [InlineData("https://steamcommunity.com/profiles/76561197960265729", "GetPlayerSummaries")]
+        public async Task ProfileLookupWhileSteamCanNotBeReachedSaysSo(string link, string failedCall)
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+            discord.Steam.Failure = new TimeoutException("No answer from api.steampowered.com within 10 seconds");
+
+            await discord.SendSlashCommandAsync("more", "steam_id", Option("profile-url", link));
+
+            Assert.Equal(["defer", failedCall, "followup"], discord.StepNames);
+            var reply = discord.Single("followup");
+            Assert.Equal([UnreachableTitle], reply.EmbedTitles);
+            Assert.Equal(["Please try again later."], reply.EmbedDescriptions);
+            Assert.Contains("Couldn't look up a Steam profile: TimeoutException: No answer from api.steampowered.com within 10 seconds", discord.ConsoleText);
         }
     }
 }

@@ -9,8 +9,12 @@ namespace SteamWebAPIAccess.Tests
     {
         readonly ConcurrentQueue<Func<CancellationToken, Task<HttpResponseMessage>>> answers = new();
         readonly ConcurrentQueue<(HttpMethod Method, Uri? Uri)> requests = new();
+        readonly ConcurrentQueue<string> bodies = new();
 
         public IReadOnlyList<(HttpMethod Method, Uri? Uri)> Requests => requests.ToList();
+
+        // The body of each request, in the same order, empty for a GET. A POST carries its arguments here.
+        public IReadOnlyList<string> Bodies => bodies.ToList();
 
         public FakeWeb Answer(HttpStatusCode status, string body = "") =>
             Add(_ => Task.FromResult(new HttpResponseMessage(status) { Content = new StringContent(body) }));
@@ -32,14 +36,15 @@ namespace SteamWebAPIAccess.Tests
             return this;
         }
 
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             requests.Enqueue((request.Method, request.RequestUri));
+            bodies.Enqueue(request.Content == null ? "" : await request.Content.ReadAsStringAsync(cancellationToken));
 
             if (!answers.TryDequeue(out var answer))
                 throw new InvalidOperationException($"The test has no answer left for {request.RequestUri}");
 
-            return answer(cancellationToken);
+            return await answer(cancellationToken);
         }
 
         sealed class EndlessContent : HttpContent

@@ -18,24 +18,39 @@ namespace MinerBot.Tests
 
     internal sealed class FakeGetData(Action<string> addStep) : IGetData
     {
+        public const uint MurderMinersAppId = 274900;
+        public const ulong VanitySteamId = 76561197960265729;
+
         public List<PublishedFileDetailsModel> LatestItems { get; set; } = Enumerable.Range(1, 5).Select(CreateItem).ToList();
-        public PublishedFileDetailsModel WorkshopItem { get; set; } = CreateItem(1);
-        public PlayerSummaryModel PlayerSummary { get; set; } = new()
+        public PublishedFileDetailsModel? WorkshopItem { get; set; } = CreateItem(1);
+        public PlayerSummaryModel? PlayerSummary { get; set; } = new()
         {
             Nickname = "Player",
             AvatarFullUrl = "https://example.com/avatar.png",
             ProfileUrl = "https://steamcommunity.com/profiles/1"
         };
+
+        // What Steam finds for a custom URL's name, null when nobody has it
+        public ulong? VanityId { get; set; } = VanitySteamId;
+
         public List<LobbyInfo> Lobbies { get; set; } = new();
         public bool LobbiesAvailable { get; set; } = true;
         public Exception? LobbyFailure { get; set; }
         public Exception? Failure { get; set; }
         public ulong? RequestedId { get; private set; }
+        public string? RequestedName { get; private set; }
 
-        // Steam's IDs grow over time, so a higher ID is also a newer map, and it hasn't been updated since it was made
+        public uint AppID => MurderMinersAppId;
+
+        // Steam's IDs grow over time, so a higher ID is also a newer map, and it hasn't been updated since it was made.
+        // It passes Steam's checks: found, public and a Murder Miners map.
         public static PublishedFileDetailsModel CreateItem(int id) => new()
         {
             PublishedFileId = (ulong)id,
+            Result = 1,
+            CreatorAppId = MurderMinersAppId,
+            ConsumerAppId = MurderMinersAppId,
+            Visibility = PublishedFileVisibility.Public,
             Title = $"Map {id}",
             Description = "A map",
             FileUrl = new Uri("https://example.com/map"),
@@ -46,16 +61,22 @@ namespace MinerBot.Tests
 
         public Task<List<PublishedFileDetailsModel>> GetLatestWorkshopItems(int numPerPage) => Call(LatestItems.Take(numPerPage).ToList());
 
-        public Task<PublishedFileDetailsModel> GetWorkshopItem(ulong id)
+        public Task<PublishedFileDetailsModel?> GetWorkshopItem(ulong id)
         {
             RequestedId = id;
             return Call(WorkshopItem);
         }
 
-        public Task<PlayerSummaryModel> GetPlayerSummaries(ulong steamid)
+        public Task<PlayerSummaryModel?> GetPlayerSummaries(ulong steamid)
         {
             RequestedId = steamid;
             return Call(PlayerSummary);
+        }
+
+        public Task<ulong?> ResolveVanityURL(string vanityURL)
+        {
+            RequestedName = vanityURL;
+            return Call(VanityId);
         }
 
         public Task<LobbyListResult> GetServerList() => LobbyFailure != null
@@ -79,7 +100,6 @@ namespace MinerBot.Tests
         public string InviteUser(ulong lobbyID, ulong userSteamID) => throw new NotImplementedException();
         public Task<NetworkSessionProperties> ReadLobbyMetadata(IReadOnlyDictionary<string, string> keyPairs) => throw new NotImplementedException();
         public void Reconnect() => throw new NotImplementedException();
-        public Task<ulong> ResolveVanityURL(string vanityURL) => throw new NotImplementedException();
     }
 
     internal sealed class FakeArmorData(Action<string> addStep) : IArmorData

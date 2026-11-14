@@ -87,6 +87,7 @@ namespace MinerBot.Tests
     {
         const string QueryStep = nameof(FakeGetData.GetLatestWorkshopItems);
 
+        // The second click is someone else's on their own buttons, because one person's clicks have a cooldown
         [Fact]
         public async Task PageButtonsReuseTheQueryOfLatestMaps()
         {
@@ -94,7 +95,7 @@ namespace MinerBot.Tests
 
             await discord.SendSlashCommandAsync("maps", "latest");
             await discord.SendButtonAsync($"maplist:{discord.UserId},0,next");
-            await discord.SendButtonAsync($"maplist:{discord.UserId},1,next");
+            await discord.SendButtonAsync($"maplist:{discord.OtherUserId},1,next", userId: discord.OtherUserId);
 
             Assert.Equal(["defer", QueryStep, "followup", "defer update", "edit original", "defer update", "edit original"], discord.StepNames);
             Assert.Equal(["Map 3"], discord.Steps[^1].EmbedTitles);

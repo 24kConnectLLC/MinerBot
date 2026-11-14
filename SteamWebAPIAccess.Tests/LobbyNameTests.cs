@@ -20,6 +20,18 @@ namespace SteamWebAPIAccess.Tests
             Assert.Equal(32, GetData.CleanHostName(new string('a', 4000)).Length);
         }
 
+        // This emoji and this styled letter are each two UTF-16 units, and half of one isn't a character. An emoji made of
+        // several, such as a flag, can still be cut between them.
+        [Fact]
+        public void CapNeverSplitsASurrogatePair()
+        {
+            var smiley = char.ConvertFromUtf32(0x1F600);
+            var scriptM = char.ConvertFromUtf32(0x1D4DC);
+
+            Assert.Equal(new string('a', 31), GetData.CleanHostName(new string('a', 31) + smiley));
+            Assert.Equal(new string('a', 30) + scriptM, GetData.CleanHostName(new string('a', 30) + scriptM + scriptM));
+        }
+
         [Theory]
         [InlineData("Bob's_Map.v2!", "Bob's_Map.v2!")]
         [InlineData("a`b", "a'b")]

@@ -153,6 +153,7 @@ namespace MinerBot.Tests
             Assert.Equal([$"maplist:{discord.UserId},0,previous", $"maplist:{discord.UserId},0,next"], reply.ButtonIds);
         }
 
+        // GetData returns an empty list when Steam fails
         [Fact]
         public async Task LatestMapsWithNoResultGetsAFailureReply()
         {
@@ -162,7 +163,12 @@ namespace MinerBot.Tests
             await discord.SendSlashCommandAsync("maps", "latest");
 
             Assert.Equal(["defer", "GetLatestWorkshopItems", "followup"], discord.StepNames);
-            Assert.Equal("Something went wrong with that command. Please try again later.", discord.Single("followup").Content);
+
+            var reply = discord.Single("followup");
+            Assert.True(string.IsNullOrEmpty(reply.Content));
+            Assert.Equal(["Error: Steam can't be reached right now..."], reply.EmbedTitles);
+            Assert.Equal(["Please try again later."], reply.EmbedDescriptions);
+            Assert.Empty(reply.ButtonIds);
         }
 
         [Fact]
@@ -335,7 +341,8 @@ namespace MinerBot.Tests
 
             var reply = discord.Single("followup");
             Assert.True(reply.IsEphemeral);
-            Assert.Equal("Something went wrong with that command. Please try again later.", reply.Content);
+            Assert.True(reply.AllowsNoMentions);
+            Assert.Equal("Steam can't be reached right now. Please try again later.", reply.Content);
         }
     }
 }
