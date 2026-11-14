@@ -136,23 +136,33 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
         public SteamAPIService _SteamAPIService { get; set; }
 
         [RateLimit(5)]
-        [SlashCommand("latest", "Returns the 5 detailed results of the most Newst Maps on the Murder Miners Workshop.")]
+        [SlashCommand("latest", "Returns up to 5 detailed results of the newest Maps on the Murder Miners Workshop.")]
         public async Task GetLatestWorkshopItems()
         {
             await DeferAsync();
 
+            // One read for the embed and the buttons, which can be fewer than five maps
+            var latestMaps = await _SteamAPIService.GetLatestWorkshopItems();
+
+            // GetData returns an empty list when Steam fails
+            if (latestMaps.Count == 0)
+            {
+                await FollowupAsync(embed: SteamAPIService.SteamUnreachableEmbed());
+                return;
+            }
+
             var component = new ComponentBuilder()
                 .WithButton("Previous", $"maplist:{Context.Interaction.User.Id},0,previous", disabled: true)
-                .WithButton("Next", $"maplist:{Context.Interaction.User.Id},0,next")
+                .WithButton("Next", $"maplist:{Context.Interaction.User.Id},0,next", disabled: latestMaps.Count == 1)
                 .Build();
 
-            await FollowupAsync("__**Latest Maps: (1/5)**__", embed: await _SteamAPIService.GetLatestMapsEmbed(),
+            await FollowupAsync($"__**Latest Maps: (1/{latestMaps.Count})**__", embed: await _SteamAPIService.GetLatestMapsEmbed(latestMaps),
                 components: component);
         }
 
         [RateLimit(3)]
         [SlashCommand("lookup", "Returns a detailed result of the Murder Miners Workshop Map Link you provided.")]
-        public async Task GetWorkshopItem([Summary(description: "Required: A Steam Workshop Link of the Map.")] string mapURL)
+        public async Task GetWorkshopItem([Summary(description: "Required: A Steam Workshop Link or ID of the Map.")] string mapURL)
         {
             await DeferAsync();
 
@@ -213,7 +223,10 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
         await ModifyOriginalResponseAsync(a => { a.Embed = embed; a.Components = component; });
     }
 
+    // A click can ask Steam whenever the cache is empty, so the clicks have a cooldown like the commands. It's checked after
+    // DoUserCheck, so a click on someone else's buttons doesn't start one.
     [DoUserCheck]
+    [RateLimit(2)]
     [ComponentInteraction("maplist:*,*,*", ignoreGroupNames: true, TreatAsRegex = false)]
     public async Task ChangeMapListPage(string id, int page, string direction)
     {
@@ -221,16 +234,27 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
 
         page += (direction == "previous" ? -1 : 1);
 
-        var embed = await _SteamAPIService.GetLatestMapsEmbed(page: page);
+        var latestMaps = await _SteamAPIService.GetLatestWorkshopItems();
 
-        int maxItemPage = 4; // We know this because latest map query always returns 5 maps. And 1 map per page starting from 0.
+        // The message keeps its page, and only the person who clicked is told why
+        if (latestMaps.Count == 0)
+        {
+            await FollowupAsync(SteamAPIService.SteamUnreachableText, ephemeral: true, allowedMentions: AllowedMentions.None);
+            return;
+        }
+
+        // A page past the end shows the last one, because the list can be shorter than when the buttons were made. One map per page.
+        var lastPage = latestMaps.Count - 1;
+        page = Math.Clamp(page, 0, lastPage);
+
+        var embed = await _SteamAPIService.GetLatestMapsEmbed(latestMaps, page);
 
         var component = new ComponentBuilder()
                 .WithButton("Previous", $"maplist:{Context.Interaction.User.Id},{page},previous", disabled: (page == 0 ? true : false))
-                .WithButton("Next", $"maplist:{Context.Interaction.User.Id},{page},next", disabled: (page >= maxItemPage ? true : false))
+                .WithButton("Next", $"maplist:{Context.Interaction.User.Id},{page},next", disabled: (page == lastPage ? true : false))
                 .Build();
 
-        await ModifyOriginalResponseAsync(a => { a.Embed = embed; a.Components = component; a.Content = $"__**Latest Maps: ({page + 1}/5)**__"; });
+        await ModifyOriginalResponseAsync(a => { a.Embed = embed; a.Components = component; a.Content = $"__**Latest Maps: ({page + 1}/{latestMaps.Count})**__"; });
     }
 
     // Use [ComponentInteraction] to handle message component interactions. Message component interaction with the matching customId will be executed.

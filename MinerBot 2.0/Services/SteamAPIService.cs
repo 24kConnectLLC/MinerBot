@@ -6,8 +6,6 @@ using Steam.Models.SteamCommunity;
 using SteamKit2;
 using SteamWebAPIAccess;
 using SteamWebAPIAccess.Models;
-using System.Collections.Specialized;
-using System.Web;
 
 namespace MinerBot_2._0.Services
 {
@@ -19,7 +17,8 @@ namespace MinerBot_2._0.Services
         private const int MaxMapDescriptionLength = 650; // Leaves room for most lists of five maps in one message
         public string WorkshopItemDetailsURI { get; } = "https://steamcommunity.com/workshop/filedetails/?id=";
 
-        public int ItemsPerPage = 1;
+        // Steam failing can only be waited out. The page buttons say it in a private message, and the commands in an embed.
+        public const string SteamUnreachableText = "Steam can't be reached right now. Please try again later.";
 
         public SteamAPIService(IGetData data, IMemoryCache cache)
         {
@@ -95,7 +94,7 @@ namespace MinerBot_2._0.Services
                 {
                     bool fullLobby = lobby.CurrentPlayers == lobby.MaxPlayers; // \u200b // _ _
                     string hostName = String.IsNullOrWhiteSpace(UIUtils.cleanTextForEmbed(lobby.HostName)) ? "Host Unknown" : UIUtils.cleanTextForEmbed(lobby.HostName);
-                    string mapName = String.IsNullOrWhiteSpace(lobby.MapName) ? "Map Unknown" : lobby.MapName; // Already cleaned in GetData, and cleanTextForEmbed would strip its punctuation
+                    string mapName = String.IsNullOrWhiteSpace(lobby.MapName) ? "Map Unknown" : lobby.MapName; // Already cleaned in GetData
 
                     // Written by the bot, not the host. For a version whose layout isn't known exactly, the modes would be guesses.
                     string lobbyModes = String.IsNullOrWhiteSpace(lobby.Modes) || !GameVersions.ModesTrusted(lobby.VersionNumber) ? "Modes Unknown" : lobby.Modes;
@@ -155,19 +154,6 @@ namespace MinerBot_2._0.Services
             return GetData.InviteUser(lobbyID, userID);
         }
 
-        public async Task<PublishedFileDetailsModel?> GetWorkshopItem(string url)
-        {
-            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
-                return null;
-
-            NameValueCollection queryParameters = HttpUtility.ParseQueryString(uri.Query);
-
-            if (!ulong.TryParse(queryParameters["id"], out ulong id))
-                return null;
-
-            return await GetData.GetWorkshopItem(id);
-        }
-
         public async Task<List<PublishedFileDetailsModel>> GetLatestWorkshopItems(int totalMaps = 5)
         {
             string key = $"LatestWorkshopItems{totalMaps}";
@@ -183,20 +169,6 @@ namespace MinerBot_2._0.Services
                 _cache.Set(key, items, LatestWorkshopItemsCacheTime);
 
             return items;
-        }
-
-        public async Task<(PlayerSummaryModel PlayerSummary, SteamID SteamID)> GetSteamIDSummary(string profileURL)
-        {
-            SteamID steamID = null;
-
-            if (profileURL.Contains("steamcommunity.com/id/"))
-                steamID = new SteamID(await GetData.ResolveVanityURL(profileURL.Replace("https://steamcommunity.com/id/", "").Replace("/", "")));
-            else if (profileURL.Contains("steamcommunity.com/profiles/") && ulong.TryParse(profileURL.Replace("https://steamcommunity.com/profiles/", "").Replace("/", ""), out ulong id))
-                steamID = new SteamID(id);
-            else
-                return (null,null);
-
-            return (await GetData.GetPlayerSummaries(steamID.ConvertToUInt64()), steamID);
         }
 
         // Need to embeds seperate into a different class. _SteamAPIService.Embeds.GetMapEmbed()
@@ -257,27 +229,43 @@ namespace MinerBot_2._0.Services
             return groups;
         }
 
-        public async Task<Embed> GetLatestMapsEmbed(List<Steam.Models.PublishedFileDetailsModel> latestMaps = null, int page = 0)
+        // For /maps latest and its page buttons, which read the list once, answer an empty one themselves, and pass in a page of it
+        public async Task<Embed> GetLatestMapsEmbed(List<Steam.Models.PublishedFileDetailsModel> latestMaps, int page = 0)
         {
-            if (latestMaps == null)
-                latestMaps = await GetLatestWorkshopItems();
-
-            var latestMap = latestMaps.Skip(page).Take(ItemsPerPage).First();
-
-            return await FormatMapEmbed(latestMap);
+            return await FormatMapEmbed(latestMaps[page]);
         }
 
         public async Task<Embed> GetMapEmbed(string workshopURL)
         {
-            var result = await GetWorkshopItem(workshopURL);
-            if (result == null)
+            // Steam is only asked about a Workshop link or a map's ID
+            if (!SteamLinks.TryParseWorkshopId(workshopURL, out ulong id))
             {
-                return new EmbedBuilderTemplate()
-                    .WithTitle("Error: Please Provide a valid Steam Workshop Map URL/Link...")
-                    .WithDescription("Try finding a URL that looks like this:\n https://steamcommunity.com/sharedfiles/filedetails/?id=1234567890")
-                    .Build();
+                return ErrorEmbed("Error: Please Provide a valid Steam Workshop Map URL/Link...",
+                    "Try finding a URL that looks like this:\n https://steamcommunity.com/sharedfiles/filedetails/?id=1234567890\nOr enter only the map's ID, like 1234567890.");
             }
-            return await FormatMapEmbed(result);
+
+            PublishedFileDetailsModel? item;
+
+            try
+            {
+                item = await GetData.GetWorkshopItem(id);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"Couldn't look up a map on Steam: {e.GetType().Name}: {e.Message}");
+                return SteamUnreachableEmbed();
+            }
+
+            // An unlisted map is meant to be shared by its link, so a lookup shows it
+            switch (WorkshopItems.Check(item, GetData.AppID, unlistedAllowed: true))
+            {
+                case WorkshopItemCheck.Shown:
+                    return await FormatMapEmbed(item!);
+                case WorkshopItemCheck.OtherGame:
+                    return ErrorEmbed("Error: That isn't a Murder Miners map...", "That link or ID is for another game's Workshop.");
+                default:
+                    return ErrorEmbed("Error: Steam has no public map with that ID...", "It may have been removed or hidden.");
+            }
         }
 
         public async Task<Embed> FormatMapEmbed(PublishedFileDetailsModel item, string? label = null)
@@ -291,9 +279,9 @@ namespace MinerBot_2._0.Services
             new EmbedFieldBuilder { Name = "Views:", Value = item.Views, IsInline = true },
             new EmbedFieldBuilder { Name = "Favorited:", Value = item.Favorited, IsInline = true },
             new EmbedFieldBuilder { Name = "Life-Time Favorited:", Value = item.LifetimeFavorited, IsInline = true },
-            new EmbedFieldBuilder { Name = "Tags:", Value = item.Tags.Count != 0 ? String.Join(", ", item.Tags) : "None", IsInline = true },
-            new EmbedFieldBuilder { Name = "Time Created:", Value = item.TimeCreated, IsInline = true },
-            new EmbedFieldBuilder { Name = "Time Updated:", Value = item.TimeUpdated, IsInline = true },
+            new EmbedFieldBuilder { Name = "Tags:", Value = MapTags(item.Tags), IsInline = true },
+            new EmbedFieldBuilder { Name = "Time Created:", Value = WorkshopText.DiscordTimestamp(item.TimeCreated), IsInline = true },
+            new EmbedFieldBuilder { Name = "Time Updated:", Value = WorkshopText.DiscordTimestamp(item.TimeUpdated), IsInline = true },
             new EmbedFieldBuilder { Name = "Direct Download:", Value = $"[Download Map]({item.FileUrl})", IsInline = true },
                 ])
             .WithImageUrl(item.PreviewUrl == null ? "" : item.PreviewUrl.OriginalString)
@@ -306,24 +294,65 @@ namespace MinerBot_2._0.Services
             return embed.Build();
         }
 
-        // The title of the embed links to the full description on Steam
+        // The title of the embed links to the full description on Steam. The BBCode goes first, and the cut comes after the
+        // escaping, so it can't split an escape from its character. A description with nothing left, such as one that was
+        // only a picture, is sent as none, like a missing one, rather than as empty text, which Discord isn't documented to take.
         private static string? ShortenMapDescription(string? description)
         {
-            return UIUtils.shortenTextForEmbed(description, MaxMapDescriptionLength);
+            if (description == null)
+                return null;
+
+            var shown = WorkshopText.ShortenEscaped(WorkshopText.EscapeMarkdown(WorkshopText.StripBBCode(description)), MaxMapDescriptionLength);
+
+            return String.IsNullOrWhiteSpace(shown) ? null : shown;
         }
+
+        // Each tag is escaped like the description, and escaping can lengthen the list past what a field holds
+        private static string MapTags(IList<string>? tags)
+        {
+            var shown = String.Join(", ", (tags ?? []).Where(tag => !String.IsNullOrWhiteSpace(tag)).Select(WorkshopText.EscapeMarkdown));
+
+            return shown.Length == 0 ? "None" : WorkshopText.ShortenEscaped(shown, EmbedFieldBuilder.MaxFieldValueLength)!;
+        }
+
+        // Errors have a title that says what went wrong and a line on what to do
+        private static Embed ErrorEmbed(string title, string description) => new EmbedBuilderTemplate()
+            .WithTitle(title)
+            .WithDescription(description)
+            .Build();
+
+        public static Embed SteamUnreachableEmbed() => ErrorEmbed("Error: Steam can't be reached right now...", "Please try again later.");
 
         public async Task<Embed> SteamIDEmbed(string profileURL)
         {
-            var result = await GetSteamIDSummary(profileURL);
-            if (result.PlayerSummary == null || result.SteamID == null)
+            // Steam is only asked about a profile link or a SteamID64
+            if (!SteamLinks.TryParseProfile(profileURL, out string? vanityName, out ulong steamId64))
             {
-                return new EmbedBuilderTemplate()
-                    .WithTitle("Error: Please Provide a valid Steam User Profile URL/Link...")
-                    .WithDescription("Try finding a URL that looks like this:\n https://steamcommunity.com/id/1234567890/ OR https://steamcommunity.com/profiles/1234567890")
-                    .Build();
+                return ErrorEmbed("Error: Please Provide a valid Steam User Profile URL/Link...",
+                    "Try finding a URL that looks like this:\n https://steamcommunity.com/id/1234567890/ OR https://steamcommunity.com/profiles/76561198000000000");
             }
-            var playerSummary = result.PlayerSummary;
-            var steamID = result.SteamID;
+
+            PlayerSummaryModel? playerSummary = null;
+
+            try
+            {
+                // A custom URL's name is looked up first, and a name nobody has gives no ID
+                if (vanityName != null)
+                    steamId64 = await GetData.ResolveVanityURL(vanityName) ?? 0;
+
+                if (steamId64 != 0)
+                    playerSummary = await GetData.GetPlayerSummaries(steamId64);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"Couldn't look up a Steam profile: {e.GetType().Name}: {e.Message}");
+                return SteamUnreachableEmbed();
+            }
+
+            if (playerSummary == null)
+                return ErrorEmbed("Error: Steam has no profile for that link or ID...", "Please check it and try again.");
+
+            var steamID = new SteamID(steamId64);
             var embed = new EmbedBuilderTemplate()
                 .WithTitle($"Steam IDs for {playerSummary.Nickname}:")
                 .WithDescription($"SteamID 2: `{steamID.Render(false)}`\n SteamID 3: `{steamID.Render(true)}`\n SteamID 64: `{steamID.ConvertToUInt64()}`")

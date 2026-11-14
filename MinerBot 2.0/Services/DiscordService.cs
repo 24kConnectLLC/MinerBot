@@ -138,8 +138,8 @@ namespace MinerBot_2._0.Services
                          "**/armor helmets**: Gets a list of all possible helmet types.\n\n" +
                          "**/more steam_id**: Returns all Steam ID formats for the supplied steam profile.\n__Required__: A Steam Profile Link.\n\n" +
                          "**/murder-miners lobbies**: Finds all Lobbies currently publicly open in Murder Miners.\n\n" +
-                         "**/maps latest**: Returns the 5 latest Maps on the Murder Miners Workshop, one Map per page.\n\n" +
-                         "**/maps lookup**: Returns a detailed result of the Murder Miners Workshop Map Link you provided.\n__Required__: A Steam Workshop Link of the Map.\n\n" +
+                         "**/maps latest**: Returns up to 5 of the latest Maps on the Murder Miners Workshop, one Map per page.\n\n" +
+                         "**/maps lookup**: Returns a detailed result of the Murder Miners Workshop Map Link you provided.\n__Required__: A Steam Workshop Link or ID of the Map.\n\n" +
                          "**/more info**: More Info and Credits about Miner Bot.\n\n" +
                          "**/help**: Shows this list."
                 },

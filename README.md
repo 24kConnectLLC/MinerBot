@@ -39,8 +39,8 @@ The bot needs View Channel, Send Messages and Embed Links in each channel you ch
 
 ### Maps
 
-- `/maps latest` — Returns **5** detailed results for the newest maps on the Murder Miners Workshop.
-- `/maps lookup [map-url]` — Returns detailed info for the provided Workshop map link.
+- `/maps latest` — Returns up to **5** detailed results for the newest maps on the Murder Miners Workshop.
+- `/maps lookup [map-url]` — Returns detailed info for the provided Workshop map link or ID.
 
 ### Steam / Utility
 

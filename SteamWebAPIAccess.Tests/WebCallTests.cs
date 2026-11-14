@@ -93,6 +93,76 @@ namespace SteamWebAPIAccess.Tests
             AssertGetsOf("GetPlayerSummaries", web.Requests, 2);
         }
 
+        Task<ulong?> ResolveAsync(string name) => data.ResolveVanityURL(name).WaitAsync(WaitLimit, TestContext.Current.CancellationToken);
+
+        [Fact]
+        public async Task VanityNameIsReadInEitherOrder()
+        {
+            web.Answer(HttpStatusCode.OK, VanityAnswer).Answer(HttpStatusCode.OK, """
+                "response"
+                {
+                    "success" "1"
+                    "steamid" "76561197960265729"
+                }
+                """);
+
+            Assert.Equal(SteamId, await ResolveAsync("someone"));
+            Assert.Equal(SteamId, await ResolveAsync("someone"));
+            Assert.All(web.Requests, request => Assert.Contains("vanityurl=someone", request.Uri!.Query));
+        }
+
+        // Steam answers a name nobody has with success 42 and "No match", which once became SteamID 42
+        [Theory]
+        [InlineData("""
+            "response"
+            {
+                "success" "42"
+                "message" "No match"
+            }
+            """)]
+        [InlineData("""
+            "response"
+            {
+                "success" "1"
+            }
+            """)]
+        [InlineData("""
+            "response"
+            {
+                "steamid" "76561197960265729"
+            }
+            """)]
+        [InlineData("")]
+        public async Task VanityNameThatSteamDoesNotFindGivesNoId(string answer)
+        {
+            web.Answer(HttpStatusCode.OK, answer);
+
+            Assert.Null(await ResolveAsync("nobody"));
+            Assert.Single(web.Requests);
+        }
+
+        [Fact]
+        public async Task PlayerSummaryIsRead()
+        {
+            web.Answer(HttpStatusCode.OK, """{"response":{"players":[{"steamid":"76561197960265729","personaname":"Someone","profileurl":"https://steamcommunity.com/id/someone/","avatarfull":"https://avatars.example.com/full.jpg"}]}}""");
+
+            var player = await data.GetPlayerSummaries(SteamId).WaitAsync(WaitLimit, TestContext.Current.CancellationToken);
+
+            Assert.Equal("Someone", player?.Nickname);
+            Assert.Contains($"steamids={SteamId}", Assert.Single(web.Requests).Uri!.Query);
+        }
+
+        // SteamWebAPI2 answers a player Steam doesn't have with no response at all
+        [Theory]
+        [InlineData("""{"response":{"players":[]}}""")]
+        [InlineData("""{"response":{}}""")]
+        public async Task PlayerThatSteamDoesNotHaveGivesNoSummary(string answer)
+        {
+            web.Answer(HttpStatusCode.OK, answer);
+
+            Assert.Null(await data.GetPlayerSummaries(SteamId).WaitAsync(WaitLimit, TestContext.Current.CancellationToken));
+        }
+
         [Fact]
         public void RegisteredClientHasTheTimeLimitOfTheSharedHandler()
         {

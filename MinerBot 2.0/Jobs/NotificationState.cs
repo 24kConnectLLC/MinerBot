@@ -78,11 +78,19 @@ namespace MinerBot_2._0.Jobs
 
         public List<MapPost> FindNew(List<PublishedFileDetailsModel> maps, DateTimeOffset now)
         {
+            // Steam's reader leaves a missing update time as the default, year 1. As the baseline that would make every later
+            // map look new, so a map without one is left out of the read.
+            maps = maps.Where(map => map.TimeUpdated != default).ToList();
+
             // Only the first good read records anything, because all of it was there before the bot looked.
             // The read is only the top of Steam's ranking by last update, so a map moves into it from below when one above is
             // deleted or hidden. That map is no newer than the oldest one of the first read, unlike a map that was added or updated.
             if (BaselineTime == null)
             {
+                // Nothing to set it with, so the next read tries again
+                if (maps.Count == 0)
+                    return [];
+
                 BaselineTime = maps.Min(map => map.TimeUpdated);
 
                 foreach (var map in maps)
