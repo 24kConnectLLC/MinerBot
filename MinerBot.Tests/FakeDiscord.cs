@@ -57,12 +57,21 @@ namespace MinerBot.Tests
             ? embeds.EnumerateArray().Select(embed => embed.GetProperty("description").GetString()!)
             : [];
 
+        // The small line above each embed's title, null for an embed without one
+        public IEnumerable<string?> EmbedAuthors => Message.TryGetProperty("embeds", out var embeds)
+            ? embeds.EnumerateArray().Select(embed => Author(embed)?.GetProperty("name").GetString())
+            : [];
+
         // What Discord counts against its limit for all the embeds of a message
         public int EmbedsLength => Message.TryGetProperty("embeds", out var embeds)
             ? embeds.EnumerateArray().Sum(embed => TextLength(embed, "title") + TextLength(embed, "description")
+                + (Author(embed) is JsonElement author ? TextLength(author, "name") : 0)
                 + TextLength(embed.GetProperty("footer"), "text")
                 + embed.GetProperty("fields").EnumerateArray().Sum(row => TextLength(row, "name") + TextLength(row, "value")))
             : 0;
+
+        static JsonElement? Author(JsonElement embed) =>
+            embed.TryGetProperty("author", out var author) && author.ValueKind == JsonValueKind.Object ? author : null;
 
         static int TextLength(JsonElement json, string name) => json.TryGetProperty(name, out var text) ? text.GetString()!.Length : 0;
 
@@ -107,7 +116,9 @@ namespace MinerBot.Tests
         readonly List<Step> steps = new();
         readonly TextWriter realConsole = Console.Out;
         readonly ConsoleCapture console = new();
-        readonly FakeClock cacheClock = new();
+
+        // For the memory cache and the notification job
+        readonly FakeClock clock = new();
         TaskCompletionSource executed = NewSignal();
         int gatewaySequence;
 
@@ -206,12 +217,13 @@ namespace MinerBot.Tests
                 .AddSingleton<SteamAPIService>()
                 .AddSingleton<DiscordService>()
                 .AddSingleton<NotificationState>()
+                .AddSingleton<TimeProvider>(clock)
                 .AddSingleton<IGetData>(Steam)
                 .AddSingleton<IArmorData>(Armor)
                 .AddSingleton<IGuildData>(Guilds)
                 .AddSingleton<IConfiguration>(new ConfigurationBuilder().AddInMemoryCollection().Build())
                 .AddLogging()
-                .AddMemoryCache(options => options.Clock = cacheClock)
+                .AddMemoryCache(options => options.Clock = clock)
                 .BuildServiceProvider();
         }
 
@@ -391,10 +403,23 @@ namespace MinerBot.Tests
         // One run the way JobHandler does it, with a new job object, 5 minutes after the last run
         public async Task RunNotificationJobAsync()
         {
-            cacheClock.UtcNow += TimeSpan.FromMinutes(5);
+            clock.UtcNow += TimeSpan.FromMinutes(5);
 
-            await ActivatorUtilities.CreateInstance<GuildNotificationJob>(services).NotifyAllGuilds();
+            var run = ActivatorUtilities.CreateInstance<GuildNotificationJob>(services).NotifyAllGuilds();
+
+            // Some tests expect the job's own TimeoutException, so a job that never finishes fails with something else
+            try
+            {
+                await run.WaitAsync(WaitLimit);
+            }
+            catch (TimeoutException) when (!run.IsCompleted)
+            {
+                Assert.Fail($"The notification job didn't finish. Console output: {ConsoleText}");
+            }
         }
+
+        // For the map cooldown, which is in hours, without running the job every 5 minutes of them
+        public void MoveClock(TimeSpan time) => clock.UtcNow += time;
 
         public Task LeaveGuildAsync() => gateway.DeliverAsync("GUILD_DELETE", $$"""{"id":"{{GuildId}}"}""");
 

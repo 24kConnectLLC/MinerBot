@@ -21,8 +21,6 @@ namespace MinerBot_2._0.Services
 
         public int ItemsPerPage = 1;
 
-        public bool shouldShowPrevUpdate = true;
-
         public SteamAPIService(IGetData data, IMemoryCache cache)
         {
             GetData = data;
@@ -55,78 +53,40 @@ namespace MinerBot_2._0.Services
             int charactersLeft = EmbedBuilder.MaxDescriptionLength - MoreLobbiesText(lobbies.Count).Length;
             int hiddenLobbies = 0;
 
-            var latestUpdate = lobbies.Where(result => result.VersionNumber >= 93);
+            string tempString = "";
 
-            if (shouldShowPrevUpdate)
+            // The game refuses a version mismatch, so a branch lists only the lobbies of its own version
+            foreach (var branch in GameVersions.Branches)
             {
-                var eggHunt = lobbies.Where(result => result.VersionNumber == 39);                
-                var update0 = lobbies.Where(result => result.VersionNumber == 0);
-                var update19 = lobbies.Where(result => result.VersionNumber == 53);
-                var update29 = lobbies.Where(result => result.VersionNumber == 61);
-                var update35 = lobbies.Where(result => result.VersionNumber == 80);
-                var update39 = lobbies.Where(result => result.VersionNumber < 90 && result.VersionNumber >= 87);
-                var update40 = lobbies.Where(result => result.VersionNumber < 93 && result.VersionNumber >= 90);
+                var branchLobbies = lobbies.Where(result => result.VersionNumber == branch.Number);
 
-                string tempString = "";
-
-                if (latestUpdate.Count() > 0)
-                    tempString += formatLobbyRows(latestUpdate, "Update 41");
-
-                if (update40.Count() > 0)
-                    tempString += formatLobbyRows(update40, "Update 40");
-
-                // update39 branch
-                if (update39.Count() > 0)
-                    tempString += formatLobbyRows(update39, "Update 39");
-
-                // classic_xboxone branch
-                if (update35.Count() > 0)
-                    tempString += formatLobbyRows(update35, "Update 35 (Xbox One Branch)");
-
-                // update29 branch, only exists for legacy speedrun.com leaderboard
-                if (update29.Count() > 0)
-                    tempString += formatLobbyRows(update29, "Update 29");
-
-                // classic_xbox360 branch
-                if (update19.Count() > 0)
-                    tempString += formatLobbyRows(update19, "Update 19 (Xbox 360 Branch)");
-
-                // anniversary_atest2 branch
-                if (update0.Count() > 0)
-                    tempString += formatLobbyRows(update0, "2012 Alpha");
-
-                // egghunt branch
-                if (eggHunt.Count() > 0)
-                    tempString += formatLobbyRows(eggHunt, "Legacy Egg Hunt Branch");
-
-                if (!string.IsNullOrEmpty(tempString))
-                    finalString = tempString;
+                if (branchLobbies.Count() > 0)
+                    tempString += formatLobbyRows(branchLobbies, branch.Heading!);
             }
-            else
-            {
-                if (latestUpdate.Count() > 0)
-                {
-                    string tempString = "";
 
-                    tempString += formatLobbyRows(latestUpdate, "Update 41");
-                    finalString = tempString;
-                }
-            }
+            // Every other version comes last, with the version on each row, so no lobby goes unlisted
+            var otherVersions = lobbies.Where(result => GameVersions.Find(result.VersionNumber)?.Heading == null);
+
+            if (otherVersions.Count() > 0)
+                tempString += formatLobbyRows(otherVersions, GameVersions.OtherVersionsHeading, showVersion: true);
+
+            if (!string.IsNullOrEmpty(tempString))
+                finalString = tempString;
 
             if (hiddenLobbies > 0)
                 finalString += MoreLobbiesText(hiddenLobbies);
 
             return finalString;
 
-            string formatLobbyRows(IEnumerable<LobbyInfo> lobbyList, string version)
+            string formatLobbyRows(IEnumerable<LobbyInfo> lobbyList, string groupName, bool showVersion = false)
             {
-                string heading = $"__{version}:__\n\n";
+                string heading = $"__{groupName}:__\n\n";
                 string tempString = heading;
 
                 if (lobbyList.Count() == 0)
                 {
                     if (!hideEmpty)
-                        return tempString + $"No {version} lobbies...\n\n[Host your own Lobby instead!](https://murderminershub.com/open-murder-miners)\n\n";
+                        return tempString + $"No {groupName} lobbies...\n\n[Host your own Lobby instead!](https://murderminershub.com/open-murder-miners)\n\n";
                     else
                         return "";
                 }
@@ -136,9 +96,12 @@ namespace MinerBot_2._0.Services
                     bool fullLobby = lobby.CurrentPlayers == lobby.MaxPlayers; // \u200b // _ _
                     string hostName = String.IsNullOrWhiteSpace(UIUtils.cleanTextForEmbed(lobby.HostName)) ? "Host Unknown" : UIUtils.cleanTextForEmbed(lobby.HostName);
                     string mapName = String.IsNullOrWhiteSpace(lobby.MapName) ? "Map Unknown" : lobby.MapName; // Already cleaned in GetData, and cleanTextForEmbed would strip its punctuation
-                    string lobbyModes = String.IsNullOrWhiteSpace(lobby.Modes) ? "Modes Unknown" : lobby.Modes; // Written by the bot, not the host
+
+                    // Written by the bot, not the host. For a version whose layout isn't known exactly, the modes would be guesses.
+                    string lobbyModes = String.IsNullOrWhiteSpace(lobby.Modes) || !GameVersions.ModesTrusted(lobby.VersionNumber) ? "Modes Unknown" : lobby.Modes;
+                    string version = showVersion ? $" \u200b **Version:** `v{lobby.VersionNumber}`" : "";
                     string row = $"- **Host:** `{hostName}` \u200b **Map:** `{mapName}`\n" + 
-                                    $" \u200b **Mode:** `{lobbyModes}` \u200b **Players:** `{lobby.CurrentPlayers}/{lobby.MaxPlayers}` \u200b {(fullLobby ? "" : $"[Join]({lobby.JoinURL})")}" + "\n\n";
+                                    $"{version} \u200b **Mode:** `{lobbyModes}` \u200b **Players:** `{lobby.CurrentPlayers}/{lobby.MaxPlayers}` \u200b {(fullLobby ? "" : $"[Join]({lobby.JoinURL})")}" + "\n\n";
 
                     // Once a row doesn't fit the rest stay out too, so the list keeps its order
                     if (hiddenLobbies > 0 || tempString.Length + row.Length > charactersLeft)
@@ -238,22 +201,36 @@ namespace MinerBot_2._0.Services
 
         // Need to embeds seperate into a different class. _SteamAPIService.Embeds.GetMapEmbed()
 
-        public async Task<Embed[]> GetLatestMapsEmbeds(List<Steam.Models.PublishedFileDetailsModel> latestMaps)
+        // In a post of new and updated maps, each embed says which its map is
+        public async Task<Embed[]> GetLatestMapsEmbeds(List<(Steam.Models.PublishedFileDetailsModel Map, bool IsNew)> latestMaps)
         {
+            bool newAndUpdated = latestMaps.Any(item => item.IsNew) && latestMaps.Any(item => !item.IsNew);
+
             List<Embed> embeds = new();
             foreach (var item in latestMaps)
-                embeds.Add(await FormatMapEmbed(item));
+                embeds.Add(await FormatMapEmbed(item.Map, newAndUpdated ? (item.IsNew ? "New Map" : "Updated Map") : null));
 
             return embeds.ToArray();
         }
 
-        public async Task<List<(string? Text, Embed[] Embeds)>> GetLatestMapsMessages(string heading, List<Steam.Models.PublishedFileDetailsModel> latestMaps)
+        public async Task<List<(string? Text, Embed[] Embeds)>> GetLatestMapsMessages(List<(Steam.Models.PublishedFileDetailsModel Map, bool IsNew)> latestMaps)
         {
             var groups = GroupEmbedsByLength(await GetLatestMapsEmbeds(latestMaps));
+            string heading = MapPostHeading(latestMaps.Count(item => item.IsNew), latestMaps.Count(item => !item.IsNew));
 
             // Only the first message has the heading
             return groups.Select((embeds, index) => (index == 0 ? heading : null, embeds)).ToList();
         }
+
+        // Says what the post holds
+        private static string MapPostHeading(int newMaps, int updatedMaps) => (newMaps, updatedMaps) switch
+        {
+            (1, 0) => "__**New Map!**__",
+            (_, 0) => "__**New Maps!**__",
+            (0, 1) => "__**Updated Map!**__",
+            (0, _) => "__**Updated Maps!**__",
+            _ => "__**New & Updated Maps!**__"
+        };
 
         // Discord limits the length of all the embeds of a message together, so a long list goes out as several messages
         public static List<Embed[]> GroupEmbedsByLength(IEnumerable<Embed> embeds)
@@ -303,9 +280,9 @@ namespace MinerBot_2._0.Services
             return await FormatMapEmbed(result);
         }
 
-        public async Task<Embed> FormatMapEmbed(PublishedFileDetailsModel item)
+        public async Task<Embed> FormatMapEmbed(PublishedFileDetailsModel item, string? label = null)
         {
-            Embed embed = new EmbedBuilderTemplate()
+            var embed = new EmbedBuilderTemplate()
             .WithTitle(item.Title)
             .WithDescription(ShortenMapDescription(item.Description))
             .WithFields([
@@ -320,10 +297,13 @@ namespace MinerBot_2._0.Services
             new EmbedFieldBuilder { Name = "Direct Download:", Value = $"[Download Map]({item.FileUrl})", IsInline = true },
                 ])
             .WithImageUrl(item.PreviewUrl == null ? "" : item.PreviewUrl.OriginalString)
-            .WithUrl($"{WorkshopItemDetailsURI}{item.PublishedFileId}")
-            .Build();
+            .WithUrl($"{WorkshopItemDetailsURI}{item.PublishedFileId}");
 
-            return embed;
+            // A small line above the title, which the template leaves free
+            if (label != null)
+                embed.WithAuthor(label);
+
+            return embed.Build();
         }
 
         // The title of the embed links to the full description on Steam

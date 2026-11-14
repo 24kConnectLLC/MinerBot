@@ -23,6 +23,8 @@ builder.Services.AddSingleton<ArmorService>();
 builder.Services.AddSingleton<SteamAPIService>();
 builder.Services.AddSingleton<DiscordService>();
 builder.Services.AddSingleton<NotificationState>();
+// For the map cooldown of the notification job, tests give it another clock
+builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<JobHandler>();
 //builder.Logging.ClearProviders();
 //builder.Logging.AddConsole();
