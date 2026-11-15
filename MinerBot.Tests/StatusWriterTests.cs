@@ -462,6 +462,12 @@ namespace MinerBot.Tests
             using var host = builder.Build();
 
             await host.StartAsync(TestContext.Current.CancellationToken).WaitAsync(WaitLimit, TestContext.Current.CancellationToken);
+
+            // .NET starts ExecuteAsync on the thread pool and never runs it if the host stops first, so the test waits for
+            // the writer to give up on recording before it stops the host
+            var writer = host.Services.GetServices<IHostedService>().OfType<StatusWriter>().Single();
+            await writer.ExecuteTask!.WaitAsync(WaitLimit, TestContext.Current.CancellationToken);
+
             await host.StopAsync(CancellationToken.None).WaitAsync(WaitLimit, TestContext.Current.CancellationToken);
 
             Assert.True(logger.Logged(LogLevel.Warning, "ConnectionStrings:BotConnection can't be read, so the bot's status and history aren't recorded"));
