@@ -259,10 +259,14 @@ check() {
         fi
     fi
 
-    out=$(run_for 30 docker container inspect -f '{{.State.Running}}' "$bot_container" 2>&1) || true
+    # Unhealthy is a bot that hasn't written its heartbeat for a minute: it isn't up on Discord, or it hangs. Docker doesn't
+    # restart it for that. An older image has no health check, which isn't a problem.
+    out=$(run_for 30 docker container inspect \
+        -f '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$bot_container" 2>&1) || true
     case $out in
-        true) ;;
-        false) problems+=("The bot isn't running. Its log: docker logs --tail 50 $bot_container") ;;
+        "true unhealthy") problems+=("The bot is unhealthy: its heartbeat is over a minute old, so it isn't up on Discord. Its log: docker logs --tail 50 $bot_container") ;;
+        "true "*) ;;
+        "false "*) problems+=("The bot isn't running. Its log: docker logs --tail 50 $bot_container") ;;
         *"No such"*) problems+=("The bot's container, $bot_container, doesn't exist.") ;;
         *) problems+=("Docker didn't answer about the bot: ${out%%$'\n'*}") ;;
     esac

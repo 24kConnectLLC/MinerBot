@@ -656,7 +656,8 @@ database() {
     local out at_127 at_localhost
     out=$(sql -N <<< "SELECT @@character_set_server; SELECT CONCAT(version, ' ', name) FROM \`$bot_db\`.schema_version;" 2>&1)
     [ "$(printf '%s\n' "$out" | sed -n 1p)" = latin1 ] || problem "MariaDB's default character set isn't latin1" "$out"
-    [ "$(printf '%s\n' "$out" | sed -n '2,$p')" = "1 0001_core" ] || problem "schema_version isn't exactly 1 0001_core" "$out"
+    [ "$(printf '%s\n' "$out" | sed -n '2,$p')" = $'1 0001_core\n2 0002_bot_status' ] \
+        || problem "schema_version isn't exactly 1 0001_core and 2 0002_bot_status" "$out"
     expect "rehearsed, applied and compared" "$(cat "$state/logs/rights.log" 2>&1)" "up's apply_rights"
     at_127=$(in_database "rights_of '$dashboard_login' 127.0.0.1" 2>&1) || problem "rights_of failed" "$at_127"
     at_localhost=$(in_database "rights_of '$dashboard_login' localhost" 2>&1) || problem "rights_of failed" "$at_localhost"
@@ -1241,7 +1242,7 @@ check() {
     image_settings || true
     verdict "the image has the health check every 2 s while it starts and every 30 s after, DOTNET_EnableDiagnostics=0, and user 1654"
     database || true
-    verdict "MariaDB's default is latin1, the migrations ran with the bot-like login (schema_version 1 0001_core), and apply_rights left the same rights on both of the login's hosts"
+    verdict "MariaDB's default is latin1, the migrations ran with the bot-like login (schema_version 1 0001_core and 2 0002_bot_status), and apply_rights left the same rights on both of the login's hosts"
     dashboard_health || true
     verdict "Docker's health check says healthy, the healthcheck command exits 0 with Healthy, and the start-up log says the Access check is off and that it listens only on its socket"
     home_page || true

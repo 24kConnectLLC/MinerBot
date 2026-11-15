@@ -12,8 +12,9 @@ The Origin certificate ends {{ORIGIN_CERT_ENDS}}: make a new one in Cloudflare b
 Where everything is
 -------------------
 
-  server.conf              this server's database names and the bot's ready line (bootstrap.sh wrote it; never in Git);
-                           the connection strings in bot.env and dashboard.env name the databases too
+  server.conf              this server's database names and the bot's ready line, for a bot image without a health check
+                           (bootstrap.sh wrote it; never in Git); the connection strings in bot.env and dashboard.env
+                           name the databases too
   bot.env                  the bot's settings and secrets (./fill-secrets.sh changes the secrets)
   dashboard.env            the dashboard's settings and secrets (./setup-dashboard.sh writes it)
   dashboard.env.previous   dashboard.env as it was before setup's last change
@@ -53,6 +54,9 @@ Everyday commands, in /opt/minerbot
   ./status.sh                                   what runs, the last deploys, backups, the certificate, nginx, the
                                                 dashboard's socket and proxy key, the public home page, the disk
   docker logs -f --tail 50 minerbot-bot         the bot's log; minerbot-dashboard for the dashboard's
+  docker inspect -f '{{json .State.Health}}' minerbot-bot
+                                                the bot's health check's last answers: healthy while its heartbeat,
+                                                which it writes while it's up on Discord, is at most a minute old
   docker compose restart bot                    a restart with the same settings
   docker compose stop bot                       stop it; start it again with: docker compose up -d --no-build --no-deps bot
   ./deploy.sh [ref] [--only bot|dashboard] [--no-start]
@@ -192,7 +196,8 @@ A deploy or setup refuses: MinerBot's database "holds what no migration makes".
   out who made it. The dashboard's login wasn't touched. Then run the deploy or setup again.
 
 The bot is never ready.
-  Check its lines in the run's log, Discord's status page (https://discordstatus.com), or its token (./fill-secrets.sh).
+  Check its lines in the run's log, its health check's last answers (docker inspect -f '{{json .State.Health}}'
+  minerbot-bot), Discord's status page (https://discordstatus.com), or its token (./fill-secrets.sh).
 
 The certificate ends soon.
   Make a new Origin certificate in Cloudflare (SSL/TLS > Origin Server: RSA 2048, only bot.murderminershub.com, 15
@@ -232,8 +237,8 @@ To restore one. Nothing from a dump ever runs as MariaDB's root: a trigger, even
 that would run with the rights of whoever restores it, and the bot's login can make one, as could the cPanel account
 that owned MinerBot's database before move-database.sh moved it.
   1. ./backup.sh manual, a dump of the current state first.
-  2. docker compose stop dashboard, and the bot too once it uses this database. Don't run ./setup-dashboard.sh before
-     step 6: it starts a stopped dashboard.
+  2. docker compose stop dashboard bot (the bot writes its status and history in this database too). Don't run
+     ./setup-dashboard.sh before step 6: it starts a stopped dashboard.
   3. gzip -t <file>, and gzip -dc <file> | tail -n 1 must show: -- Dump completed
      gzip -dc <file> | grep -c '^DELIMITER' must print 0. Otherwise the dump holds a trigger, event or routine, which
      no migration makes: never restore it, as anyone. Look at it with gzip -dc <file> | less, and find out who made it.
@@ -261,7 +266,8 @@ that owned MinerBot's database before move-database.sh moved it.
      migrate again, from the commit the dashboard runs (./status.sh shows it), since every migration can run twice:
        ./deploy.sh <that commit> --only dashboard --no-start      it builds, dumps and migrates, and swaps nothing
      or, to undo the last dashboard deploy's migration, go back to the image from before it: ./rollback.sh dashboard
-     Then: docker compose up -d --no-build --no-deps dashboard, and the bot too if step 2 stopped it; then ./status.sh
+     Then: docker compose up -d --no-build --no-deps dashboard bot; then ./status.sh. The bot may record
+     bot.unclean_end for the run in the dump's status row, which was no crash.
 
 
 Housekeeping

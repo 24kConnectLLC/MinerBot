@@ -68,8 +68,9 @@ namespace MinerBot.Dashboard.Auth
                 return true;
             }), logger);
 
-            // Ended sessions go at each sign-in, since no daily job exists yet: those past their 12 hours, and those unused for
-            // longer than the idle limit, which RetrieveAsync would refuse anyway. Best effort: the sign-in has already happened.
+            // Ended sessions go at each sign-in: those past their 12 hours, and those unused for longer than the idle limit,
+            // which RetrieveAsync would refuse anyway. The bot's daily clean-up also deletes any 7 days after they ended,
+            // for when nobody signs in. Best effort: the sign-in has already happened.
             try
             {
                 await sessions.DeleteExpiredSessions(now.UtcDateTime, (now - IdleLimit).UtcDateTime);

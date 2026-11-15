@@ -5,6 +5,7 @@ using DataAccessLibrary.Blacklist;
 using DataAccessLibrary.Dashboard;
 using DataAccessLibrary.Discord;
 using DataAccessLibrary.Health;
+using DataAccessLibrary.Status;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -19,7 +20,8 @@ namespace DataAccessLibrary
                 { DBConnectionName.Armor,  configuration.GetConnectionString("DefaultConnection")},
                 { DBConnectionName.Blacklist, configuration.GetConnectionString("DefaultConnection") },
                 { DBConnectionName.Guild, configuration.GetConnectionString("DefaultConnection") },
-                // MinerBot's own database. Nothing in the bot reads it yet, so it may be missing, and only a call that needs it fails.
+                // MinerBot's own database, where the bot records its status and history. It may be missing: the bot then
+                // records nothing and runs on, and only a call that needs it fails.
                 { DBConnectionName.Bot, configuration.GetConnectionString("BotConnection") ?? "" }
             };
 
@@ -80,6 +82,18 @@ namespace DataAccessLibrary
         public static IServiceCollection AddDatabaseHealthAccess(this IServiceCollection services)
         {
             services.AddTransient<IDatabaseHealthData, DatabaseHealthData>();
+            return services;
+        }
+
+        public static IServiceCollection AddBotStatusAccess(this IServiceCollection services)
+        {
+            services.AddTransient<IBotStatusData, BotStatusData>();
+            return services;
+        }
+
+        public static IServiceCollection AddRetentionAccess(this IServiceCollection services)
+        {
+            services.AddTransient<IRetentionData, RetentionData>();
             return services;
         }
     }

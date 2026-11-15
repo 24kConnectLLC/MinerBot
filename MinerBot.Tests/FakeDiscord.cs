@@ -15,6 +15,7 @@ using Microsoft.Extensions.DependencyInjection;
 using MinerBot_2._0.Handlers;
 using MinerBot_2._0.Jobs;
 using MinerBot_2._0.Services;
+using MinerBot_2._0.Status;
 using SteamWebAPIAccess;
 
 namespace MinerBot.Tests
@@ -135,6 +136,10 @@ namespace MinerBot.Tests
         public NotificationState Notifications => services.GetRequiredService<NotificationState>();
         public ArmorService ArmorService => services.GetRequiredService<ArmorService>();
 
+        // What the bot recorded for its status and history, and what its status sampler would read of Discord
+        public BotRecorder Recorder => services.GetRequiredService<BotRecorder>();
+        public DiscordStatusHandler DiscordStatus => services.GetRequiredService<DiscordStatusHandler>();
+
         // Name of the Discord request that gets refused, to test what happens when a reply can't be sent
         public string? FailStep { get; set; }
 
@@ -217,6 +222,8 @@ namespace MinerBot.Tests
                 .AddSingleton<SteamAPIService>()
                 .AddSingleton<DiscordService>()
                 .AddSingleton<NotificationState>()
+                .AddSingleton<BotRecorder>()
+                .AddSingleton<DiscordStatusHandler>()
                 .AddSingleton<TimeProvider>(clock)
                 .AddSingleton<IGetData>(Steam)
                 .AddSingleton<IArmorData>(Armor)
@@ -244,6 +251,8 @@ namespace MinerBot.Tests
         {
             Console.SetOut(console);
 
+            // In Program.cs's order: the status handler's Ready comes first
+            services.GetRequiredService<DiscordStatusHandler>().Initialize();
             await services.GetRequiredService<InteractionHandler>().InitializeAsync();
             services.GetRequiredService<GuildEventHandler>().Initialize();
 

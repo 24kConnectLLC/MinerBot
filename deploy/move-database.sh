@@ -19,8 +19,8 @@
 #       After the move, once the dashboard works: deletes the old database with cPanel's own tool, as the account that
 #       owns it, so cPanel's map stays right.
 # Each runs as the systemd unit minerbot-move-database, for 15 minutes at most, and this terminal follows its log. A run
-# cut off anywhere is finished by running it again. The bot keeps running: it doesn't use MinerBot's database yet. Only
-# the deploy's migrations take bot.env's ConnectionStrings__BotConnection, and the bot gets it when it's next recreated.
+# cut off anywhere is finished by running it again. The bot keeps running on the ConnectionStrings__BotConnection it
+# started with, where it records only its status and history, and gets the new one when it's next recreated.
 # Exit code: 0 done; 1 refused or stopped, with the reason.
 set -Eeuo pipefail
 umask 077

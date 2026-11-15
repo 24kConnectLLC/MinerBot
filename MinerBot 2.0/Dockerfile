@@ -33,4 +33,13 @@ RUN dotnet publish "./MinerBot 2.0.csproj" -c $BUILD_CONFIGURATION -o /app/publi
 FROM base AS final
 WORKDIR /app
 COPY --from=publish /app/publish .
+# The commit the image was built from, which deploy.sh passes in, so the bot's status says which version runs. Last, so
+# only this small step changes from one commit to the next.
+ARG SOURCE_REVISION=
+ENV MINERBOT_REVISION=$SOURCE_REVISION
+# The runtime image has no curl, so the bot checks itself: it reads the heartbeat file the bot rewrites every 5 seconds
+# while it's up on Discord. Every 5 seconds while it starts, so a deploy sees it healthy soon after Discord is ready, and
+# every 30 after. The start lasts longer than deploy's ready_bot waits for healthy, 150 seconds: a bot first up on
+# Discord after the start would turn healthy only at the next check, up to 30 seconds later, after the deploy gave up.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=160s --start-interval=5s --retries=3 CMD ["dotnet", "MinerBot 2.0.dll", "healthcheck"]
 ENTRYPOINT ["dotnet", "MinerBot 2.0.dll"]

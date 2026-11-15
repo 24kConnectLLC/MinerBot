@@ -372,6 +372,21 @@ namespace DataAccessLibrary.Tests
             { "add to schema_version", $"INSERT INTO {Bot}.schema_version (version, name, checksum, applied_at) VALUES (9999, 'x', 'x', NOW(3))" },
             { "change schema_version", $"UPDATE {Bot}.schema_version SET name = 'changed' WHERE 1 = 0" },
             { "delete from schema_version", $"DELETE FROM {Bot}.schema_version WHERE 1 = 0" },
+            // The bot's status and history, which only the bot writes, and which the dashboard can't read until a pull
+            // request gives it the right for its status pages
+            { "read bot_status", $"SELECT * FROM {Bot}.bot_status" },
+            { "change bot_status", $"UPDATE {Bot}.bot_status SET version = NULL WHERE 1 = 0" },
+            { "add to bot_events", $"INSERT INTO {Bot}.bot_events (run_id, seq, at, kind, level) VALUES (1, 1, NOW(3), 'bot.started', 'info')" },
+            { "read bot_events", $"SELECT * FROM {Bot}.bot_events" },
+            { "delete from bot_events", $"DELETE FROM {Bot}.bot_events WHERE 1 = 0" },
+            { "read job_status", $"SELECT * FROM {Bot}.job_status" },
+            { "delete from job_status", $"DELETE FROM {Bot}.job_status WHERE 1 = 0" },
+            { "read job_runs", $"SELECT * FROM {Bot}.job_runs" },
+            { "change job_runs", $"UPDATE {Bot}.job_runs SET detail = NULL WHERE 1 = 0" },
+            { "read uptime_samples", $"SELECT * FROM {Bot}.uptime_samples" },
+            { "add to uptime_samples", $"INSERT INTO {Bot}.uptime_samples (minute, discord_up, steam_up) VALUES (NOW(), 1, 1)" },
+            { "read uptime_daily", $"SELECT * FROM {Bot}.uptime_daily" },
+            { "delete from uptime_daily", $"DELETE FROM {Bot}.uptime_daily WHERE 1 = 0" },
             // Structure, in both databases
             { "create a table in MinerBot's database", $"CREATE TABLE {Bot}.rights_check (id INT)" },
             { "create a table in the website's database", $"CREATE TABLE {Site}.rights_check (id INT)" },

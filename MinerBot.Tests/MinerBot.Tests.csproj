@@ -17,6 +17,14 @@
     <ProjectReference Include="..\MinerBot 2.0\MinerBot 2.0.csproj" />
   </ItemGroup>
 
+  <!-- The bot's start and its image, which HeartbeatTests read: neither can run in a test without reaching Discord. And
+       the deploy's wait for the bot's health, which the image's health check must outlast. -->
+  <ItemGroup>
+    <None Include="..\MinerBot 2.0\Program.cs" Link="bot-source\Program.cs" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    <None Include="..\MinerBot 2.0\Dockerfile" Link="bot-source\Dockerfile" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    <None Include="..\deploy\common.sh" Link="bot-source\common.sh" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />
     <PackageReference Include="xunit.runner.visualstudio" Version="4.0.1">

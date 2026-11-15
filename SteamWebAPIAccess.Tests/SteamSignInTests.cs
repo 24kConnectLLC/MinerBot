@@ -1487,6 +1487,23 @@ namespace SteamWebAPIAccess.Tests
             Assert.False(File.Exists(steam.AuthFullPath + ".tmp"));
         }
 
+        // The bot's history keeps each alert's text, so the alert names only the exception's type. The library's message,
+        // which names the file, goes to the log.
+        [Fact]
+        public void TokenThatCantBeSavedIsAlertedInTheBotsOwnWords()
+        {
+            var steam = CreateSteam("user", tokenFile: null);
+            Directory.CreateDirectory(steam.AuthFullPath + ".tmp");
+            steam.QRSignIn = () => Task.FromResult(NewTokens());
+
+            Connected(steam);
+
+            Assert.DoesNotContain(steam.AuthName, steam.Alerts[^1]);
+            Assert.Matches(@"^MinerBot couldn't save its Steam token \(\w+Exception\), so the next restart may need a new sign-in\. Its log says why\.$", steam.Alerts[^1]);
+            Assert.Contains("Unable to save the Steam token: ", ConsoleText);
+            Assert.Contains(steam.AuthName + ".tmp", ConsoleText);
+        }
+
         [Fact]
         public void LeftoverTempFileIsReplaced()
         {
@@ -1608,6 +1625,240 @@ namespace SteamWebAPIAccess.Tests
             Assert.Equal(0, steam.Connects);
         }
 
+        // The bot's status and history: Steam's state, and an event at each change, never with a secret in it
+
+        static DateOnly? ExpiryOf(string token) => SteamSignInPolicy.ReadTokenExpiry(token) is { } expiry ? DateOnly.FromDateTime(expiry.UtcDateTime) : null;
+
+        static SteamUser.LoggedOffCallback LoggedOffWith(EResult result)
+        {
+            // It has no constructor that takes a result, and its setter is private
+            var loggedOff = (SteamUser.LoggedOffCallback)RuntimeHelpers.GetUninitializedObject(typeof(SteamUser.LoggedOffCallback));
+            loggedOff.JobID = JobID.Invalid;
+            typeof(SteamUser.LoggedOffCallback).GetProperty(nameof(SteamUser.LoggedOffCallback.Result))!.SetValue(loggedOff, result);
+
+            return loggedOff;
+        }
+
+        [Fact]
+        public void SteamIsOfflineFromTheStart()
+        {
+            var steam = CreateSteam("user", ValidTokenFile());
+
+            Assert.Equal(new SteamStatus(SteamConnection.Offline, steam.Now), steam.Status);
+            Assert.Empty(steam.Events);
+        }
+
+        [Fact]
+        public void LogOnsAndDropsAreRecordedWithHowLongEachTook()
+        {
+            var steam = CreateSteam("user", ValidTokenFile());
+
+            Connected(steam);
+            steam.Now += TimeSpan.FromMinutes(2);
+            LoggedOn(steam, EResult.OK);
+
+            Assert.Equal(new SteamStatus(SteamConnection.LoggedOn, steam.Now, null, ExpiryOf(GoodToken)), steam.Status);
+
+            steam.Now += TimeSpan.FromMinutes(5);
+            Disconnected(steam);
+            var dropped = steam.Now;
+
+            Assert.Equal(new SteamStatus(SteamConnection.Offline, dropped, null, ExpiryOf(GoodToken)), steam.Status);
+
+            steam.Now += TimeSpan.FromSeconds(45);
+            Connected(steam);
+            LoggedOn(steam, EResult.OK);
+
+            Assert.Equal(
+            [
+                "steam.logged_on: the first logon of this run, 120 s after the start",
+                "steam.offline: after 300 s logged on",
+                $"steam.logged_on: after 45 s offline, since {dropped:yyyy-MM-dd HH:mm:ss} UTC"
+            ], steam.Events);
+        }
+
+        // Steam then closes the connection, which is the same spell offline
+        [Fact]
+        public void LogOffIsRecordedOnceWithSteamsReason()
+        {
+            var steam = CreateSteam("user", ValidTokenFile());
+
+            Connected(steam);
+            LoggedOn(steam, EResult.OK);
+            Deliver(steam, LoggedOffWith(EResult.LogonSessionReplaced));
+            Disconnected(steam);
+
+            Assert.Equal(SteamConnection.Offline, steam.Status.State);
+            Assert.Equal(["steam.logged_off: LogonSessionReplaced"], steam.Events.Skip(1));
+        }
+
+        // A QR wait or an outage tries again and again, so each answer is recorded once until the next good logon. The status
+        // shows the last one while the bot is offline.
+        [Fact]
+        public void EachAnswerToAFailedLogOnIsRecordedOnceASpell()
+        {
+            var steam = CreateSteam("user", ValidTokenFile());
+            var start = steam.Now;
+
+            foreach (var result in new[] { EResult.ServiceUnavailable, EResult.ServiceUnavailable, EResult.TryAnotherCM, EResult.ServiceUnavailable })
+            {
+                Connected(steam);
+                LoggedOn(steam, result);
+                Disconnected(steam);
+            }
+
+            Assert.Equal(new SteamStatus(SteamConnection.Offline, start, EResult.ServiceUnavailable, ExpiryOf(GoodToken)), steam.Status);
+
+            Connected(steam);
+            LoggedOn(steam, EResult.OK);
+            Assert.Null(steam.Status.LastLogOnResult);
+
+            Disconnected(steam);
+            Connected(steam);
+            LoggedOn(steam, EResult.ServiceUnavailable);
+
+            Assert.Equal(["steam.logon_failed: ServiceUnavailable", "steam.logon_failed: TryAnotherCM"], steam.Events.Take(2));
+            Assert.StartsWith("steam.logged_on: ", steam.Events[2]);
+            Assert.Equal(["steam.offline: after 0 s logged on", "steam.logon_failed: ServiceUnavailable"], steam.Events.Skip(3));
+        }
+
+        // Needs sign-in lasts through every disconnect and QR wait until a good logon, and the new token is recorded
+        [Fact]
+        public void RejectedTokenNeedsASignInUntilTheNextGoodLogOn()
+        {
+            var steam = CreateSteam("user", ValidTokenFile());
+
+            Connected(steam);
+            LoggedOn(steam, EResult.Revoked);
+            var needed = steam.Now;
+
+            Assert.Equal(new SteamStatus(SteamConnection.NeedsSignIn, needed, EResult.Revoked), steam.Status);
+
+            steam.Now += TimeSpan.FromMinutes(1);
+            Disconnected(steam);
+            Connected(steam);
+            Disconnected(steam);
+
+            Assert.Equal(new SteamStatus(SteamConnection.NeedsSignIn, needed, EResult.Revoked), steam.Status);
+
+            steam.QRSignIn = () => Task.FromResult(NewTokens());
+            Connected(steam);
+
+            Assert.Equal(new SteamStatus(SteamConnection.NeedsSignIn, needed, EResult.Revoked, ExpiryOf(NewToken)), steam.Status);
+
+            LoggedOn(steam, EResult.OK);
+
+            Assert.Equal(new SteamStatus(SteamConnection.LoggedOn, steam.Now, null, ExpiryOf(NewToken)), steam.Status);
+            Assert.Equal(
+            [
+                "steam.logon_failed: Revoked",
+                "steam.needs_sign_in: Steam rejected the saved token (Revoked)",
+                $"steam.token_saved: expires on {ExpiryOf(NewToken):yyyy-MM-dd}"
+            ], steam.Events.Take(3));
+            Assert.StartsWith("steam.logged_on: the first logon of this run", steam.Events[3]);
+        }
+
+        [Fact]
+        public void MissingTokenNeedsASignInOnce()
+        {
+            var steam = CreateSteam("user", tokenFile: null);
+
+            Connected(steam);
+            Disconnected(steam);
+            Connected(steam);
+
+            Assert.Equal(SteamConnection.NeedsSignIn, steam.Status.State);
+            Assert.Null(steam.Status.TokenExpires);
+            Assert.Equal(["steam.needs_sign_in: there's no usable saved token"], steam.Events);
+        }
+
+        [Fact]
+        public async Task RenewedTokenIsRecorded()
+        {
+            var steam = CreateSteam("user", ValidTokenFile());
+            steam.SignedIn = SomeSteamID;
+            steam.Renewal = (_, _) => Task.FromResult(NewTokens());
+
+            Connected(steam);
+            await steam.RenewTokenAsync();
+
+            Assert.Equal(ExpiryOf(NewToken), steam.Status.TokenExpires);
+            Assert.Equal([$"steam.token_renewed: expires on {ExpiryOf(NewToken):yyyy-MM-dd}"], steam.Events);
+
+            // Steam doesn't always issue a new one, and then nothing changed
+            steam.Renewal = (_, _) => Task.FromResult(new SteamTokens(null, "access", ""));
+            await steam.RenewTokenAsync();
+
+            Assert.Single(steam.Events);
+        }
+
+        // The recorder is the bot's, and nothing it does may stop Steam's handlers
+        [Fact]
+        public void RecorderThatFailsNeverStopsTheSignIn()
+        {
+            var steam = CreateSteam("user", ValidTokenFile());
+            steam.RecordEvent = (_, _) => throw new InvalidOperationException("The recorder failed");
+
+            Connected(steam);
+            LoggedOn(steam, EResult.OK);
+
+            Assert.Equal(SteamConnection.LoggedOn, steam.Status.State);
+            Assert.Single(steam.LogOns);
+            Assert.Contains("Unable to record a Steam event: InvalidOperationException", ConsoleText);
+            Assert.DoesNotContain("The recorder failed", ConsoleText);
+        }
+
+        // The account's name, from the setting, the token file or a sign-in, never reaches the console or the error output,
+        // through a start from a saved token, a QR sign-in and a password sign-in. Nor does an event hold a name, the SteamID
+        // or a token.
+        [Fact]
+        public void AccountNameNeverReachesTheLog()
+        {
+            var realError = Console.Error;
+            var error = new ConsoleCapture();
+            Console.SetError(error);
+
+            try
+            {
+                // A start from a saved token whose file names one account while the setting names another
+                var steam = CreateSteam("ConfiguredAccountName", $"{ValidTokenFile()}\n$NAME$SavedAccountName");
+                Connected(steam);
+                LoggedOn(steam, EResult.OK);
+                Deliver(steam, LoggedOffWith(EResult.LogonSessionReplaced));
+                Disconnected(steam);
+
+                // A rejected token, then a QR sign-in
+                Connected(steam);
+                LoggedOn(steam, EResult.Revoked);
+                Disconnected(steam);
+                steam.QRSignIn = () => Task.FromResult(new SteamTokens("ScannedAccountName", "new access token", NewToken));
+                Connected(steam);
+                LoggedOn(steam, EResult.OK);
+
+                // A password sign-in on a fresh start, without the token file the other one left
+                File.Delete(steam.AuthFullPath);
+                var password = CreateSteam("ConfiguredAccountName", tokenFile: null);
+                password.isQRAuthenticator = false;
+                password.PasswordSignIn = () => Task.FromResult(new SteamTokens("PasswordAccountName", "new access token", NewToken));
+                Connected(password);
+                LoggedOn(password, EResult.OK);
+
+                Assert.Equal(["SavedAccountName", "SavedAccountName", "ScannedAccountName"], steam.LogOns.Select(logOn => logOn.Username));
+                Assert.Equal("PasswordAccountName", Assert.Single(password.LogOns).Username);
+                Assert.Contains("Connected to Steam! Logging in", ConsoleText);
+
+                var everything = ConsoleText + error + string.Join("\n", steam.Events.Concat(password.Events));
+
+                foreach (var secret in new[] { "ConfiguredAccountName", "SavedAccountName", "ScannedAccountName", "PasswordAccountName", "AccountName", GoodToken, NewToken,
+                    "new access token", SomeSteamID.ConvertToUInt64().ToString() })
+                    Assert.DoesNotContain(secret, everything);
+            }
+            finally
+            {
+                Console.SetError(realError);
+            }
+        }
+
         // Helpers
 
         static readonly SteamID SomeSteamID = new(76561198000000000);
@@ -1694,6 +1945,9 @@ namespace SteamWebAPIAccess.Tests
             public readonly List<TimeSpan> Waits = new();
             public readonly List<TimeSpan> WaitLimits = new();
             public readonly List<string> Alerts = new();
+
+            // What the bot's recorder was given, as "kind: detail"
+            public readonly List<string> Events = new();
             public int Connects, ConnectFailures, Renewals, QRBegins, PasswordBegins;
             public int Disconnects => Volatile.Read(ref disconnects);
             public DateTimeOffset Now = DateTimeOffset.UtcNow;
@@ -1714,6 +1968,12 @@ namespace SteamWebAPIAccess.Tests
                         Alerts.Add(message);
 
                     return Task.CompletedTask;
+                };
+
+                RecordEvent = (kind, detail) =>
+                {
+                    lock (Events)
+                        Events.Add($"{kind}: {detail}");
                 };
             }
 

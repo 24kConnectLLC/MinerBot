@@ -1,6 +1,7 @@
 ﻿using QRCoder;
 using SteamKit2;
 using SteamKit2.Authentication;
+using System.Globalization;
 using System.Text;
 
 namespace SteamWebAPIAccess
@@ -45,6 +46,13 @@ namespace SteamWebAPIAccess
         public SteamUser steamUser { get; set; }
         public SteamMatchmaking steamMatchmaking { get; private set; }
         public Func<string, Task>? AlertOwner { get; set; }
+        public Action<string, string?>? RecordEvent { get; set; }
+
+        // Replaced whole under its lock, because the pump and the daily renewal both change it, and read from any thread
+        readonly object statusLock = new();
+        SteamStatus status = new(SteamConnection.Offline, DateTimeOffset.UtcNow);
+
+        public SteamStatus Status => Volatile.Read(ref status);
 
         // SteamKit's own timeout doesn't cover a call that starts just as the connection drops. Shorter in tests.
         internal TimeSpan SteamCallLimit = TimeSpan.FromSeconds(30);
@@ -62,7 +70,10 @@ namespace SteamWebAPIAccess
         EResult? lastLogOnFailure;
         string? warnedExpiryOf;
         int reconnectAttempts, passwordAttempts, stallCheck;
-        bool hasConnected, logOnSent, retryQuickly, hasRenewedToken, alertedSignIn, alertedOutage;
+        bool hasConnected, logOnSent, retryQuickly, hasRenewedToken, alertedSignIn, alertedOutage, hasLoggedOn;
+
+        // The logon answers already recorded in this spell offline, so a QR wait or an outage records each one once
+        readonly HashSet<EResult> failuresRecorded = new();
 
         public void SetCredentials(string key, string shouldRemember, string username, string password)
         {
@@ -97,7 +108,9 @@ namespace SteamWebAPIAccess
 
             steamMatchmaking = steamClient.GetHandler<SteamMatchmaking>();
 
-            offlineSince = UtcNow;
+            var start = UtcNow;
+            offlineSince = start;
+            ChangeStatus(_ => new SteamStatus(SteamConnection.Offline, start));
 
             // Register a few callbacks we're interested in
             // These are registered upon creaton to a callback manager, which will then route the callbacks to the functions specified
@@ -299,6 +312,10 @@ namespace SteamWebAPIAccess
         {
             Console.WriteLine($"Logged off of Steam: {callback.Result}");
 
+            // The disconnect that follows doesn't record it again
+            ChangeStatus(current => current.State == SteamConnection.LoggedOn ? current with { State = SteamConnection.Offline, Since = UtcNow } : current);
+            RecordSteamEvent(SteamEvents.LoggedOff, callback.Result.ToString());
+
             // Nothing would reconnect if Steam left the connection open after this
             Disconnect();
         }
@@ -322,12 +339,23 @@ namespace SteamWebAPIAccess
 
             StopStallCheck();
 
+            // Before offlineSince is cleared. The first logon counts from the start.
+            var offlineFrom = offlineSince ?? UtcNow;
+            var loggedOn = hasLoggedOn
+                ? Detail($"after {Seconds(UtcNow - offlineFrom)} s offline, since {offlineFrom:yyyy-MM-dd HH:mm:ss} UTC")
+                : Detail($"the first logon of this run, {Seconds(UtcNow - offlineFrom)} s after the start");
+
             reconnectAttempts = 0;
             passwordAttempts = 0;
             offlineSince = null;
             otherFailuresSince = null;
             lastLogOnFailure = null;
             _steamID = callback.ClientSteamID;
+            hasLoggedOn = true;
+            failuresRecorded.Clear();
+
+            ChangeStatus(current => new SteamStatus(SteamConnection.LoggedOn, UtcNow, null, current.TokenExpires));
+            RecordSteamEvent(SteamEvents.LoggedOn, loggedOn);
 
             Console.WriteLine("Successfully logged on!");
             // At this point, we'd be able to perform actions on Steam
@@ -352,6 +380,10 @@ namespace SteamWebAPIAccess
         void HandleFailedLogOn(EResult result)
         {
             lastLogOnFailure = result;
+            ChangeStatus(current => current with { LastLogOnResult = result });
+
+            if (failuresRecorded.Add(result))
+                RecordSteamEvent(SteamEvents.LogOnFailed, result.ToString());
 
             switch (SteamSignInPolicy.ClassifyLogOnFailure(result))
             {
@@ -374,6 +406,7 @@ namespace SteamWebAPIAccess
                 _RefreshToken = null;
             }
 
+            ChangeStatus(current => current with { TokenExpires = null });
             NeedsSignIn($"Steam rejected the saved token ({result})");
 
             // There's nothing to wait for, so whoever is watching gets a QR code in seconds
@@ -387,6 +420,13 @@ namespace SteamWebAPIAccess
 
             logOnSent = false;
             offlineSince ??= UtcNow;
+
+            // A connection that was logged on ended. Only the pump changes the state, so it can't change in between.
+            var before = Status;
+
+            if (before.State == SteamConnection.LoggedOn
+                && ChangeStatus(current => current with { State = SteamConnection.Offline, Since = UtcNow }))
+                RecordSteamEvent(SteamEvents.Offline, Detail($"after {Seconds(UtcNow - before.Since)} s logged on"));
 
             AlertIfOfflineTooLong();
 
@@ -458,20 +498,22 @@ namespace SteamWebAPIAccess
                 if (!hasReadAuthFile)
                     ReadTokenFile();
 
-                Console.WriteLine($"Connected to Steam! Logging in {_tokenAccount ?? _username}");
+                // Never the account's name, which the log would otherwise hold for anyone who can read it
+                Console.WriteLine("Connected to Steam! Logging in");
 
                 if (needsToCreateRefreshToken)
                 {
                     // A QR code needs no password and sends no Steam Guard codes, so it's where password sign-in ends up
                     var tokens = await (isQRAuthenticator || passwordAttempts >= MaxPasswordAttempts ? SignInWithQRCode() : SignInWithPassword());
 
-                    Console.WriteLine($"Logging in as '{tokens.AccountName}'...");
+                    Console.WriteLine("Signed in to Steam. Logging in with the new token...");
 
                     _tokenAccount = tokens.AccountName;
                     reconnectAttempts = 0;
                     otherFailuresSince = null;
 
-                    SaveTokens(tokens);
+                    var expiry = SaveTokens(tokens);
+                    RecordSteamEvent(SteamEvents.TokenSaved, Detail($"expires on {expiry:yyyy-MM-dd}"));
                 }
 
                 // Note that we are using RefreshToken for logging on here
@@ -561,10 +603,14 @@ namespace SteamWebAPIAccess
                     _accessToken = accessToken;
                     _RefreshToken = refreshToken;
                 }
+
+                var expires = DateOnly.FromDateTime(expiry.Value.UtcDateTime);
+                ChangeStatus(current => current with { TokenExpires = expires });
             }
         }
 
-        void SaveTokens(SteamTokens tokens)
+        // Says when the new token expires
+        DateTimeOffset? SaveTokens(SteamTokens tokens)
         {
             lock (tokenLock)
             {
@@ -574,7 +620,13 @@ namespace SteamWebAPIAccess
                 TrySaveTokens();
             }
 
-            Console.WriteLine($"The Steam token expires on {SteamSignInPolicy.ReadTokenExpiry(tokens.RefreshToken):yyyy-MM-dd}");
+            var expiry = SteamSignInPolicy.ReadTokenExpiry(tokens.RefreshToken);
+            DateOnly? expires = expiry is { } end ? DateOnly.FromDateTime(end.UtcDateTime) : null;
+            ChangeStatus(current => current with { TokenExpires = expires });
+
+            Console.WriteLine($"The Steam token expires on {expiry:yyyy-MM-dd}");
+
+            return expiry;
         }
 
         bool TrySaveTokens()
@@ -588,7 +640,10 @@ namespace SteamWebAPIAccess
             }
             catch (Exception e)
             {
-                Alert($"MinerBot couldn't save its Steam token, so the next restart may need a new sign-in: {e.Message}");
+                // The bot's history keeps each alert's text, which is the bot's own wording, so the library's message, which
+                // names the file, goes only to the log
+                Console.WriteLine($"Unable to save the Steam token: {e.Message}");
+                Alert($"MinerBot couldn't save its Steam token ({e.GetType().Name}), so the next restart may need a new sign-in. Its log says why.");
 
                 return false;
             }
@@ -625,7 +680,10 @@ namespace SteamWebAPIAccess
                 {
                     // Steam only sometimes issues a new one, and a new sign-in or a rejected logon while this ran wins
                     if (!string.IsNullOrEmpty(tokens.RefreshToken) && _RefreshToken == refreshToken)
-                        SaveTokens(tokens);
+                    {
+                        var renewedUntil = SaveTokens(tokens);
+                        RecordSteamEvent(SteamEvents.TokenRenewed, Detail($"expires on {renewedUntil:yyyy-MM-dd}"));
+                    }
                 }
             }
             catch (Exception e)
@@ -655,6 +713,10 @@ namespace SteamWebAPIAccess
 
             alertedSignIn = true;
 
+            // Until the next good logon, through every disconnect and QR wait in between
+            ChangeStatus(current => current with { State = SteamConnection.NeedsSignIn, Since = UtcNow });
+            RecordSteamEvent(SteamEvents.NeedsSignIn, reason);
+
             Alert($"MinerBot can't sign in to Steam: {reason}. {SignInInstructions}");
         }
 
@@ -682,6 +744,39 @@ namespace SteamWebAPIAccess
                 Console.WriteLine($"Unable to alert the owner: {e.Message}");
             }
         }
+
+        // Applies the change under the lock, and says whether it changed anything
+        bool ChangeStatus(Func<SteamStatus, SteamStatus> change)
+        {
+            lock (statusLock)
+            {
+                var changed = change(status);
+
+                if (changed == status)
+                    return false;
+
+                Volatile.Write(ref status, changed);
+                return true;
+            }
+        }
+
+        // The bot's recorder is quick and never throws, but it must never break the pump, or a renewal that holds the
+        // token lock, whatever happens to it
+        void RecordSteamEvent(string kind, string? detail)
+        {
+            try
+            {
+                RecordEvent?.Invoke(kind, detail);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"Unable to record a Steam event: {e.GetType().Name}");
+            }
+        }
+
+        static string Detail(FormattableString text) => text.ToString(CultureInfo.InvariantCulture);
+
+        static string Seconds(TimeSpan? time) => Math.Max(0, time?.TotalSeconds ?? 0).ToString("0", CultureInfo.InvariantCulture);
 
         public void UpdateTokenFile()
         {

@@ -1,0 +1,216 @@
+using DataAccessLibrary.Status;
+using DataAccessLibrary.Tests.Database;
+
+namespace DataAccessLibrary.Tests
+{
+    // The daily clean-up's rules, each with rows just either side of its cutoff. The cutoffs are what the job gives, so a
+    // row exactly at one stays.
+    [Collection("Database")]
+    public class RetentionDataTests(MariaDbFixture fixture)
+    {
+        static readonly DateTime Cutoff = new(2026, 8, 16, 12, 0, 0, DateTimeKind.Utc);
+        static readonly DateTime Today = new(2026, 11, 14, 0, 0, 0, DateTimeKind.Utc);
+        static readonly DateTime KeepFrom = Today.AddDays(-90);
+        const int Chunk = RetentionData.ChunkLimit;
+
+        async Task<MariaDbFixture> StartAsync()
+        {
+            var db = fixture.Require();
+            await db.ClearAsync(MariaDbFixture.AuditTable, MariaDbFixture.SessionTable, MariaDbFixture.EventTable, MariaDbFixture.JobRunTable,
+                MariaDbFixture.SampleTable, MariaDbFixture.DailyTable);
+            return db;
+        }
+
+        Task AuditAsync(DateTime at, string? ip = "203.0.113.7") => fixture.RootExecuteAsync(
+            $"INSERT INTO {MariaDbFixture.AuditTable} (at, actor_role, action, outcome, ip) VALUES (@at, 'admin', 'armor.approve', 'ok', @ip)", new { at, ip });
+
+        // MariaDB's sequence table makes many rows in one statement, one second apart from the start given
+        Task ManyAuditRowsAsync(int count, DateTime from) => fixture.RootExecuteAsync(
+            $@"INSERT INTO {MariaDbFixture.AuditTable} (at, actor_role, action, outcome, ip)
+               SELECT TIMESTAMPADD(SECOND, seq, @from), 'admin', 'armor.approve', 'ok', '203.0.113.7' FROM {MariaDbFixture.BotDatabase}.seq_1_to_{count}", new { from });
+
+        async Task<List<DateTime>> TimesAsync(string column, string table) =>
+            await fixture.RootQueryAsync<DateTime>($"SELECT {column} FROM {table} ORDER BY {column}");
+
+        // Two years, by the cutoff the job gives
+        [Fact]
+        public async Task AuditRowsGoBeforeTheCutoff()
+        {
+            var db = await StartAsync();
+            await AuditAsync(Cutoff.AddMilliseconds(-1));
+            await AuditAsync(Cutoff);
+            await AuditAsync(Cutoff.AddMilliseconds(1));
+
+            Assert.Equal(1, await db.Retention().DeleteAuditRows(Cutoff, Chunk));
+            Assert.Equal([Cutoff, Cutoff.AddMilliseconds(1)], await TimesAsync("at", MariaDbFixture.AuditTable));
+        }
+
+        // The rows stay, without the visitor's address. A row already without one isn't counted, or a chunk of them would
+        // never come back short.
+        [Fact]
+        public async Task AddressesAreClearedBeforeTheCutoff()
+        {
+            var db = await StartAsync();
+            await AuditAsync(Cutoff.AddMilliseconds(-2), ip: null);
+            await AuditAsync(Cutoff.AddMilliseconds(-1));
+            await AuditAsync(Cutoff);
+
+            Assert.Equal(1, await db.Retention().ClearAuditAddresses(Cutoff, Chunk));
+            Assert.Equal(0, await db.Retention().ClearAuditAddresses(Cutoff, Chunk));
+
+            var rows = await fixture.RootQueryAsync<(DateTime, string?)>($"SELECT at, ip FROM {MariaDbFixture.AuditTable} ORDER BY at");
+            Assert.Equal([(Cutoff.AddMilliseconds(-2), (string?)null), (Cutoff.AddMilliseconds(-1), null), (Cutoff, "203.0.113.7")], rows);
+        }
+
+        // Oldest first, a chunk at a time, until one comes back short
+        [Fact]
+        public async Task MoreRowsThanOneChunkGoInChunks()
+        {
+            var db = await StartAsync();
+            var retention = db.Retention();
+            await ManyAuditRowsAsync(6000, Cutoff.AddDays(-1));
+            await AuditAsync(Cutoff.AddHours(1));
+
+            // The oldest go first
+            Assert.Equal(Chunk, await retention.ClearAuditAddresses(Cutoff, Chunk));
+            Assert.Equal(Cutoff.AddDays(-1).AddSeconds(5001),
+                (await fixture.RootQueryAsync<DateTime>($"SELECT MIN(at) FROM {MariaDbFixture.AuditTable} WHERE ip IS NOT NULL")).Single());
+            Assert.Equal(1000, await retention.ClearAuditAddresses(Cutoff, Chunk));
+            Assert.Equal(0, await retention.ClearAuditAddresses(Cutoff, Chunk));
+
+            Assert.Equal(Chunk, await retention.DeleteAuditRows(Cutoff, Chunk));
+            Assert.Equal(Cutoff.AddDays(-1).AddSeconds(5001), (await TimesAsync("at", MariaDbFixture.AuditTable))[0]);
+            Assert.Equal(1000, await retention.DeleteAuditRows(Cutoff, Chunk));
+            Assert.Equal([Cutoff.AddHours(1)], await TimesAsync("at", MariaDbFixture.AuditTable));
+            Assert.Equal("203.0.113.7", (await fixture.RootQueryAsync<string?>($"SELECT ip FROM {MariaDbFixture.AuditTable}")).Single());
+        }
+
+        [Fact]
+        public async Task EventsGoBeforeTheCutoff()
+        {
+            var db = await StartAsync();
+
+            foreach (var (seq, at) in new[] { (1, Cutoff.AddMilliseconds(-1)), (2, Cutoff), (3, Cutoff.AddMilliseconds(1)) })
+                await fixture.RootExecuteAsync($"INSERT INTO {MariaDbFixture.EventTable} (run_id, seq, at, kind, level) VALUES (1, @seq, @at, 'bot.started', 'info')", new { seq, at });
+
+            Assert.Equal(1, await db.Retention().DeleteEvents(Cutoff, Chunk));
+            Assert.Equal([Cutoff, Cutoff.AddMilliseconds(1)], await TimesAsync("at", MariaDbFixture.EventTable));
+        }
+
+        // By when each run started, so a run that was cut off and never ended goes too
+        [Fact]
+        public async Task JobRunsGoBeforeTheCutoff()
+        {
+            var db = await StartAsync();
+
+            foreach (var (seq, at) in new[] { (1, Cutoff.AddMilliseconds(-1)), (2, Cutoff), (3, Cutoff.AddMilliseconds(1)) })
+                await fixture.RootExecuteAsync($"INSERT INTO {MariaDbFixture.JobRunTable} (run_id, seq, job, started_at, result) VALUES (1, @seq, 'ArmorJob.AddColorArrays', @at, 'cut_off')", new { seq, at });
+
+            Assert.Equal(1, await db.Retention().DeleteJobRuns(Cutoff, Chunk));
+            Assert.Equal([Cutoff, Cutoff.AddMilliseconds(1)], await TimesAsync("started_at", MariaDbFixture.JobRunTable));
+        }
+
+        // Unused for the time given, or ended that long ago
+        [Fact]
+        public async Task SessionsGoWhenTheyEndedOrWereLastUsedBeforeTheCutoff()
+        {
+            var db = await StartAsync();
+            var sessions = new (string Key, DateTime LastSeen, DateTime Expires)[]
+            {
+                (new string('a', 43), Cutoff.AddDays(-2), Cutoff.AddMilliseconds(-1)),
+                (new string('b', 43), Cutoff.AddMilliseconds(-1), Cutoff.AddDays(1)),
+                (new string('c', 43), Cutoff, Cutoff),
+                (new string('d', 43), Cutoff.AddDays(1), Cutoff.AddDays(2))
+            };
+
+            foreach (var (key, lastSeen, expires) in sessions)
+                await db.Sessions().CreateSession(key, new Dashboard.Models.DashboardSession
+                {
+                    user_id = 1000000000000000001,
+                    user_name = "Test User",
+                    created_at = lastSeen.AddHours(-1),
+                    last_seen_at = lastSeen,
+                    expires_at = expires,
+                    ticket = [1]
+                });
+
+            Assert.Equal(2, await db.Retention().DeleteSessions(Cutoff, Chunk));
+            Assert.Equal([Cutoff, Cutoff.AddDays(1)], await TimesAsync("last_seen_at", MariaDbFixture.SessionTable));
+        }
+
+        // Every day from the first given up to today that has samples gets its totals, and a total written again counts
+        // the samples that arrived late
+        [Fact]
+        public async Task DaysWithSamplesAreTotalled()
+        {
+            var db = await StartAsync();
+            var retention = db.Retention();
+            var dayOne = Today.AddDays(-2);
+            var dayTwo = Today.AddDays(-1);
+
+            // Before the first day kept, which is never totalled again, and today, which isn't over
+            await SampleAsync(KeepFrom.AddMinutes(-1), true, true);
+            await SampleAsync(Today, true, true);
+
+            await SampleAsync(dayOne, true, false);
+            await SampleAsync(dayOne.AddMinutes(1), true, true);
+            await SampleAsync(dayOne.AddMinutes(2), false, false);
+            await SampleAsync(dayTwo.AddHours(23).AddMinutes(59), true, true);
+
+            Assert.Equal(2, await retention.TotalUptimeDays(KeepFrom, Today));
+            Assert.Equal([(dayOne, 3, 2, 1), (dayTwo, 1, 1, 1)], await DailyAsync());
+
+            // A late sample, written from the bot's memory after an outage, counts at the next run
+            await SampleAsync(dayTwo, false, true);
+            Assert.Equal(2, await retention.TotalUptimeDays(KeepFrom, Today));
+            Assert.Equal([(dayOne, 3, 2, 1), (dayTwo, 2, 1, 2)], await DailyAsync());
+        }
+
+        // Whole days only: the minute before the first day kept goes, the first minute of it stays. A day's total stays when
+        // its samples have gone.
+        [Fact]
+        public async Task SamplesGoInWholeDaysAndTheirTotalsStay()
+        {
+            var db = await StartAsync();
+            var retention = db.Retention();
+            var lastDayGoing = KeepFrom.AddDays(-1);
+
+            await SampleAsync(lastDayGoing, true, true);
+            await SampleAsync(KeepFrom.AddMinutes(-1), true, false);
+            await SampleAsync(KeepFrom, false, false);
+
+            // Totalled while all its samples were there, the night before they go
+            Assert.Equal(1, await retention.TotalUptimeDays(lastDayGoing, KeepFrom));
+
+            Assert.Equal(2, await retention.DeleteSamples(KeepFrom, Chunk));
+            Assert.Equal([KeepFrom], await TimesAsync("minute", MariaDbFixture.SampleTable));
+            Assert.Equal([(lastDayGoing, 2, 2, 1)], await DailyAsync());
+
+            // The next night's totals start at the first day kept, so the day that went keeps its total
+            Assert.Equal(1, await retention.TotalUptimeDays(KeepFrom, KeepFrom.AddDays(1)));
+            Assert.Equal([(lastDayGoing, 2, 2, 1), (KeepFrom, 1, 0, 0)], await DailyAsync());
+        }
+
+        [Fact]
+        public async Task MoreSamplesThanOneChunkGoInChunks()
+        {
+            var db = await StartAsync();
+            var retention = db.Retention();
+
+            await fixture.RootExecuteAsync(
+                $@"INSERT INTO {MariaDbFixture.SampleTable} (minute, discord_up, steam_up)
+                   SELECT TIMESTAMPADD(MINUTE, seq - 1, @from), 1, 0 FROM {MariaDbFixture.BotDatabase}.seq_1_to_6000", new { from = KeepFrom.AddDays(-10) });
+
+            Assert.Equal(Chunk, await retention.DeleteSamples(KeepFrom, Chunk));
+            Assert.Equal(KeepFrom.AddDays(-10).AddMinutes(Chunk), (await TimesAsync("minute", MariaDbFixture.SampleTable))[0]);
+            Assert.Equal(1000, await retention.DeleteSamples(KeepFrom, Chunk));
+            Assert.Equal(0, await retention.DeleteSamples(KeepFrom, Chunk));
+        }
+
+        Task SampleAsync(DateTime minute, bool discordUp, bool steamUp) => fixture.RootExecuteAsync(
+            $"INSERT INTO {MariaDbFixture.SampleTable} (minute, discord_up, steam_up) VALUES (@minute, @discordUp, @steamUp)", new { minute, discordUp, steamUp });
+
+        Task<List<(DateTime, int, int, int)>> DailyAsync() => fixture.RootQueryAsync<(DateTime, int, int, int)>(
+            $"SELECT day, sampled_minutes, discord_minutes, steam_minutes FROM {MariaDbFixture.DailyTable} ORDER BY day");
+    }
+}
