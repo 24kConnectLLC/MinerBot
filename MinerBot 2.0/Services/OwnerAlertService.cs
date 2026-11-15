@@ -1,5 +1,6 @@
 using Discord;
 using Discord.WebSocket;
+using MinerBot_2._0.Status;
 using System.Diagnostics;
 
 namespace MinerBot_2._0.Services
@@ -12,23 +13,50 @@ namespace MinerBot_2._0.Services
         private static readonly TimeSpan ReadyLimit = TimeSpan.FromMinutes(2);
         private static readonly TimeSpan ReadyCheckInterval = TimeSpan.FromMilliseconds(100);
 
+        // How much of an alert that couldn't be sent goes into the bot's history with the reason
+        const int StartOfMessage = 200;
+
         private readonly DiscordSocketClient _client;
         private readonly IConfiguration _configuration;
+        private readonly BotRecorder _recorder;
 
-        public OwnerAlertService(DiscordSocketClient client, IConfiguration configuration)
+        public OwnerAlertService(DiscordSocketClient client, IConfiguration configuration, BotRecorder recorder)
         {
             _client = client;
             _configuration = configuration;
+            _recorder = recorder;
         }
 
+        // Each alert goes into the bot's history too. Its text is the bot's own wording, which never holds a secret.
         public async Task SendAsync(string message)
         {
-            await WaitForDiscord();
+            try
+            {
+                await WaitForDiscord();
 
-            var recipient = await _client.GetUserAsync(await GetRecipientId());
-            var channel = await recipient.CreateDMChannelAsync();
+                var recipient = await _client.GetUserAsync(await GetRecipientId());
+                var channel = await recipient.CreateDMChannelAsync();
 
-            await channel.SendMessageAsync(message, allowedMentions: AllowedMentions.None);
+                await channel.SendMessageAsync(message, allowedMentions: AllowedMentions.None);
+            }
+            catch (Exception e)
+            {
+                // The caller reports it as well
+                _recorder.Record(BotEvents.AlertFailed, $"{e.GetType().Name}: {Start(message)}");
+                throw;
+            }
+
+            _recorder.Record(BotEvents.AlertSent, message);
+        }
+
+        // A character outside the Basic Multilingual Plane is kept whole or left out
+        static string Start(string message)
+        {
+            if (message.Length <= StartOfMessage)
+                return message;
+
+            var end = char.IsHighSurrogate(message[StartOfMessage - 1]) ? StartOfMessage - 1 : StartOfMessage;
+            return message[..end];
         }
 
         // The application's owner is the default, but for a team that's the team's owner, who may not be the one running the bot

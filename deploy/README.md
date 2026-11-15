@@ -185,9 +185,29 @@ deploy's swap, it must answer 200 again within 30 seconds, but no other readines
 `status.sh --check` looks at it only once a night. A first swap (503 before it), a swap over a dashboard that already
 fails, or one whose request Cloudflare challenges has nothing to compare. A failed swap's put-back, a deploy that finds
 the dashboard already on its image, `rollback.sh`, and setup's start and recreate don't look at the public page at all.
-That's why the page check goes through the socket. For the bot, until PR 6 gives it a status the deploy can ask: a line
-matching `BOT_READY_PATTERN` from `server.conf` in its log within 150 seconds, and 20 seconds later it still runs with
-the same start time and no new restart. A container on another image than the one it must run fails at once.
+That's why the page check goes through the socket. For the bot: its image's own health check says healthy within 150
+seconds, and 20 seconds later it still runs with the same start time and no new restart. The bot rewrites a heartbeat
+file every 5 seconds while it's up on Discord, and `dotnet "MinerBot 2.0.dll" healthcheck` passes while that's at most a
+minute old, so healthy means the bot reached Discord. Unhealthy fails at once. An image without a health check, from
+before the heartbeat, which `rollback.sh` may run, is ready instead when its log has a line matching
+`BOT_READY_PATTERN` from `server.conf`. A container on another image than the one it must run fails at once.
+
+The bot's own status, for the owner's check after a deploy: its health and the health check's last answers,
+
+```bash
+docker inspect -f '{{.State.Health.Status}}' minerbot-bot
+docker inspect -f '{{json .State.Health}}' minerbot-bot
+```
+
+and what it recorded in MinerBot's database, where every time is UTC, so `UTC_TIMESTAMP()`, never `NOW()`, which is
+the server's Eastern time. The heartbeat is under 60 seconds old while the bot runs, and a Steam reconnect shows up as
+`steam.offline` and `steam.logged_on` events, or `steam.logged_off` and `steam.logged_on` when Steam logged the bot off
+first:
+
+```bash
+mariadb <BOT_DB from server.conf> -e "SELECT heartbeat_at, TIMESTAMPDIFF(SECOND, heartbeat_at, UTC_TIMESTAMP(3)) AS seconds_old, version, discord_state, steam_state, stopped_at FROM bot_status"
+mariadb <BOT_DB from server.conf> -e "SELECT at, kind, level, detail FROM bot_events ORDER BY id DESC LIMIT 20"
+```
 
 `rollback.sh` puts its tags back when Compose never replaced the container: "Compose didn't recreate the <service> on
 <rev> (above), so it still runs <rev>, and its tags are back as they were. Nothing was changed." A rollback onto an
@@ -209,7 +229,8 @@ starts it and checks that it's ready. Running it once more goes back to `:previo
   another line;
 - the Origin certificate ending within 30 days;
 - `nginx -t` failing twice, a minute apart, so a reload in progress isn't reported;
-- the bot not running, its container missing, or Docker not answering;
+- the bot not running, unhealthy (its heartbeat over a minute old, so it isn't up on Discord; an image without a
+  health check isn't reported), its container missing, or Docker not answering;
 - with `dashboard.env` there: the dashboard not running or unhealthy; its socket not as nginx needs it (a missing
   socket only while the dashboard runs); and the public home page answering anything but 200 twice, a minute apart,
   while the dashboard runs. A Cloudflare challenge (`cf-mitigated: challenge`, as Bot Fight Mode may send the server)
@@ -363,9 +384,9 @@ A failure before the dashboard runs on `minerbot` puts back those three values a
 with setup or `fill-secrets.sh` stays, and the dashboard's rights go back to the old database, where it still runs.
 Once the dashboard has run on `minerbot`, what it wrote is there only, so the move never goes back: running it again
 finishes it. A run cut off anywhere is finished by running it again too. One cut off before `server.conf` moved starts
-over, and drops the `minerbot` it made, which nothing has used. The bot keeps running throughout: it doesn't use
-MinerBot's database yet, so it takes the new connection string when it's next recreated, and only the deploy's
-migrations use it until then.
+over, and drops the `minerbot` it made, which nothing has used. The bot keeps running throughout, on the connection
+string it started with, until it's next recreated. Before PR 6 it didn't use MinerBot's database; since, it records its
+status and history there, so a move while it runs loses at most what it records meanwhile in the old database.
 
 Once the dashboard works on `minerbot`, the second step deletes the old database with cPanel's own tool, as the account
 that owns it, so cPanel's map stays right:
@@ -695,12 +716,11 @@ rule reports only a second such night in a row.
 Restore, as `README.txt` gives it on the server. Nothing from a dump ever runs as MariaDB's root: `mariadb-dump` writes
 a trigger's, event's or routine's text unchecked between `DELIMITER` lines, so text the server stored as one statement
 can reach the client as several, and anyone who can make one in MinerBot's database (the bot's login, and, before
-`move-database.sh`, the cPanel account that owned it) could have a root restore run SQL of their choosing. PR 6, which gives the bot this database,
-updates steps 2 and 6.
+`move-database.sh`, the cPanel account that owned it) could have a root restore run SQL of their choosing.
 
 1. `./backup.sh manual`, a dump of the current state first.
-2. `docker compose stop dashboard`, and the bot too once it uses this database. Don't run `./setup-dashboard.sh` before
-   step 6: it starts a stopped dashboard.
+2. `docker compose stop dashboard bot`: the bot writes its status and history in this database too. Don't run
+   `./setup-dashboard.sh` before step 6: it starts a stopped dashboard.
 3. `gzip -t <file>`; `gzip -dc <file> | tail -n 1` must show `-- Dump completed`; and
    `gzip -dc <file> | grep -c '^DELIMITER'` must print 0. A `DELIMITER` line means the dump holds a trigger, event or
    routine, which no migration makes: never restore that dump, as anyone. Look at it with `gzip -dc <file> | less`,
@@ -732,8 +752,9 @@ updates steps 2 and 6.
    again, from the commit the dashboard runs (`./status.sh` shows it), since every migration can run twice:
    `./deploy.sh <that commit> --only dashboard --no-start`, which builds, dumps and migrates, and swaps nothing; or, to
    undo the last dashboard deploy's migration, `./rollback.sh dashboard`, which goes back to the image from before that
-   deploy. Then `docker compose up -d --no-build --no-deps dashboard`, and the bot too if step 2 stopped it, then
-   `./status.sh`.
+   deploy. Then `docker compose up -d --no-build --no-deps dashboard bot`, then `./status.sh`. The dump's status row
+   is the one from when it was made, so the bot's first write may record `bot.unclean_end` for that run, which was no
+   crash.
 
 ## Tests
 

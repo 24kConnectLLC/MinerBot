@@ -3,6 +3,8 @@ using DataAccessLibrary.Armor;
 using DataAccessLibrary.Armor.Models;
 using DataAccessLibrary.Discord;
 using DataAccessLibrary.Discord.Models;
+using DataAccessLibrary.Status;
+using DataAccessLibrary.Status.Models;
 using Steam.Models;
 using Microsoft.Extensions.Internal;
 using Steam.Models.SteamCommunity;
@@ -190,5 +192,146 @@ namespace MinerBot.Tests
         public DateTimeOffset UtcNow { get; set; } = DateTimeOffset.UtcNow;
 
         public override DateTimeOffset GetUtcNow() => UtcNow;
+    }
+
+    // Steam for the worker and the status sampler, which only start its pump and read its status
+    internal sealed class FakeSteam : ISteamAPIAccess
+    {
+        public TaskCompletionSource PumpStarted { get; } = new();
+        public int Renewals;
+        public Exception? PumpFailure;
+
+        public uint appID { get; set; }
+        public CallbackManager manager { get; set; } = null!;
+        public string PublisherWebAPIKey { get; set; } = "";
+        public SteamClient steamClient { get; set; } = null!;
+        public SteamMatchmaking steamMatchmaking => null!;
+        public SteamUser steamUser { get; set; } = null!;
+        public Func<string, Task>? AlertOwner { get; set; }
+        public Action<string, string?>? RecordEvent { get; set; }
+        public SteamStatus Status { get; set; } = new(SteamConnection.Offline, DateTimeOffset.UnixEpoch);
+
+        public void AuthenticateClient() { }
+        public void SetCredentials(string key, string shouldRemember, string username = "", string password = "") { }
+
+        public Task RunCallbacksAsync(CancellationToken stoppingToken)
+        {
+            PumpStarted.TrySetResult();
+            return PumpFailure != null ? Task.FromException(PumpFailure) : Task.Delay(Timeout.Infinite, stoppingToken);
+        }
+
+        public Task RenewTokenAsync()
+        {
+            Renewals++;
+            return Task.CompletedTask;
+        }
+    }
+
+    // MinerBot's database for StatusWriter: it keeps what was written, and a test can make every call fail, wait, or be
+    // refused before any SQL, as the real repository refuses a row it can't save
+    internal sealed class FakeStatusData : IBotStatusData
+    {
+        int calls, reads;
+
+        public readonly List<BotStatus> Statuses = new();
+        public readonly List<BotEvent> Events = new();
+        public readonly List<JobRun> JobRuns = new();
+        public readonly List<JobStatus> Jobs = new();
+        public readonly List<UptimeSample> Samples = new();
+        public readonly List<string[]> KeptJobs = new();
+
+        // The row the run before left, which the first write reads
+        public BotStatus? Before { get; set; }
+
+        public Exception? Failure { get; set; }
+        public Task? Hold { get; set; }
+        public bool RefuseEvents { get; set; }
+
+        public int Calls => Volatile.Read(ref calls);
+        public int Reads => Volatile.Read(ref reads);
+
+        public Task<BotStatus?> GetStatus()
+        {
+            Interlocked.Increment(ref reads);
+            return Answer(() => Before);
+        }
+
+        public Task SaveStatus(BotStatus status) => Answer(() => Statuses.Add(status));
+
+        public Task AddEvents(IReadOnlyList<BotEvent> events)
+        {
+            if (RefuseEvents)
+                throw new ArgumentException("An event's kind is words in small letters joined by one dot");
+
+            return Answer(() => Events.AddRange(events));
+        }
+
+        public Task SaveJobRuns(IReadOnlyList<JobRun> runs) => Answer(() => JobRuns.AddRange(runs));
+        public Task SaveJobStatus(IReadOnlyList<JobStatus> jobs) => Answer(() => Jobs.AddRange(jobs));
+        public Task SaveSamples(IReadOnlyList<UptimeSample> samples) => Answer(() => Samples.AddRange(samples));
+
+        public Task<int> DeleteOtherJobs(IReadOnlyCollection<string> jobs) => Answer(() =>
+        {
+            KeptJobs.Add(jobs.ToArray());
+            return 0;
+        });
+
+        Task Answer(Action save) => Answer(() =>
+        {
+            save();
+            return 0;
+        });
+
+        async Task<T> Answer<T>(Func<T> save)
+        {
+            Interlocked.Increment(ref calls);
+
+            if (Failure is { } failure)
+                throw failure;
+
+            if (Hold is { } hold)
+                await hold;
+
+            lock (this)
+                return save();
+        }
+    }
+
+    // MinerBot's database for the clean-up: each rule has some rows older than its cutoff, which its chunks take, and a
+    // test can make a rule fail. Every call is kept, with the cutoff and the chunk it asked for.
+    internal sealed class FakeRetentionData : IRetentionData
+    {
+        public int AuditRows, Addresses, Events, JobRuns, Days, Samples, Sessions;
+        public readonly Dictionary<string, Exception> Failures = new();
+        public readonly List<(string Rule, DateTime Cutoff, int Take)> Calls = new();
+        public (DateTime From, DateTime To)? Totalled;
+
+        public Task<int> DeleteAuditRows(DateTime before, int take) => Take(nameof(DeleteAuditRows), before, take, ref AuditRows);
+        public Task<int> ClearAuditAddresses(DateTime before, int take) => Take(nameof(ClearAuditAddresses), before, take, ref Addresses);
+        public Task<int> DeleteEvents(DateTime before, int take) => Take(nameof(DeleteEvents), before, take, ref Events);
+        public Task<int> DeleteJobRuns(DateTime before, int take) => Take(nameof(DeleteJobRuns), before, take, ref JobRuns);
+        public Task<int> DeleteSamples(DateTime before, int take) => Take(nameof(DeleteSamples), before, take, ref Samples);
+        public Task<int> DeleteSessions(DateTime before, int take) => Take(nameof(DeleteSessions), before, take, ref Sessions);
+
+        public Task<int> TotalUptimeDays(DateTime from, DateTime to)
+        {
+            Calls.Add((nameof(TotalUptimeDays), from, 0));
+            Totalled = (from, to);
+
+            return Failures.TryGetValue(nameof(TotalUptimeDays), out var failure) ? Task.FromException<int>(failure) : Task.FromResult(Days);
+        }
+
+        Task<int> Take(string rule, DateTime before, int take, ref int left)
+        {
+            Calls.Add((rule, before, take));
+
+            if (Failures.TryGetValue(rule, out var failure))
+                return Task.FromException<int>(failure);
+
+            var taken = Math.Min(left, take);
+            left -= taken;
+
+            return Task.FromResult(taken);
+        }
     }
 }

@@ -6,6 +6,7 @@ using DataAccessLibrary.Blacklist;
 using DataAccessLibrary.Dashboard;
 using DataAccessLibrary.Discord;
 using DataAccessLibrary.Migrations;
+using DataAccessLibrary.Status;
 using DotNet.Testcontainers.Builders;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -33,6 +34,12 @@ namespace DataAccessLibrary.Tests.Database
         public const string AuditTable = BotDatabase + ".audit_log";
         public const string ReviewTable = BotDatabase + ".armor_reviews";
         public const string SessionTable = BotDatabase + ".dashboard_sessions";
+        public const string StatusTable = BotDatabase + ".bot_status";
+        public const string EventTable = BotDatabase + ".bot_events";
+        public const string JobRunTable = BotDatabase + ".job_runs";
+        public const string JobStatusTable = BotDatabase + ".job_status";
+        public const string SampleTable = BotDatabase + ".uptime_samples";
+        public const string DailyTable = BotDatabase + ".uptime_daily";
 
         // CI sets this, so there the database tests fail instead of skipping
         internal const string RequiredSetting = "MINERBOT_DB_TESTS";
@@ -111,6 +118,8 @@ namespace DataAccessLibrary.Tests.Database
         public ArmorReviewData Reviews() => new(Factory, Names);
         public AuditLogData Audit() => new(Factory, Names);
         public DashboardSessionData Sessions() => new(Factory, Names);
+        public BotStatusData Status() => new(Factory, Names);
+        public RetentionData Retention() => new(Factory, Names);
         public BlacklistData Blacklist() => new(Factory);
         public GuildData Guilds() => new(Factory);
 

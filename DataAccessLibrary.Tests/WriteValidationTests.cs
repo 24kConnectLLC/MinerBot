@@ -6,6 +6,8 @@ using DataAccessLibrary.Blacklist;
 using DataAccessLibrary.Blacklist.Models;
 using DataAccessLibrary.Dashboard;
 using DataAccessLibrary.Dashboard.Models;
+using DataAccessLibrary.Status;
+using DataAccessLibrary.Status.Models;
 using MinerBot.Shared.Armor;
 
 namespace DataAccessLibrary.Tests
@@ -235,6 +237,176 @@ namespace DataAccessLibrary.Tests
 
             // At the limit it gets as far as the database, which this one isn't
             await Assert.ThrowsAsync<InvalidOperationException>(() => blacklist.InsertPlayerBan(Player(limit)));
+        }
+
+        static BotEvent Event(uint seq = 1) => new() { run_id = 1, seq = seq, at = DateTime.UtcNow, kind = "discord.connected", level = EventLevel.Info };
+
+        static BotStatus Status() => new()
+        {
+            run_id = 1,
+            started_at = DateTime.UtcNow,
+            heartbeat_at = DateTime.UtcNow,
+            discord_state = DiscordState.Connected,
+            steam_state = SteamState.LoggedOn
+        };
+
+        static JobRun Run() => new() { run_id = 1, seq = 1, job = "ArmorJob.AddColorArrays", started_at = DateTime.UtcNow, result = JobResult.Ok };
+
+        static JobStatus Job() => new() { job = "ArmorJob.AddColorArrays", schedule = "0 * * * *", updated_at = DateTime.UtcNow };
+
+        // A row the bot's tables can't take is a mistake in the bot, and the bot's writer drops what's refused here, before
+        // any SQL, rather than failing every write after it
+        [Theory]
+        [InlineData("event in local time")]
+        [InlineData("event kind without a dot")]
+        [InlineData("event kind with two dots")]
+        [InlineData("event kind in capitals")]
+        [InlineData("event kind over 40 characters")]
+        [InlineData("unknown event level")]
+        [InlineData("event numbered 0")]
+        [InlineData("more than 100 events")]
+        public async Task EventThatCantBeSavedIsRefused(string problem)
+        {
+            var events = new List<BotEvent> { Event() };
+
+            switch (problem)
+            {
+                case "event in local time": events[0].at = DateTime.Now; break;
+                case "event kind without a dot": events[0].kind = "connected"; break;
+                case "event kind with two dots": events[0].kind = "discord.gateway.connected"; break;
+                case "event kind in capitals": events[0].kind = "Discord.Connected"; break;
+                case "event kind over 40 characters": events[0].kind = "discord." + new string('c', 33); break;
+                case "unknown event level": events[0].level = "notice"; break;
+                case "event numbered 0": events[0].seq = 0; break;
+                case "more than 100 events": events = Enumerable.Range(1, 101).Select(seq => Event((uint)seq)).ToList(); break;
+                default: throw new ArgumentOutOfRangeException(nameof(problem), problem, "The test has no such case");
+            }
+
+            await RefusedAsync(() => new BotStatusData(database, NoDatabase.Names).AddEvents(events));
+        }
+
+        [Fact]
+        public async Task StatusThatCantBeSavedIsRefused()
+        {
+            var status = new BotStatusData(database, NoDatabase.Names);
+            var local = Status();
+            local.heartbeat_at = DateTime.Now;
+            var stopped = Status();
+            stopped.stopped_at = DateTime.Now;
+            var discord = Status();
+            discord.discord_state = "up";
+            var steam = Status();
+            steam.steam_state = "online";
+            var version = Status();
+            version.version = new string('a', 41);
+
+            foreach (var row in new[] { local, stopped, discord, steam, version })
+                await RefusedAsync(() => status.SaveStatus(row));
+        }
+
+        [Fact]
+        public async Task JobRowsThatCantBeSavedAreRefused()
+        {
+            var status = new BotStatusData(database, NoDatabase.Names);
+            var result = Run();
+            result.result = "timed_out";
+            var started = Run();
+            started.started_at = DateTime.Now;
+            var job = Run();
+            job.job = new string('j', 101);
+            var lastResult = Job();
+            lastResult.last_result = "passed";
+            var schedule = Job();
+            schedule.schedule = new string('*', 101);
+            var updated = Job();
+            updated.updated_at = DateTime.Now;
+
+            await RefusedAsync(() => status.SaveJobRuns([result]));
+            await RefusedAsync(() => status.SaveJobRuns([started]));
+            await RefusedAsync(() => status.SaveJobRuns([job]));
+            await RefusedAsync(() => status.SaveJobRuns(Enumerable.Range(1, 101).Select(_ => Run()).ToList()));
+            await RefusedAsync(() => status.SaveJobStatus([lastResult]));
+            await RefusedAsync(() => status.SaveJobStatus([schedule]));
+            await RefusedAsync(() => status.SaveJobStatus([updated]));
+
+            // NOT IN an empty list would delete every job's status
+            await RefusedAsync(() => status.DeleteOtherJobs([]));
+        }
+
+        // StatusWriter drops a batch that's refused as it's called, the bot's own mistake, and keeps one whose write failed,
+        // an outage. So a batch write refuses before it hands back a task, which awaiting the call can't tell apart.
+        [Fact]
+        public void BatchesAreRefusedBeforeTheCallReturns()
+        {
+            var status = new BotStatusData(database, NoDatabase.Names);
+            var run = Run();
+            run.result = "timed_out";
+            var job = Job();
+            job.updated_at = DateTime.Now;
+
+            Assert.ThrowsAny<ArgumentException>(() => { _ = status.AddEvents([Event(seq: 0)]); });
+            Assert.ThrowsAny<ArgumentException>(() => { _ = status.SaveJobRuns([run]); });
+            Assert.ThrowsAny<ArgumentException>(() => { _ = status.SaveJobStatus([job]); });
+            Assert.ThrowsAny<ArgumentException>(() => { _ = status.SaveSamples([new UptimeSample { minute = new DateTime(2026, 11, 14, 12, 0, 1, DateTimeKind.Utc) }]); });
+            Assert.Equal(0, database.Created);
+        }
+
+        // A minute is its start. DATETIME keeps whole seconds, so a sample with seconds would be a second row for its
+        // minute, and it drops a fraction of a second without a word.
+        [Fact]
+        public async Task SampleThatIsntAMinutesStartIsRefused()
+        {
+            var status = new BotStatusData(database, NoDatabase.Names);
+            var minute = new DateTime(2026, 11, 14, 12, 0, 0, DateTimeKind.Utc);
+
+            await RefusedAsync(() => status.SaveSamples([new UptimeSample { minute = minute.AddSeconds(1) }]));
+            await RefusedAsync(() => status.SaveSamples([new UptimeSample { minute = minute.AddMilliseconds(1) }]));
+            await RefusedAsync(() => status.SaveSamples([new UptimeSample { minute = DateTime.SpecifyKind(minute, DateTimeKind.Local) }]));
+        }
+
+        // Each limit is the column's, so rows just inside them are fine
+        [Fact]
+        public async Task StatusRowsAtTheLimitsPass()
+        {
+            var events = Enumerable.Range(1, 100).Select(seq => Event((uint)seq)).ToList();
+            events[0].kind = "discord." + new string('c', 32);
+            var run = Run();
+            run.job = new string('j', 100);
+            var job = Job();
+            job.schedule = new string('*', 100);
+            var status = Status();
+            status.version = new string('a', 40);
+
+            Assert.Equal(40, events[0].kind.Length);
+
+            // They get as far as building their SQL, which needs MinerBot's database
+            var missing = new BotStatusData(database, new DatabaseNames(new Dictionary<DBConnectionName, string>()));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => missing.AddEvents(events));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => missing.SaveJobRuns([run]));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => missing.SaveJobStatus([job]));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => missing.SaveStatus(status));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => missing.SaveSamples([new UptimeSample { minute = new DateTime(2026, 11, 14, 12, 0, 0, DateTimeKind.Utc) }]));
+            Assert.Equal(0, database.Created);
+        }
+
+        // A chunk takes from 1 to 5,000 rows, and its cutoffs are UTC. The samples and the days to total go by whole days.
+        [Fact]
+        public async Task RetentionOutsideItsLimitsIsRefused()
+        {
+            var retention = new RetentionData(database, NoDatabase.Names);
+            var day = new DateTime(2026, 11, 14, 0, 0, 0, DateTimeKind.Utc);
+
+            await RefusedAsync(() => retention.DeleteAuditRows(day, 0));
+            await RefusedAsync(() => retention.DeleteAuditRows(day, RetentionData.ChunkLimit + 1));
+            await RefusedAsync(() => retention.DeleteAuditRows(DateTime.Now, 1));
+            await RefusedAsync(() => retention.ClearAuditAddresses(DateTime.Now, 1));
+            await RefusedAsync(() => retention.DeleteEvents(day, -1));
+            await RefusedAsync(() => retention.DeleteJobRuns(DateTime.Now, 1));
+            await RefusedAsync(() => retention.DeleteSessions(DateTime.Now, 1));
+            await RefusedAsync(() => retention.DeleteSamples(day.AddMinutes(1), 1));
+            await RefusedAsync(() => retention.TotalUptimeDays(day.AddHours(1), day.AddDays(1)));
+            await RefusedAsync(() => retention.TotalUptimeDays(day, day.AddDays(-1)));
+            await RefusedAsync(() => retention.TotalUptimeDays(DateTime.SpecifyKind(day, DateTimeKind.Local), day));
         }
     }
 }

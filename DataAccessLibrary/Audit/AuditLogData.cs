@@ -3,8 +3,9 @@ using System.Text.RegularExpressions;
 
 namespace DataAccessLibrary.Audit
 {
-    // The audit log in MinerBot's own database, which only ever gets rows added. Its SQL names the table there, so a row
-    // can also be written inside a transaction on the website's connection, together with the change it records.
+    // The audit log in MinerBot's own database. Rows are only added here, and the bot's daily clean-up deletes them after
+    // 2 years and clears their addresses after 90 days (RetentionData). Its SQL names the table there, so a row can also
+    // be written inside a transaction on the website's connection, together with the change it records.
     public class AuditLogData : DbBaseConnection, IAuditLogData
     {
         const int ActionLimit = 50;

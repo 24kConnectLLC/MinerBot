@@ -79,7 +79,8 @@ namespace DataAccessLibrary.Tests
         // anywhere, or for one that stopped partway and is fixed from the statement that stopped onwards.
         static readonly Dictionary<string, string> Checksums = new()
         {
-            ["0001_core"] = "71cf66af93eaa830b8ceebda61d5341971cbc4c82fbf37107149334574454aed"
+            ["0001_core"] = "71cf66af93eaa830b8ceebda61d5341971cbc4c82fbf37107149334574454aed",
+            ["0002_bot_status"] = "57cde1d9086d53d5d69c3009c3741e8ef126b3842ce57057b4830b54b199e597"
         };
 
         [Fact]
@@ -157,6 +158,27 @@ namespace DataAccessLibrary.Tests
                 Assert.EndsWith("ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_520_ci", statement);
                 Assert.DoesNotContain("TIMESTAMP", statement);
                 Assert.DoesNotContain("CHAR(36)", statement);
+            });
+        }
+
+        // The bot's status and history. Its times are UTC values the code passes in, so no statement asks the server's
+        // clock, which is US Eastern on the live server.
+        [Fact]
+        public void SecondMigrationCreatesTheStatusTables()
+        {
+            var second = MigrationScript.Embedded()[1];
+
+            Assert.Equal("0002_bot_status", second.Name);
+            Assert.Equal(["bot_status", "uptime_samples", "uptime_daily", "bot_events", "job_status", "job_runs"], second.Statements.Select(TableName));
+            Assert.All(second.Statements, statement =>
+            {
+                Assert.EndsWith("ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_520_ci", statement);
+                Assert.DoesNotContain("TIMESTAMP", statement);
+                Assert.DoesNotContain("CHAR(36)", statement);
+                Assert.DoesNotContain("NOW(", statement);
+                Assert.DoesNotContain("CURDATE", statement);
+                Assert.DoesNotContain("CURRENT_", statement);
+                Assert.DoesNotContain("DEFAULT", statement.Replace("DEFAULT CHARSET", ""));
             });
         }
 

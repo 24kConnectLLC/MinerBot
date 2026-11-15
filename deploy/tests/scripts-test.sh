@@ -1903,7 +1903,7 @@ case_31() {
 }
 
 case_32() {
-    begin 32 "readiness: the dashboard not ready on the new image nor on the one before stops the deploy there, the bot untouched; a restart during the wait, Docker's unhealthy, and a bot that restarts right after its ready line each count as not ready"
+    begin 32 "readiness: the dashboard not ready on the new image nor on the one before stops the deploy there, the bot untouched; a restart during the wait, Docker's unhealthy, and a bot that restarts right after its ready line each count as not ready; a bot whose health check says healthy is ready without its ready line, and an unhealthy one goes back"
     local log bot_before
     restore deployed
     set_main "$c5"
@@ -1938,12 +1938,29 @@ case_32() {
     expect_exit 1 "the bot that restarts right after its ready line"
     expect_said "The bot didn't stay up" "the bot that restarts right after its ready line" "$(last_log deploy)"
     [ "$(ctr_image minerbot-bot)" = "$(image_of "$c1" bot)" ] || problem "the bot that didn't stay up isn't back on c1"
+
+    # A bot with a health check of its own is ready when Docker says healthy, without its log's ready line, which isn't read
+    restore deployed
+    set_main "$c5"
+    in_home healthy-bot 120 env FAKE_HEALTHY="bot@${c5:0:12}" FAKE_UNREADY="bot@${c5:0:12}" ./deploy.sh --only bot
+    expect_exit 0 "the bot whose health check says healthy"
+    expect_said "The bot is ready, and still runs." "the bot whose health check says healthy" "$(last_log deploy)"
+    ! run_calls | args_of | grep -qE '^docker \[[^]]*\] logs --since ' || problem "the deploy read the log of a bot whose health check says healthy"
+    [ "$(ctr_image minerbot-bot)" = "$(image_of "$c5" bot)" ] || problem "the healthy bot isn't on c5"
+
+    # Unhealthy isn't ready, at once, and the bot goes back to the image before, which has no health check
+    restore deployed
+    set_main "$c5"
+    in_home unhealthy-bot 120 env FAKE_UNHEALTHY="bot@${c5:0:12}" ./deploy.sh --only bot
+    expect_exit 1 "the bot Docker calls unhealthy"
+    expect_said "The bot isn't ready: Docker's health check says unhealthy." "the bot Docker calls unhealthy" "$(last_log deploy)"
+    [ "$(ctr_image minerbot-bot)" = "$(image_of "$c1" bot)" ] || problem "the unhealthy bot isn't back on c1"
     verdict
 }
 
 case_33() {
-    begin 33 "--only bot on a commit with a new migration builds the dashboard's image from it too, which carries the migration, dumps and migrates with it, and swaps only the bot"
-    local dash_before
+    begin 33 "--only bot on a commit with a new migration builds the dashboard's image from it too, which carries the migration, dumps and migrates with it, and swaps only the bot, whose build gets its commit"
+    local dash_before expected
     restore deployed
     set_main "$c6"
     dash_before=$(ctr_image minerbot-dashboard)
@@ -1951,6 +1968,9 @@ case_33() {
     expect_exit 0 "--only bot with a migration"
     run_calls | args_of | grep -qF -- "--label org.opencontainers.image.revision=$c6 -f $home/src/MinerBot.Dashboard/Dockerfile -t minerbot-dashboard:new " \
         || problem "the dashboard's image, which carries the migrations, wasn't built from c6"
+    expected="docker [timeout -k 30 1200] build --pull --network host --cpu-quota 200000 --cpu-period 100000 --label org.opencontainers.image.revision=$c6 --build-arg SOURCE_REVISION=$c6 -f $home/src/MinerBot 2.0/Dockerfile -t minerbot-bot:new $home/src"
+    [ "$(run_calls | args_of | grep -E '^docker \[[^]]*\] build .* -t minerbot-bot:new ')" = "$expected" ] \
+        || problem "the bot's build isn't exactly the designed one, with its commit as SOURCE_REVISION" "$(run_calls | args_of | grep ' build ')"
     in_order "the dump, then the migration" '^mariadb-dump ' ' run .* minerbot-dashboard:new migrate$'
     [ "$(cat /fake/db/version 2> /dev/null)" = 2 ] || problem "the database wasn't migrated to version 2"
     [ "$(ctr_image minerbot-dashboard)" = "$dash_before" ] || problem "--only bot swapped the dashboard"
@@ -4140,7 +4160,7 @@ case_17() {
 }
 
 case_18() {
-    begin 18 "status.sh: --check names each seeded problem on its own line with exit 1, a socket of another owner, another proxy key in nginx's file than the dashboard's and a public home page answering 404 among them, and is silent with exit 0 when all is well, never reloading nginx; --nginx-look never prints the proxy key or a root-only file; the plain look shows the proxy key and the public home page"
+    begin 18 "status.sh: --check names each seeded problem on its own line with exit 1, a socket of another owner, another proxy key in nginx's file than the dashboard's and a public home page answering 404 among them, and is silent with exit 0 when all is well, never reloading nginx; an unhealthy bot is one line, a healthy one none; --nginx-look never prints the proxy key or a root-only file; the plain look shows the proxy key and the public home page"
     local f other_key
     other_key=$(printf 'mbtest proxy key other' | sha256sum | cut -c1-64)
     restore deployed
@@ -4172,6 +4192,19 @@ case_18() {
     done
     ! said "$other_key" && ! said "$key1" || problem "the nightly check printed a proxy key"
     ! run_calls | grep -q '^restartsrv_nginx ' || problem "status.sh reloaded nginx"
+
+    # A bot whose health check says unhealthy is a problem of its own; a healthy one isn't, and neither is one without a
+    # health check, as the deployed state's is
+    restore deployed
+    socket_folder
+    in_home unhealthy-bot 60 env FAKE_UNHEALTHY="bot@${c1:0:12}" ./status.sh --check
+    expect_exit 1 "the nightly check with an unhealthy bot"
+    [ "$(wc -l < "$last")" = 1 ] || problem "the nightly check didn't print exactly one line for an unhealthy bot" "$(cat "$last")"
+    expect_said "The bot is unhealthy: its heartbeat is over a minute old, so it isn't up on Discord. Its log: docker logs --tail 50 minerbot-bot" \
+        "the nightly check with an unhealthy bot"
+    in_home healthy-bot 60 env FAKE_HEALTHY="bot@${c1:0:12}" ./status.sh --check
+    expect_exit 0 "the nightly check with a healthy bot"
+    [ ! -s "$last" ] || problem "the nightly check printed something for a healthy bot" "$(excerpt)"
 
     restore deployed
     printf 'proxy_set_header X-MinerBot-Proxy-Key "%s";\n' "$key1" >> /etc/nginx/conf.d/ea-nginx.conf

@@ -7,6 +7,8 @@ using DataAccessLibrary.Dashboard;
 using DataAccessLibrary.Dashboard.Models;
 using DataAccessLibrary.Discord;
 using DataAccessLibrary.Health;
+using DataAccessLibrary.Status;
+using DataAccessLibrary.Status.Models;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -24,15 +26,24 @@ namespace DataAccessLibrary.Tests
         static IConfiguration Settings(params (string Key, string Value)[] settings) =>
             new ConfigurationBuilder().AddInMemoryCollection(settings.Select(setting => KeyValuePair.Create<string, string?>(setting.Key, setting.Value))).Build();
 
-        // What the dashboard's start-up check reports for a connection string, in words that never quote it
+        // What the dashboard's start-up check and the bot's status writer report for a connection string, in words that
+        // never quote it. It never throws, because the bot asks as it starts.
         [Theory]
         [InlineData(Site, null)]
         [InlineData("Server=127.0.0.1;Initial Catalog=site_db;Uid=user", null)]
+        [InlineData("Server=127.0.0.1;Database=site_db;Uid=user;Pwd='pass;word'", null)]
         [InlineData("Server=127.0.0.1;Uid=user;Pwd=password", "names no database")]
         [InlineData("", "names no database")]
         [InlineData("Server=127.0.0.1;Database=site_db;SslMode=Requird", "can't be read")]
         [InlineData("Server=127.0.0.1;Database=site_db;Port=port", "can't be read")]
         [InlineData("Server=127.0.0.1;Database=site_db;Colour=blue", "can't be read")]
+        // MySql.Data throws a MySqlException for these three, whose message quotes where it stopped: for the first, the
+        // rest of the password after its unquoted semicolon
+        [InlineData("Server=127.0.0.1;Database=site_db;Uid=user;Pwd=pass;word", "can't be read")]
+        [InlineData("Server=127.0.0.1;Database='site_db", "can't be read")]
+        [InlineData("Server=127.0.0.1;Database=site_db;Uid", "can't be read")]
+        // And a PlatformNotSupportedException for an option .NET doesn't have
+        [InlineData("Server=127.0.0.1;Database=site_db;Use Performance Monitor=true", "can't be read")]
         [InlineData("Server=127.0.0.1;Database=site\\db", "names a database that MariaDB or MySql.Data can't use")]
         public void ProblemSaysWhatStopsAConnectionString(string connectionString, string? problem)
         {
@@ -51,7 +62,9 @@ namespace DataAccessLibrary.Tests
                 .AddArmorReviewAccess()
                 .AddAuditLogAccess()
                 .AddDashboardSessionAccess()
-                .AddDatabaseHealthAccess();
+                .AddDatabaseHealthAccess()
+                .AddBotStatusAccess()
+                .AddRetentionAccess();
 
             if (factory != null)
                 services.AddSingleton(factory);
@@ -90,10 +103,29 @@ namespace DataAccessLibrary.Tests
             var reviews = provider.GetRequiredService<IArmorReviewData>();
             var audit = provider.GetRequiredService<IAuditLogData>();
             var sessions = provider.GetRequiredService<IDashboardSessionData>();
+            var status = provider.GetRequiredService<IBotStatusData>();
+            var retention = provider.GetRequiredService<IRetentionData>();
             Assert.IsType<DatabaseHealthData>(provider.GetRequiredService<IDatabaseHealthData>());
+
+            var now = DateTime.UtcNow;
+            var day = now.Date;
 
             var calls = new Func<Task>[]
             {
+                () => status.GetStatus(),
+                () => status.SaveStatus(new BotStatus { started_at = now, heartbeat_at = now, discord_state = DiscordState.Connected, steam_state = SteamState.Offline }),
+                () => status.AddEvents([new BotEvent { run_id = 1, seq = 1, at = now, kind = "bot.started", level = EventLevel.Info }]),
+                () => status.SaveJobRuns([new JobRun { run_id = 1, seq = 1, job = "ArmorJob.AddColorArrays", started_at = now, result = JobResult.Ok }]),
+                () => status.SaveJobStatus([new JobStatus { job = "ArmorJob.AddColorArrays", schedule = "0 * * * *", updated_at = now }]),
+                () => status.DeleteOtherJobs(["ArmorJob.AddColorArrays"]),
+                () => status.SaveSamples([new UptimeSample { minute = day }]),
+                () => retention.DeleteAuditRows(now, 1),
+                () => retention.ClearAuditAddresses(now, 1),
+                () => retention.DeleteEvents(now, 1),
+                () => retention.DeleteJobRuns(now, 1),
+                () => retention.TotalUptimeDays(day.AddDays(-1), day),
+                () => retention.DeleteSamples(day, 1),
+                () => retention.DeleteSessions(now, 1),
                 () => audit.ListAudit(new AuditQuery()),
                 () => audit.LatestChanges("blacklist", ["12345"]),
                 () => audit.AddAudit(new AuditEntry { at = DateTime.UtcNow, actor_role = AuditRole.Owner, action = "armor.approve", outcome = AuditOutcome.Ok }),
@@ -174,8 +206,9 @@ namespace DataAccessLibrary.Tests
             return new MySqlConnectionStringBuilder(connection.ConnectionString).CharacterSet;
         }
 
-        // Every repository the dashboard uses sends utf8mb4 whatever the connection string says, so emoji and zero-width
-        // characters reach the tables and name checks as they are. The bot's own two keep theirs, so the running bot is unchanged.
+        // Every repository the dashboard uses, and the bot's status and history, sends utf8mb4 whatever the connection string
+        // says, so emoji and zero-width characters reach the tables and name checks as they are. The bot's first two keep
+        // theirs, so what the bot already did is unchanged.
         [Theory]
         [InlineData("")]
         [InlineData(";CharSet=latin1")]
@@ -199,7 +232,9 @@ namespace DataAccessLibrary.Tests
                 new BlacklistData(factory),
                 new ArmorReviewData(factory, names),
                 new AuditLogData(factory, names),
-                new DashboardSessionData(factory, names)
+                new DashboardSessionData(factory, names),
+                new BotStatusData(factory, names),
+                new RetentionData(factory, names)
             }, repository => Assert.Equal("utf8mb4", CharacterSet(repository, factory)));
 
             var configured = new MySqlConnectionStringBuilder(Site + setting).CharacterSet;

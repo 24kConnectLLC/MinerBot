@@ -6,6 +6,8 @@ using DataAccessLibrary.Blacklist;
 using DataAccessLibrary.Blacklist.Models;
 using DataAccessLibrary.Dashboard;
 using DataAccessLibrary.Dashboard.Models;
+using DataAccessLibrary.Status;
+using DataAccessLibrary.Status.Models;
 using DataAccessLibrary.Tests.Database;
 using Microsoft.Extensions.Caching.Memory;
 using MinerBot.Shared.Armor;
@@ -15,8 +17,8 @@ namespace DataAccessLibrary.Tests
     // MySql.Data uses the server's default character set when the connection string names none, and the live server's is
     // latin1, MariaDB's own default. Reading is unaffected, because MySql.Data asks for results as they're stored, but text sent to the server
     // that latin1 can't hold, such as an emoji or a zero-width space, arrives as a question mark. So every repository the
-    // dashboard uses sends utf8mb4 whatever its connection string says, which these tests check over strings that name no
-    // character set, while the bot's own queries keep theirs as configured.
+    // dashboard uses, and the bot's status and history, sends utf8mb4 whatever its connection string says, which these tests
+    // check over strings that name no character set, while the bot's first queries keep theirs as configured.
     [Collection("Database")]
     public class CharacterSetTests(MariaDbFixture fixture)
     {
@@ -113,6 +115,25 @@ namespace DataAccessLibrary.Tests
             Assert.Equal([Name], await db.RootQueryAsync<string>($"SELECT user_name FROM {MariaDbFixture.SessionTable}"));
             Assert.Equal([Name, Name, Name], await db.RootQueryAsync<string>(
                 $"SELECT username FROM {MariaDbFixture.BlacklistTable} UNION ALL SELECT reason FROM {MariaDbFixture.BlacklistTable} UNION ALL SELECT notes FROM {MariaDbFixture.BlacklistTable}"));
+        }
+
+        // The bot's history holds the alerts it sent, which may quote what someone typed
+        [Fact]
+        public async Task TheBotsHistoryKeepsEveryCharacter()
+        {
+            var db = fixture.Require();
+            await db.ClearAsync(MariaDbFixture.EventTable, MariaDbFixture.JobRunTable, MariaDbFixture.JobStatusTable);
+
+            var connections = WithoutCharacterSet();
+            var status = new BotStatusData(new SQLConnectionFactory(connections), new DatabaseNames(connections));
+
+            await status.AddEvents([new BotEvent { run_id = 1, seq = 1, at = Noon, kind = "alert.sent", level = EventLevel.Info, detail = Name }]);
+            await status.SaveJobRuns([new JobRun { run_id = 1, seq = 1, job = "ArmorJob.AddColorArrays", started_at = Noon, result = JobResult.Ok, detail = Name }]);
+            await status.SaveJobStatus([new JobStatus { job = "ArmorJob.AddColorArrays", schedule = "0 * * * *", last_started_at = Noon, last_result = JobResult.Ok,
+                last_detail = Name, updated_at = Noon }]);
+
+            Assert.Equal([Name, Name, Name], await db.RootQueryAsync<string>(
+                $"SELECT detail FROM {MariaDbFixture.EventTable} UNION ALL SELECT detail FROM {MariaDbFixture.JobRunTable} UNION ALL SELECT last_detail FROM {MariaDbFixture.JobStatusTable}"));
         }
 
         // An edit of a blacklist entry, inside a transaction as the entry's page makes it, keeps them too

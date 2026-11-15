@@ -26,6 +26,9 @@ services:
     mem_limit: 1g
     pids_limit: 512
     stop_grace_period: 30s
+    # The health check is the image's own: "dotnet MinerBot 2.0.dll healthcheck", every 5 seconds while it starts and every
+    # 30 after. It reads the heartbeat the bot rewrites every 5 seconds while it's up on Discord. Docker doesn't restart an
+    # unhealthy container, so status.sh --check reports one.
     logging:
       driver: json-file
       options:

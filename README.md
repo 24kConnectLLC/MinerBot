@@ -150,7 +150,7 @@ Create an `appsettings.json` file and fill in your credentials:
 }
 ```
 
-`DefaultConnection` is the website's database, which holds the armor, the blacklist and each server's channels. `BotConnection` is MinerBot's own database, for the coming web dashboard. The bot doesn't use it yet, so it can be left out. Both end in `CharSet=utf8mb4`, the tables' own character set: without it, MySql.Data sends text in the server's default character set, which can turn an emoji into a question mark.
+`DefaultConnection` is the website's database, which holds the armor, the blacklist and each server's channels. `BotConnection` is MinerBot's own database, which the web dashboard uses and where the bot records its status and history ([Status and history](#-status-and-history)). It can be left out: the bot then runs as before, records nothing, and says so once in its log as it starts. Both end in `CharSet=utf8mb4`, the tables' own character set: without it, MySql.Data sends text in the server's default character set, which can turn an emoji into a question mark.
 
 The dashboard writes its audit and review rows in the same transaction as the website change they record, on the website's connection. So the login in `DefaultConnection` also needs `INSERT` on MinerBot's `audit_log` and `armor_reviews` tables, or both strings can use one login with rights on both databases.
 
@@ -216,11 +216,26 @@ docker run -d --name minerbot --restart unless-stopped --env-file .env -v minerb
 
 The bot exits when it hits a failure it can't recover from, and `--restart unless-stopped` has Docker start it again. To add that to a container that already exists, run `docker update --restart unless-stopped minerbot`.
 
+The image has a health check of its own, `dotnet "MinerBot 2.0.dll" healthcheck`: every 5 seconds while the bot is up on Discord, it rewrites a heartbeat file in `/tmp`, and the check fails once that's over a minute old. `docker inspect -f '{{.State.Health.Status}}' minerbot` says healthy, starting or unhealthy, and `docker inspect -f '{{json .State.Health}}' minerbot` shows the check's last answers. Docker only reports an unhealthy container; it doesn't restart it. A build can stamp the image with its commit, which the bot records as its version: `docker build --build-arg SOURCE_REVISION=$(git rev-parse HEAD) -f "MinerBot 2.0/Dockerfile" -t minerbot .`
+
+---
+
+## 📈 Status and history
+
+With `BotConnection` set, the bot records what it does in MinerBot's own database, for the dashboard's status pages. The tables come from the dashboard's `migrate` command, which a deploy runs, after a dump, whenever the commit brings a migration MinerBot's database doesn't have yet. Only the bot writes them, with its own login, and nothing in them is secret: no token, no SteamID, no account name and no message from a library, only the bot's own wording.
+
+- `bot_status`: one row, rewritten every 30 seconds, and at once when Discord's or Steam's state changes: the bot's version (its commit), when it started, its last heartbeat, whether it stopped cleanly, Discord's state with its latency and number of servers, and Steam's state with its last logon answer and when the saved token expires.
+- `uptime_samples`: one row for each minute the bot ran, with whether Discord and Steam were up; `uptime_daily` keeps each day's totals.
+- `bot_events`: what happened, such as `discord.disconnected`, `steam.logon_failed`, `job.failed`, `alert.sent` or `bot.unclean_end`.
+- `job_status` and `job_runs`: each scheduled job's schedule and next run, and every run with its result (ok, failed, cut off or skipped), duration and detail.
+
+What the bot records waits in memory until it's written, up to 6 hours of uptime samples, 1,000 events and 500 job runs, so a database that's down costs only the recording: the bot logs one warning, tries again every 30 seconds to 5 minutes, and records the outage once it's back. A daily clean-up at 04:30 US Eastern keeps the audit log for 2 years with visitors' addresses cleared after 90 days, the events, job runs and minute samples for 90 days with each day's totals kept, and dashboard sessions until 7 days after they end.
+
 ---
 
 ## 🖥️ Web dashboard
 
-`MinerBot.Dashboard` is a web app at https://bot.murderminershub.com for the people who run MinerBot. You sign in with Discord, and only the accounts on its lists, with Discord two-factor turned on, get in. The owner and the admins review armor submissions there, under Armor: each one's text with its hidden characters shown, its screenshot when it's an upload on the website, the approval rules, and how the bot will post it. They can approve, reject, take down or move it back to pending, and each change is kept in its history and the audit log. Under Blacklist they keep the list of players to ban, which nothing enforces yet, until the game's API can: each entry is an account, entered as a SteamID in any form, with a name, a reason, an end date in UTC and notes. The Audit log lists every change made on the dashboard, every sign-in and sign-out, and the changes and sign-ins it refused, newest first, filtered by person, action, server or days; only the owner sees each row's visitor address. A form sent back to correct a field, a form that had expired or was incomplete, an action on armor that had since been removed, a cancelled or failed sign-in, and a request turned away before it reached its page, such as one from another site or one over the rate limit, aren't recorded, but the request that ends the sessions of someone taken off the lists is. The bot's status and servers come in later updates.
+`MinerBot.Dashboard` is a web app at https://bot.murderminershub.com for the people who run MinerBot. You sign in with Discord, and only the accounts on its lists, with Discord two-factor turned on, get in. The owner and the admins review armor submissions there, under Armor: each one's text with its hidden characters shown, its screenshot when it's an upload on the website, the approval rules, and how the bot will post it. They can approve, reject, take down or move it back to pending, and each change is kept in its history and the audit log. Under Blacklist they keep the list of players to ban, which nothing enforces yet, until the game's API can: each entry is an account, entered as a SteamID in any form, with a name, a reason, an end date in UTC and notes. The Audit log lists every change made on the dashboard, every sign-in and sign-out, and the changes and sign-ins it refused, newest first, filtered by person, action, server or days; only the owner sees each row's visitor address. A form sent back to correct a field, a form that had expired or was incomplete, an action on armor that had since been removed, a cancelled or failed sign-in, and a request turned away before it reached its page, such as one from another site or one over the rate limit, aren't recorded, but the request that ends the sessions of someone taken off the lists is. The bot's status pages, which read what the bot records ([Status and history](#-status-and-history)), and its servers come in later updates.
 
 Sign-in uses a Discord application of its own, MinerBot Dashboard, with the `identify` scope only, and the dashboard revokes the Discord token as soon as it has read who signed in. Sessions are kept in MinerBot's own database and end after 30 minutes unused, or 12 hours at most.
 
@@ -331,6 +346,7 @@ The direct message arrives only if that user shares a server with the bot and ac
 
 - **Database connection issues**
   - Verify host/port/credentials in `DefaultConnection`.
+  - For the bot's status and history only, the same in `BotConnection`: the bot's log has one warning when its writes start failing, with the error's number.
 
 - **Steam features not working**
   - Verify `STEAMWEB_KEY` (and publisher keys if applicable).

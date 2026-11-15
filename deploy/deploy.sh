@@ -180,12 +180,15 @@ choose_commit() {
 
 build() {   # build bot|dashboard: minerbot-<service>:new from src, on two CPUs, labelled with its commit
     local dockerfile=MinerBot.Dashboard/Dockerfile
+    local -a revision=()
     if [ "$1" = bot ]; then
         dockerfile="MinerBot 2.0/Dockerfile"
+        # The bot puts its commit in its status. An older commit's Dockerfile has no SOURCE_REVISION and builds as before.
+        revision=(--build-arg "SOURCE_REVISION=$commit")
     fi
     echo "Building the $1 at $tag12 on two CPUs."
     run_for -k 30 1200 docker build --pull --network host --cpu-quota 200000 --cpu-period 100000 \
-        --label "org.opencontainers.image.revision=$commit" -f "$home/src/$dockerfile" -t "minerbot-$1:new" "$home/src" \
+        --label "org.opencontainers.image.revision=$commit" "${revision[@]}" -f "$home/src/$dockerfile" -t "minerbot-$1:new" "$home/src" \
         || die "Building the $1 failed or took more than 20 minutes (above). Nothing was swapped; what runs is unchanged."
     echo "Built minerbot-$1:new."
 }

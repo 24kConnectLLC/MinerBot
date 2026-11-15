@@ -1,7 +1,11 @@
 ﻿using MinerBot_2._0.Attributes;
 using Cronos;
+using System.Globalization;
 using System.Reflection;
+using DataAccessLibrary.Status;
+using DataAccessLibrary.Status.Models;
 using MinerBot_2._0.Models;
+using MinerBot_2._0.Status;
 
 namespace MinerBot_2._0.Handlers
 {
@@ -20,6 +24,13 @@ namespace MinerBot_2._0.Handlers
             _logger = logger;
             _service = service;
         }
+
+        // Asked for when needed, so a test's services without them still run jobs, unrecorded
+        BotRecorder? Recorder => _service.GetService<BotRecorder>();
+        TimeProvider Clock => _service.GetService<TimeProvider>() ?? TimeProvider.System;
+
+        // As every log line names a job, and as the bot's status does
+        internal static string NameOf(Job job) => $"{job.DeclaringType.Name}.{job.Name}";
 
         DateTimeOffset GetNextRun(string cronString)
         {
@@ -46,13 +57,22 @@ namespace MinerBot_2._0.Handlers
                         })
                       .ToList();
 
+            // Every job's schedule and next run, for the bot's status
+            Recorder?.JobsFound(_jobs.Select(job => (NameOf(job), job.Details.Cron, job.NextRun.UtcDateTime)));
+
             // On the thread pool, so no job runs on the thread that started the handler
             _ = Task.Run(() => Main(cancellationToken));
             return Task.CompletedTask;
         }
 
+        // Each run is recorded for the bot's history: ok, failed, or cut off and then its end. A run that the bot's stop
+        // interrupts isn't, because bot.stopping already says why it ended.
         private async Task RunJobAsync(Job job, CancellationToken cancellationToken)
         {
+            var recorder = Recorder;
+            var clock = Clock;
+            var seq = recorder?.NewJobRun() ?? 0;
+            var startedAt = clock.GetUtcNow().UtcDateTime;
             var timer = System.Diagnostics.Stopwatch.StartNew();
 
             // On the thread pool too, because a job that blocks before it hands back its task would hold up the limit
@@ -61,15 +81,20 @@ namespace MinerBot_2._0.Handlers
 
             try
             {
-                await run.WaitAsync(JobTimeLimit, cancellationToken);
+                var detail = await run.WaitAsync(JobTimeLimit, cancellationToken);
                 _logger.LogInformation("{jobDeclareType}.{jobName} took {timerHumanized}",
                     job.DeclaringType.Name, job.Name, timer.Elapsed.ToString());
+
+                Record(JobResult.Ok, detail, ended: true);
             }
             // A job that throws a TimeoutException of its own has failed, it wasn't cut off
             catch (TimeoutException) when (!run.IsCompleted)
             {
                 _logger.LogWarning("{jobDeclareType}.{jobName} was cut off after {timeLimit}. It carries on in the background, and this job isn't started again until it ends.",
                     job.DeclaringType.Name, job.Name, JobTimeLimit.ToString());
+
+                Record(JobResult.CutOff, Detail($"still running when the time limit of {JobTimeLimit.TotalSeconds:0} s cut it off"), ended: false);
+                recorder?.Record(BotEvents.JobCutOff, Detail($"{NameOf(job)} was cut off after {JobTimeLimit.TotalSeconds:0} s"));
 
                 // Otherwise nothing would show when, and how, it ended
                 _ = run.ContinueWith(ended =>
@@ -80,19 +105,66 @@ namespace MinerBot_2._0.Handlers
                     else
                         _logger.LogInformation("{jobDeclareType}.{jobName}, which was cut off, ended after {timerHumanized}",
                             job.DeclaringType.Name, job.Name, timer.Elapsed.ToString());
+
+                    // Its row gets its end, and stays cut_off
+                    Record(JobResult.CutOff, ended.IsFaulted
+                        ? Detail($"failed after {timer.Elapsed.TotalSeconds:0} s: {FailureOf(ended.Exception)}")
+                        : Detail($"ended after {timer.Elapsed.TotalSeconds:0} s"), ended: true);
                 }, TaskScheduler.Default);
             }
             catch (Exception e) when (!cancellationToken.IsCancellationRequested)
             {
                 _logger.LogError(e, "{jobDeclareType}.{jobName} failed", job.DeclaringType.Name, job.Name);
+
+                Record(JobResult.Failed, FailureOf(e), ended: true);
+                recorder?.Record(BotEvents.JobFailed, Detail($"{NameOf(job)} failed: {FailureOf(e)}"));
             }
+
+            void Record(string result, string? detail, bool ended) => recorder?.RecordJobRun(new JobRun
+            {
+                seq = seq,
+                job = NameOf(job),
+                started_at = startedAt,
+                ended_at = ended ? clock.GetUtcNow().UtcDateTime : null,
+                result = result,
+                duration_ms = ended ? (uint)Math.Min(timer.Elapsed.TotalMilliseconds, uint.MaxValue) : null,
+                detail = detail
+            }, job.Details.Cron, job.NextRun.UtcDateTime);
         }
 
-        private async Task InvokeJobAsync(Job job)
+        // A job may return Task<string>, whose text becomes its run's detail, such as the clean-up's counts
+        private async Task<string?> InvokeJobAsync(Job job)
         {
             var jobClass = ActivatorUtilities.CreateInstance(_service, job.DeclaringType);
-            await (Task)job.DeclaringType.GetMethod(job.Name).Invoke(jobClass, null);
+
+            switch (job.MethodInfo.Invoke(jobClass, null))
+            {
+                case Task<string> text:
+                    return await text;
+                case Task task:
+                    await task;
+                    break;
+            }
+
+            return null;
         }
+
+        // What a failed run's detail says: the exception's type, never its message, which can hold anything, unless it's a
+        // job's own failure in the bot's wording. A job that throws before it hands back its task arrives wrapped.
+        internal static string FailureOf(Exception? e)
+        {
+            while (e is AggregateException { InnerException: not null } or TargetInvocationException { InnerException: not null })
+                e = e.InnerException;
+
+            return e switch
+            {
+                JobFailedException failed => failed.Message,
+                null => "no exception given",
+                _ => e.GetType().Name
+            };
+        }
+
+        static string Detail(FormattableString text) => text.ToString(CultureInfo.InvariantCulture);
 
         private async Task Main(CancellationToken cancellationToken)
         {
@@ -135,6 +207,22 @@ namespace MinerBot_2._0.Handlers
                     {
                         _logger.LogWarning("{jobDeclareType}.{jobName} is still running from a run that was cut off, so this run is skipped",
                             job.DeclaringType.Name, job.Name);
+
+                        if (Recorder is { } recorder)
+                        {
+                            var now = Clock.GetUtcNow().UtcDateTime;
+
+                            recorder.RecordJobRun(new JobRun
+                            {
+                                seq = recorder.NewJobRun(),
+                                job = NameOf(job),
+                                started_at = now,
+                                ended_at = now,
+                                result = JobResult.Skipped,
+                                detail = "the run that was cut off still runs"
+                            }, job.Details.Cron, job.NextRun.UtcDateTime);
+                        }
+
                         continue;
                     }
 

@@ -33,7 +33,9 @@
 #   FAKE_STOP            hang: Compose's stop stops the container, then hangs until its timeout fires; fail: it fails
 #                        and leaves the container running
 #   FAKE_RESTARTS        bot@<rev> or dashboard@<rev>: a container on that image reports one restart more than it had
-#   FAKE_UNHEALTHY       dashboard@<rev>: a container on that image reports Docker's health check as unhealthy
+#   FAKE_UNHEALTHY       bot@<rev> or dashboard@<rev>: a container on that image reports Docker's health check as unhealthy
+#   FAKE_HEALTHY         bot@<rev>: the bot on that image has a health check, as from PR 6 on, and it reports healthy. Without
+#                        it the bot has none, as before PR 6, and its readiness is its log's ready line
 #   FAKE_NO_SOCKET       dashboard@<rev>: the dashboard on that image never makes its socket (record.sh's sync_socket)
 # Compose's up recreates a container, as Compose does, when the image behind :current changed or the service's section
 # of the compose file did: a container it made remembers a hash of its section, as cfg-<hash> (one from before, such as
@@ -114,6 +116,9 @@ fill() {   # fill <template> <container name>: the templates the scripts use wit
     if listed "${FAKE_RESTARTS:-}" "$key"; then
         restarts=$((restarts + 1))
     fi
+    if listed "${FAKE_HEALTHY:-}" "$key"; then
+        health=healthy
+    fi
     if listed "${FAKE_UNHEALTHY:-}" "$key"; then
         health=unhealthy
     fi
@@ -142,6 +147,8 @@ build() {
     while [ $# -gt 0 ]; do
         case $1 in
             --label) rev=${2#org.opencontainers.image.revision=}; shift ;;
+            # deploy.sh gives the bot its commit, which the scripts never read back from the image
+            --build-arg) [[ $2 == ?*=* ]] || fail "fake docker build: --build-arg takes NAME=value, not $2" 9; shift ;;
             -t) tag=$2; shift ;;
             -f) file=$2; shift ;;
             --network | --cpu-quota | --cpu-period) shift ;;

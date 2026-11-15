@@ -6,9 +6,29 @@ using MinerBot_2._0;
 using MinerBot_2._0.Handlers;
 using MinerBot_2._0.Jobs;
 using MinerBot_2._0.Services;
+using MinerBot_2._0.Status;
 using SteamWebAPIAccess;
 
+// Docker's health check, which only reads the heartbeat file: it reads no settings, builds no host and connects to nothing
+if (args is ["healthcheck"])
+{
+    var (exitCode, line) = Heartbeat.Check(Heartbeat.DefaultPath, DateTimeOffset.UtcNow);
+    Console.WriteLine(line);
+    Environment.ExitCode = exitCode;
+    return;
+}
+
+// A container that Docker restarts keeps its /tmp, so the run before's heartbeat goes before anything else happens
+Heartbeat.DeleteOld(Heartbeat.DefaultPath);
+
 var builder = Host.CreateApplicationBuilder(args);
+// The bot's status and history, which StatusWriter writes to MinerBot's database. Registered before the worker, so they
+// stop after it, and the last write holds what its stop recorded.
+builder.Services.AddSingleton<BotRecorder>();
+builder.Services.AddSingleton<DiscordStatusHandler>();
+builder.Services.AddSingleton<IDiscordStatus>(services => services.GetRequiredService<DiscordStatusHandler>());
+builder.Services.AddHostedService<StatusWriter>();
+builder.Services.AddHostedService<StatusSampler>();
 builder.Services.AddHostedService<Worker>();
 builder.Services.AddSingleton(new DiscordSocketConfig { GatewayIntents = GatewayIntents.Guilds });
 builder.Services.AddSingleton<DiscordSocketClient>();
@@ -33,7 +53,9 @@ builder.Services.AddSingleton<JobHandler>();
 builder.Services.AddDataAccessServices(builder.Configuration)
                 .AddArmorAccess()
                 .AddBlacklistAccess()
-                .AddGuildAccess();
+                .AddGuildAccess()
+                .AddBotStatusAccess()
+                .AddRetentionAccess();
 
 // Steam API Access
 builder.Services.AddSteamAPIServices();
@@ -46,6 +68,10 @@ builder.Services.AddMemoryCache();
 var host = builder.Build();
 
 var client = host.Services.GetRequiredService<DiscordSocketClient>();
+var recorder = host.Services.GetRequiredService<BotRecorder>();
+
+// On a signal or a failure, before any service stops
+host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping.Register(() => recorder.Record(BotEvents.BotStopping));
 
 // Need to use ILogger instead, but good for now.
 client.Log += Client_Log;
@@ -54,6 +80,10 @@ client.Log += Client_Log;
 await client.SetGameAsync("Murder Miners on my PC", type:ActivityType.Playing);
 // MM Game Embed, RPC needed
 //client.Activity.
+
+// Before connecting, and before the other Ready handlers: Discord.Net skips the ones after a Ready handler that throws,
+// and without this one's Ready the bot never counts as up, so its health check would fail
+host.Services.GetRequiredService<DiscordStatusHandler>().Initialize();
 
 // Before connecting, because a Ready event during this would register an empty list and delete every command
 await host.Services.GetRequiredService<InteractionHandler>().InitializeAsync();
@@ -72,6 +102,7 @@ steamApi.SetCredentials(Environment.GetEnvironmentVariable("STEAMWEB_PUB_KEY"),
                         Environment.GetEnvironmentVariable("STEAMUSER_NAME"),
                         Environment.GetEnvironmentVariable("STEAMUSER_PASSWORD"));
 steamApi.AlertOwner = host.Services.GetRequiredService<OwnerAlertService>().SendAsync;
+steamApi.RecordEvent = recorder.Record;
 steamApi.AuthenticateClient();
 
 var getSteamAPI = host.Services.GetService<IGetData>();

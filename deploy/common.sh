@@ -646,11 +646,12 @@ ready_dashboard() {   # ready_dashboard [<public status before the swap>] [<rest
     echo "The public home page answers 200, as before the swap."
 }
 
-# Waits until the bot is up. Once its image has a health check, that means healthy. Until then, which is until PR 6
-# gives it a heartbeat, it means: its log since it started has a line matching BOT_READY_PATTERN from server.conf within
-# 150 seconds, and 20 seconds later it still runs with the same start time and no new restart. The log goes to a file
-# only root can open, never to the screen, because it can hold a Steam sign-in code. As for the dashboard, a container on
-# another image than the one given fails at once.
+# Waits until the bot is up: its image's health check says healthy within 150 seconds, which it does once the bot has
+# written its heartbeat, every 5 seconds while it's up on Discord, and 20 seconds later it still runs with the same start
+# time and no new restart. Unhealthy fails at once. An image without a health check, such as an older one rollback.sh
+# runs, is up instead when its log since it started has a line matching BOT_READY_PATTERN from server.conf. The log goes
+# to a file only root can open, never to the screen, because it can hold a Steam sign-in code. As for the dashboard, a
+# container on another image than the one given fails at once.
 ready_bot() {   # ready_bot [<restart count it starts from, 0 by default>] [<image ID it must run>]
     local base=${1:-0} expected=${2:-} limit=150 steady=20 poll=3 started=$SECONDS pattern=${BOT_READY_PATTERN:-Gateway +Ready}
     local state image running restarts since health log count why started_again

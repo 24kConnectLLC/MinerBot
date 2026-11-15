@@ -6,6 +6,6 @@
 SITE_DB={The website's database, which holds the armor, blacklist and Discord server tables}
 # MinerBot's own database, which the migrations create tables in
 BOT_DB={MinerBot's own database}
-# The line in the bot's log that says it reached Discord, as grep -E takes it. After a bot swap, deploy.sh waits for it,
-# until the bot's image has a health check of its own.
+# The line in the bot's log that says it reached Discord, as grep -E takes it. After a bot swap, deploy.sh waits for it
+# only on an image without a health check of its own, such as one from before the heartbeat that rollback.sh may run.
 BOT_READY_PATTERN=Gateway +Ready

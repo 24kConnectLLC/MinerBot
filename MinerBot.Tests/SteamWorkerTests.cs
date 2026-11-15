@@ -16,36 +16,6 @@ namespace MinerBot.Tests
     {
         static readonly TimeSpan WaitLimit = TimeSpan.FromSeconds(15);
 
-        sealed class FakeSteam : ISteamAPIAccess
-        {
-            public TaskCompletionSource PumpStarted { get; } = new();
-            public int Renewals;
-            public Exception? PumpFailure;
-
-            public uint appID { get; set; }
-            public CallbackManager manager { get; set; } = null!;
-            public string PublisherWebAPIKey { get; set; } = "";
-            public SteamClient steamClient { get; set; } = null!;
-            public SteamMatchmaking steamMatchmaking => null!;
-            public SteamUser steamUser { get; set; } = null!;
-            public Func<string, Task>? AlertOwner { get; set; }
-
-            public void AuthenticateClient() { }
-            public void SetCredentials(string key, string shouldRemember, string username = "", string password = "") { }
-
-            public Task RunCallbacksAsync(CancellationToken stoppingToken)
-            {
-                PumpStarted.TrySetResult();
-                return PumpFailure != null ? Task.FromException(PumpFailure) : Task.Delay(Timeout.Infinite, stoppingToken);
-            }
-
-            public Task RenewTokenAsync()
-            {
-                Renewals++;
-                return Task.CompletedTask;
-            }
-        }
-
         // Fails the way a schedule whose time zone can't be found would
         sealed class FailingJobHandler : JobHandler
         {

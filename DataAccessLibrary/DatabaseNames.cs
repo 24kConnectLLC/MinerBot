@@ -16,7 +16,7 @@ namespace DataAccessLibrary
 
         string? bot;
 
-        // Worked out on first use, so the bot, which never uses it, runs without BotConnection
+        // Worked out on first use, so the bot runs without BotConnection, and only records nothing
         internal string Bot => bot ??= Of(DBConnectionName.Bot);
 
         internal string Of(DBConnectionName name)
@@ -36,9 +36,9 @@ namespace DataAccessLibrary
             return QuoteIdentifier(databaseName);
         }
 
-        // What stops a connection string from being used, for the dashboard's start-up check: null when nothing does,
-        // otherwise the reason in a few words. The reason never quotes the string, which holds a password, and neither
-        // does the driver's own message, which is why that isn't passed on.
+        // What stops a connection string from being used, for the dashboard's start-up check and the bot's status
+        // writer: null when nothing does, otherwise the reason in a few words. The reason never quotes the string, which
+        // holds a password, and neither does the driver's own message, which is why that isn't passed on.
         public static string? Problem(string? connectionString)
         {
             string databaseName;
@@ -47,7 +47,12 @@ namespace DataAccessLibrary
             {
                 databaseName = new MySqlConnectionStringBuilder(connectionString ?? "").Database;
             }
-            catch (Exception e) when (e is ArgumentException or FormatException or InvalidCastException or OverflowException)
+            // Anything the driver throws as it reads the string, which it only parses: ArgumentException,
+            // FormatException, InvalidCastException or OverflowException for a value it can't take, MySqlException for a
+            // part it can't split, such as the rest of a password after an unquoted semicolon, which its message quotes,
+            // and PlatformNotSupportedException for an option .NET doesn't have. The bot asks as it starts, where an
+            // exception would stop it.
+            catch (Exception)
             {
                 return "can't be read";
             }

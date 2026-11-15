@@ -6,6 +6,8 @@ using DataAccessLibrary.Audit.Models;
 using DataAccessLibrary.Blacklist.Models;
 using DataAccessLibrary.Dashboard;
 using DataAccessLibrary.Dashboard.Models;
+using DataAccessLibrary.Status;
+using DataAccessLibrary.Status.Models;
 using DataAccessLibrary.Tests.Database;
 using MinerBot.Shared.Armor;
 using MySql.Data.MySqlClient;
@@ -186,7 +188,11 @@ namespace DataAccessLibrary.Tests
         public async Task NamesComeFromTheConnectionString()
         {
             var db = await StartAsync();
-            await db.ClearAsync(MariaDbFixture.SessionTable);
+
+            // Every table the end checks, because the other classes leave their rows behind, and the order the classes run
+            // in changes with the folder the tests run from
+            await db.ClearAsync(MariaDbFixture.SessionTable, MariaDbFixture.StatusTable, MariaDbFixture.EventTable, MariaDbFixture.JobRunTable,
+                MariaDbFixture.JobStatusTable, MariaDbFixture.SampleTable, MariaDbFixture.DailyTable);
             const string alternative = "minerbot-alt`db";
             const string quoted = "`minerbot-alt``db`";
 
@@ -225,8 +231,39 @@ namespace DataAccessLibrary.Tests
             Assert.NotNull(await sessions.GetSession(SessionKey, Noon));
             Assert.Equal(1, await sessions.DeleteOtherSessions(Session().user_id, new string('o', 43)));
 
+            // The bot's status and history, and its clean-up
+            var status = new BotStatusData(factory, names);
+            var retention = new RetentionData(factory, names);
+            var day = Noon.Date;
+
+            await status.SaveStatus(new BotStatus { run_id = 1, started_at = Noon, heartbeat_at = Noon, discord_state = DiscordState.Connected, steam_state = SteamState.LoggedOn });
+            await status.AddEvents([new BotEvent { run_id = 1, seq = 1, at = Noon, kind = "bot.started", level = EventLevel.Info }]);
+            await status.SaveJobRuns([new JobRun { run_id = 1, seq = 1, job = "ArmorJob.AddColorArrays", started_at = Noon, result = JobResult.Ok }]);
+            await status.SaveJobStatus([new JobStatus { job = "ArmorJob.AddColorArrays", schedule = "0 * * * *", updated_at = Noon },
+                new JobStatus { job = "OldJob.Gone", schedule = "0 * * * *", updated_at = Noon }]);
+            await status.SaveSamples([new UptimeSample { minute = day.AddDays(-1), discord_up = true, steam_up = true }]);
+
+            Assert.NotNull(await status.GetStatus());
+            Assert.Equal(1, await status.DeleteOtherJobs(["ArmorJob.AddColorArrays"]));
+            Assert.Equal(1, await retention.TotalUptimeDays(day.AddDays(-1), day));
+            Assert.Equal(1, await retention.DeleteSamples(day, 10));
+            Assert.Equal(1, await retention.DeleteEvents(Noon.AddSeconds(1), 10));
+            Assert.Equal(1, await retention.DeleteJobRuns(Noon.AddSeconds(1), 10));
+            var withAddress = Audit();
+            withAddress.ip = "203.0.113.7";
+            await audit.AddAudit(withAddress);
+            await sessions.CreateSession(SessionKey, Session());
+
+            Assert.Equal(1, await retention.ClearAuditAddresses(Noon.AddYears(1), 10));
+            Assert.Equal(3, await retention.DeleteAuditRows(Noon.AddYears(1), 10));
+            Assert.Equal(1, await retention.DeleteSessions(Noon.AddYears(1), 10));
+
+            foreach (var table in new[] { "bot_status", "job_status", "uptime_daily" })
+                Assert.Equal(1, await CountAsync($"{quoted}.{table}"));
+
             // Nothing reached the real database's tables
-            foreach (var table in new[] { MariaDbFixture.AuditTable, MariaDbFixture.ReviewTable, MariaDbFixture.SessionTable })
+            foreach (var table in new[] { MariaDbFixture.AuditTable, MariaDbFixture.ReviewTable, MariaDbFixture.SessionTable, MariaDbFixture.StatusTable,
+                MariaDbFixture.EventTable, MariaDbFixture.JobRunTable, MariaDbFixture.JobStatusTable, MariaDbFixture.SampleTable, MariaDbFixture.DailyTable })
                 Assert.Equal(0, await CountAsync(table));
         }
 
