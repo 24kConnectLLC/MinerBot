@@ -6,6 +6,8 @@ using DataAccessLibrary.Blacklist;
 using DataAccessLibrary.Dashboard;
 using DataAccessLibrary.Dashboard.Models;
 using DataAccessLibrary.Discord;
+using DataAccessLibrary.Guilds;
+using DataAccessLibrary.Guilds.Models;
 using DataAccessLibrary.Health;
 using DataAccessLibrary.Status;
 using DataAccessLibrary.Status.Models;
@@ -64,7 +66,8 @@ namespace DataAccessLibrary.Tests
                 .AddDashboardSessionAccess()
                 .AddDatabaseHealthAccess()
                 .AddBotStatusAccess()
-                .AddRetentionAccess();
+                .AddRetentionAccess()
+                .AddBotGuildAccess();
 
             if (factory != null)
                 services.AddSingleton(factory);
@@ -105,6 +108,7 @@ namespace DataAccessLibrary.Tests
             var sessions = provider.GetRequiredService<IDashboardSessionData>();
             var status = provider.GetRequiredService<IBotStatusData>();
             var retention = provider.GetRequiredService<IRetentionData>();
+            var guilds = provider.GetRequiredService<IBotGuildData>();
             Assert.IsType<DatabaseHealthData>(provider.GetRequiredService<IDatabaseHealthData>());
 
             var now = DateTime.UtcNow;
@@ -126,6 +130,12 @@ namespace DataAccessLibrary.Tests
                 () => retention.TotalUptimeDays(day.AddDays(-1), day),
                 () => retention.DeleteSamples(day, 1),
                 () => retention.DeleteSessions(now, 1),
+                () => retention.DeleteGuildEvents(now, 1),
+                () => guilds.ListGuildsIn(),
+                () => guilds.SaveGuild(new BotGuild { guild_id = 1, name = "Test Server" }, [], now, 1, 1),
+                () => guilds.LeaveGuild(1, now, 1, 1, null),
+                () => guilds.MarkUnavailable([1], now),
+                () => guilds.SaveMemberCount(1, 10, day, now),
                 () => audit.ListAudit(new AuditQuery()),
                 () => audit.LatestChanges("blacklist", ["12345"]),
                 () => audit.AddAudit(new AuditEntry { at = DateTime.UtcNow, actor_role = AuditRole.Owner, action = "armor.approve", outcome = AuditOutcome.Ok }),
@@ -206,9 +216,9 @@ namespace DataAccessLibrary.Tests
             return new MySqlConnectionStringBuilder(connection.ConnectionString).CharacterSet;
         }
 
-        // Every repository the dashboard uses, and the bot's status and history, sends utf8mb4 whatever the connection string
-        // says, so emoji and zero-width characters reach the tables and name checks as they are. The bot's first two keep
-        // theirs, so what the bot already did is unchanged.
+        // Every repository the dashboard uses, and the bot's status, history and servers, sends utf8mb4 whatever the
+        // connection string says, so emoji and zero-width characters reach the tables and name checks as they are. The bot's
+        // first two keep theirs, so what the bot already did is unchanged.
         [Theory]
         [InlineData("")]
         [InlineData(";CharSet=latin1")]
@@ -234,7 +244,8 @@ namespace DataAccessLibrary.Tests
                 new AuditLogData(factory, names),
                 new DashboardSessionData(factory, names),
                 new BotStatusData(factory, names),
-                new RetentionData(factory, names)
+                new RetentionData(factory, names),
+                new BotGuildData(factory, names)
             }, repository => Assert.Equal("utf8mb4", CharacterSet(repository, factory)));
 
             var configured = new MySqlConnectionStringBuilder(Site + setting).CharacterSet;

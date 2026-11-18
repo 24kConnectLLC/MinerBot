@@ -3,6 +3,8 @@ using DataAccessLibrary.Armor;
 using DataAccessLibrary.Armor.Models;
 using DataAccessLibrary.Discord;
 using DataAccessLibrary.Discord.Models;
+using DataAccessLibrary.Guilds;
+using DataAccessLibrary.Guilds.Models;
 using DataAccessLibrary.Status;
 using DataAccessLibrary.Status.Models;
 using Steam.Models;
@@ -301,7 +303,7 @@ namespace MinerBot.Tests
     // test can make a rule fail. Every call is kept, with the cutoff and the chunk it asked for.
     internal sealed class FakeRetentionData : IRetentionData
     {
-        public int AuditRows, Addresses, Events, JobRuns, Days, Samples, Sessions;
+        public int AuditRows, Addresses, Events, GuildEvents, JobRuns, Days, Samples, Sessions;
         public readonly Dictionary<string, Exception> Failures = new();
         public readonly List<(string Rule, DateTime Cutoff, int Take)> Calls = new();
         public (DateTime From, DateTime To)? Totalled;
@@ -309,6 +311,7 @@ namespace MinerBot.Tests
         public Task<int> DeleteAuditRows(DateTime before, int take) => Take(nameof(DeleteAuditRows), before, take, ref AuditRows);
         public Task<int> ClearAuditAddresses(DateTime before, int take) => Take(nameof(ClearAuditAddresses), before, take, ref Addresses);
         public Task<int> DeleteEvents(DateTime before, int take) => Take(nameof(DeleteEvents), before, take, ref Events);
+        public Task<int> DeleteGuildEvents(DateTime before, int take) => Take(nameof(DeleteGuildEvents), before, take, ref GuildEvents);
         public Task<int> DeleteJobRuns(DateTime before, int take) => Take(nameof(DeleteJobRuns), before, take, ref JobRuns);
         public Task<int> DeleteSamples(DateTime before, int take) => Take(nameof(DeleteSamples), before, take, ref Samples);
         public Task<int> DeleteSessions(DateTime before, int take) => Take(nameof(DeleteSessions), before, take, ref Sessions);
@@ -332,6 +335,124 @@ namespace MinerBot.Tests
             left -= taken;
 
             return Task.FromResult(taken);
+        }
+    }
+
+    // MinerBot's copy of the servers, for the server writer and the daily member count. It keeps each server's row as the
+    // table would, with when the bot left it, and records a join or a leave by the table's rules, so tests see what the
+    // writer wrote. A test can make every call fail or wait, a write land and then fail, or a server be refused before any
+    // SQL, as the real repository refuses one it can't save.
+    internal sealed class FakeBotGuildData : IBotGuildData
+    {
+        int calls;
+        Exception? failureAfterLanding;
+
+        // Each server's row: null while the bot is in it, otherwise when it left
+        public readonly Dictionary<ulong, DateTime?> Rows = new();
+        public readonly List<(BotGuild Guild, BotGuildChannel[] Channels, DateTime At)> Saved = new();
+        public readonly List<(ulong GuildId, DateTime At, string? Detail)> Leaves = new();
+        public readonly List<(uint Seq, ulong GuildId, string Kind)> Events = new();
+        public readonly List<ulong[]> MarkedUnavailable = new();
+        public readonly List<(ulong GuildId, uint Count, DateTime Day)> Counts = new();
+
+        // The run and number of each event added
+        readonly HashSet<(ulong RunId, uint Seq)> numbers = new();
+
+        public Exception? Failure { get; set; }
+        public Task? Hold { get; set; }
+        public bool RefuseGuilds { get; set; }
+
+        // Holds the servers' writes only, as a database that answers reads but is slow with a write
+        public Task? SaveHold { get; set; }
+
+        // Thrown once, after the next server's write or leave landed, as when the database committed it but its answer
+        // didn't come within the call's limit
+        public Exception? FailureAfterLanding { get => Volatile.Read(ref failureAfterLanding); set => Volatile.Write(ref failureAfterLanding, value); }
+
+        public int Calls => Volatile.Read(ref calls);
+
+        public Task<IEnumerable<ulong>> ListGuildsIn() =>
+            Answer(() => (IEnumerable<ulong>)Rows.Where(row => row.Value == null).Select(row => row.Key).ToList());
+
+        public Task<bool> SaveGuild(BotGuild guild, IReadOnlyList<BotGuildChannel> channels, DateTime at, ulong runId, uint seq)
+        {
+            if (RefuseGuilds)
+                throw new ArgumentException("A server's row needs its name");
+
+            return Landed(Answer(() =>
+            {
+                Saved.Add((guild, channels.ToArray(), at));
+
+                var joining = !Rows.TryGetValue(guild.guild_id, out var left) || left != null;
+                Rows[guild.guild_id] = null;
+
+                if (joining)
+                    AddEvent(runId, seq, guild.guild_id, GuildEventKind.Joined);
+
+                return joining;
+            }, SaveHold));
+        }
+
+        public Task<bool> LeaveGuild(ulong guildId, DateTime at, ulong runId, uint seq, string? detail) => Landed(Answer(() =>
+        {
+            Leaves.Add((guildId, at, detail));
+
+            var leaving = Rows.TryGetValue(guildId, out var left) && left == null;
+
+            if (leaving)
+            {
+                Rows[guildId] = at;
+                AddEvent(runId, seq, guildId, GuildEventKind.Left);
+            }
+
+            return leaving;
+        }));
+
+        // As the table's unique key on the run and the number, with ON DUPLICATE KEY UPDATE id = id: an event with a number
+        // the run already used isn't added, and the call that brought it doesn't know
+        void AddEvent(ulong runId, uint seq, ulong guildId, string kind)
+        {
+            if (numbers.Add((runId, seq)))
+                Events.Add((seq, guildId, kind));
+        }
+
+        async Task<bool> Landed(Task<bool> write)
+        {
+            var recorded = await write;
+
+            if (Interlocked.Exchange(ref failureAfterLanding, null) is { } failure)
+                throw failure;
+
+            return recorded;
+        }
+
+        public Task<int> MarkUnavailable(IReadOnlyCollection<ulong> guildIds, DateTime at) => Answer(() =>
+        {
+            MarkedUnavailable.Add(guildIds.ToArray());
+            return guildIds.Count;
+        });
+
+        public Task SaveMemberCount(ulong guildId, uint memberCount, DateTime day, DateTime at) => Answer(() =>
+        {
+            Counts.Add((guildId, memberCount, day));
+            return true;
+        });
+
+        async Task<T> Answer<T>(Func<T> save, Task? saveHold = null)
+        {
+            Interlocked.Increment(ref calls);
+
+            if (Failure is { } failure)
+                throw failure;
+
+            if (Hold is { } hold)
+                await hold;
+
+            if (saveHold != null)
+                await saveHold;
+
+            lock (this)
+                return save();
         }
     }
 }

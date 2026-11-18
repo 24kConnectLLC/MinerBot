@@ -228,8 +228,8 @@ namespace MinerBot.Dashboard.Tests
             Assert.Equal(0, await DashboardCommands.MigrateAsync(settings, logger, Token).WaitAsync(TimeSpan.FromMinutes(2), Token));
 
             var tables = await db.RootQueryAsync<string>("SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = @database ORDER BY TABLE_NAME", new { database });
-            Assert.Equal(["armor_reviews", "audit_log", "bot_events", "bot_status", "dashboard_sessions", "job_runs", "job_status", "schema_version", "uptime_daily",
-                "uptime_samples"], tables);
+            Assert.Equal(["armor_reviews", "audit_log", "bot_events", "bot_status", "dashboard_sessions", "guilds", "guild_channels", "guild_daily", "guild_events",
+                "job_runs", "job_status", "schema_version", "uptime_daily", "uptime_samples"], tables);
             Assert.Contains(logger.Entries, entry => entry.Message.Contains("is at version", StringComparison.Ordinal));
 
             Assert.Equal(0, await DashboardCommands.MigrateAsync(settings, logger, Token).WaitAsync(TimeSpan.FromMinutes(2), Token));

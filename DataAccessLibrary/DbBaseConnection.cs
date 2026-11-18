@@ -3,6 +3,7 @@ using MySql.Data.MySqlClient;
 using System.Data;
 using System.Data.Common;
 using System.Net.Sockets;
+using System.Text;
 
 namespace DataAccessLibrary
 {
@@ -230,6 +231,42 @@ namespace DataAccessLibrary
                 throw new ArgumentException("Times are saved in UTC, and this one is local", name);
 
             return time;
+        }
+
+        internal static void RequireUtcOrNull(DateTime? time, string name)
+        {
+            if (time is { } value)
+                RequireUtc(value, name);
+        }
+
+        internal static void RequireSeq(uint seq)
+        {
+            if (seq == 0)
+                throw new ArgumentException("Sequence numbers count from 1", nameof(seq));
+        }
+
+        // One statement for the whole batch, with each row's parameters numbered, such as @seq0 and @seq1. The names are
+        // the columns', which only the repository's code gives.
+        internal static (string Values, DynamicParameters Parameters) Rows<T>(IReadOnlyList<T> rows, params (string Column, Func<T, object?> Value)[] columns)
+        {
+            var values = new StringBuilder();
+            var parameters = new DynamicParameters();
+
+            for (var i = 0; i < rows.Count; i++)
+            {
+                values.Append(i == 0 ? "(" : ", (");
+
+                for (var c = 0; c < columns.Length; c++)
+                {
+                    var name = $"{columns[c].Column}{i}";
+                    values.Append(c == 0 ? "@" : ", @").Append(name);
+                    parameters.Add(name, columns[c].Value(rows[i]));
+                }
+
+                values.Append(')');
+            }
+
+            return (values.ToString(), parameters);
         }
 
         // MariaDB counts code points, and its strict mode refuses a value that's too long rather than cutting it.

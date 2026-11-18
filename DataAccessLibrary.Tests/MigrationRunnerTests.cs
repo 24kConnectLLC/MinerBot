@@ -50,8 +50,8 @@ namespace DataAccessLibrary.Tests
             var tables = await db.RootQueryAsync<(string, string, string)>(
                 "SELECT TABLE_NAME, ENGINE, TABLE_COLLATION FROM information_schema.TABLES WHERE TABLE_SCHEMA = @database ORDER BY TABLE_NAME", new { database });
 
-            Assert.Equal(["armor_reviews", "audit_log", "bot_events", "bot_status", "dashboard_sessions", "job_runs", "job_status", "schema_version",
-                "uptime_daily", "uptime_samples"], tables.Select(table => table.Item1));
+            Assert.Equal(["armor_reviews", "audit_log", "bot_events", "bot_status", "dashboard_sessions", "guilds", "guild_channels", "guild_daily",
+                "guild_events", "job_runs", "job_status", "schema_version", "uptime_daily", "uptime_samples"], tables.Select(table => table.Item1));
             Assert.All(tables, table =>
             {
                 Assert.Equal("InnoDB", table.Item2);
@@ -60,6 +60,7 @@ namespace DataAccessLibrary.Tests
 
             Assert.True(logger.Logged(LogLevel.Information, "Applied migration 0001_core"));
             Assert.True(logger.Logged(LogLevel.Information, "Applied migration 0002_bot_status"));
+            Assert.True(logger.Logged(LogLevel.Information, "Applied migration 0003_guilds"));
         }
 
         [Fact]
@@ -80,7 +81,7 @@ namespace DataAccessLibrary.Tests
             Assert.Equal(MigrationScript.Embedded()[^1].Version, result.Version);
             Assert.Equal(rowsBefore, await db.RootQueryAsync<(int, string, DateTime)>($"SELECT `version`, `checksum`, applied_at FROM {quoted}.schema_version ORDER BY `version`"));
             Assert.Equal(tablesBefore, await CreateStatementsAsync(quoted, await TablesAsync(database)));
-            Assert.True(logger.Logged(LogLevel.Information, "The database is up to date at version 2"));
+            Assert.True(logger.Logged(LogLevel.Information, "The database is up to date at version 3"));
         }
 
         async Task<List<string>> CreateStatementsAsync(string quotedDatabase, List<string> tables)

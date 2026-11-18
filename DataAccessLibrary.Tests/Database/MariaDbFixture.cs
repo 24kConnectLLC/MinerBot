@@ -5,6 +5,7 @@ using DataAccessLibrary.Audit;
 using DataAccessLibrary.Blacklist;
 using DataAccessLibrary.Dashboard;
 using DataAccessLibrary.Discord;
+using DataAccessLibrary.Guilds;
 using DataAccessLibrary.Migrations;
 using DataAccessLibrary.Status;
 using DotNet.Testcontainers.Builders;
@@ -40,6 +41,12 @@ namespace DataAccessLibrary.Tests.Database
         public const string JobStatusTable = BotDatabase + ".job_status";
         public const string SampleTable = BotDatabase + ".uptime_samples";
         public const string DailyTable = BotDatabase + ".uptime_daily";
+
+        // MinerBot's own copy of the servers, apart from the website's GuildTable
+        public const string BotGuildTable = BotDatabase + ".guilds";
+        public const string BotChannelTable = BotDatabase + ".guild_channels";
+        public const string GuildEventTable = BotDatabase + ".guild_events";
+        public const string GuildDailyTable = BotDatabase + ".guild_daily";
 
         // CI sets this, so there the database tests fail instead of skipping
         internal const string RequiredSetting = "MINERBOT_DB_TESTS";
@@ -120,6 +127,7 @@ namespace DataAccessLibrary.Tests.Database
         public DashboardSessionData Sessions() => new(Factory, Names);
         public BotStatusData Status() => new(Factory, Names);
         public RetentionData Retention() => new(Factory, Names);
+        public BotGuildData BotGuilds() => new(Factory, Names);
         public BlacklistData Blacklist() => new(Factory);
         public GuildData Guilds() => new(Factory);
 

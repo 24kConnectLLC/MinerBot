@@ -387,6 +387,16 @@ namespace DataAccessLibrary.Tests
             { "add to uptime_samples", $"INSERT INTO {Bot}.uptime_samples (minute, discord_up, steam_up) VALUES (NOW(), 1, 1)" },
             { "read uptime_daily", $"SELECT * FROM {Bot}.uptime_daily" },
             { "delete from uptime_daily", $"DELETE FROM {Bot}.uptime_daily WHERE 1 = 0" },
+            // The bot's copy of its servers, which only the bot writes, and which the dashboard can't read until a pull
+            // request gives it the right for its servers pages
+            { "read guilds", $"SELECT * FROM {Bot}.guilds" },
+            { "change guilds", $"UPDATE {Bot}.guilds SET name = 'changed' WHERE 1 = 0" },
+            { "read guild_channels", $"SELECT * FROM {Bot}.guild_channels" },
+            { "delete from guild_channels", $"DELETE FROM {Bot}.guild_channels WHERE 1 = 0" },
+            { "add to guild_events", $"INSERT INTO {Bot}.guild_events (run_id, seq, guild_id, at, kind) VALUES (1, 1, 1, NOW(3), 'joined')" },
+            { "read guild_events", $"SELECT * FROM {Bot}.guild_events" },
+            { "read guild_daily", $"SELECT * FROM {Bot}.guild_daily" },
+            { "add to guild_daily", $"INSERT INTO {Bot}.guild_daily (day, guild_id, member_count) VALUES (CURDATE(), 1, 1)" },
             // Structure, in both databases
             { "create a table in MinerBot's database", $"CREATE TABLE {Bot}.rights_check (id INT)" },
             { "create a table in the website's database", $"CREATE TABLE {Site}.rights_check (id INT)" },

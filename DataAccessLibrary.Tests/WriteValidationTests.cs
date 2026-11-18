@@ -6,6 +6,8 @@ using DataAccessLibrary.Blacklist;
 using DataAccessLibrary.Blacklist.Models;
 using DataAccessLibrary.Dashboard;
 using DataAccessLibrary.Dashboard.Models;
+using DataAccessLibrary.Guilds;
+using DataAccessLibrary.Guilds.Models;
 using DataAccessLibrary.Status;
 using DataAccessLibrary.Status.Models;
 using MinerBot.Shared.Armor;
@@ -407,6 +409,91 @@ namespace DataAccessLibrary.Tests
             await RefusedAsync(() => retention.TotalUptimeDays(day.AddHours(1), day.AddDays(1)));
             await RefusedAsync(() => retention.TotalUptimeDays(day, day.AddDays(-1)));
             await RefusedAsync(() => retention.TotalUptimeDays(DateTime.SpecifyKind(day, DateTimeKind.Local), day));
+            await RefusedAsync(() => retention.DeleteGuildEvents(DateTime.Now, 1));
+            await RefusedAsync(() => retention.DeleteGuildEvents(day, RetentionData.ChunkLimit + 1));
+        }
+
+        static BotGuild Server() => new() { guild_id = 1, name = "Test Server", available = true };
+
+        static BotGuildChannel TextChannel(ulong id = 1) => new() { channel_id = id, name = "general", type = GuildChannelType.Text };
+
+        // A server the tables can't take is a mistake in the bot, and the bot's writer drops what's refused here, before any
+        // SQL, rather than trying it again at every tick
+        [Theory]
+        [InlineData("server written in local time")]
+        [InlineData("join in local time")]
+        [InlineData("event numbered 0")]
+        [InlineData("server without a name")]
+        [InlineData("icon hash over 64 characters")]
+        [InlineData("unknown channel type")]
+        [InlineData("channel without a name")]
+        [InlineData("more than 500 channels")]
+        public async Task ServerThatCantBeSavedIsRefused(string problem)
+        {
+            var server = Server();
+            var channels = new List<BotGuildChannel> { TextChannel() };
+            var at = DateTime.UtcNow;
+            uint seq = 1;
+
+            switch (problem)
+            {
+                case "server written in local time": at = DateTime.Now; break;
+                case "join in local time": server = server with { bot_joined_at = DateTime.Now }; break;
+                case "event numbered 0": seq = 0; break;
+                case "server without a name": server = server with { name = "" }; break;
+                case "icon hash over 64 characters": server = server with { icon_hash = new string('a', 65) }; break;
+                case "unknown channel type": channels[0] = channels[0] with { type = "voice" }; break;
+                case "channel without a name": channels[0] = channels[0] with { name = null! }; break;
+                case "more than 500 channels": channels = Enumerable.Range(1, 501).Select(id => TextChannel((ulong)id)).ToList(); break;
+                default: throw new ArgumentOutOfRangeException(nameof(problem), problem, "The test has no such case");
+            }
+
+            await RefusedAsync(() => new BotGuildData(database, NoDatabase.Names).SaveGuild(server, channels, at, 1, seq));
+        }
+
+        [Fact]
+        public async Task LeavesAndCountsThatCantBeSavedAreRefused()
+        {
+            var data = new BotGuildData(database, NoDatabase.Names);
+            var day = new DateTime(2026, 11, 17, 0, 0, 0, DateTimeKind.Utc);
+
+            await RefusedAsync(() => data.LeaveGuild(1, DateTime.Now, 1, 1, null));
+            await RefusedAsync(() => data.LeaveGuild(1, DateTime.UtcNow, 1, 0, null));
+            await RefusedAsync(() => data.MarkUnavailable([1], DateTime.Now));
+            await RefusedAsync(() => data.MarkUnavailable(Enumerable.Range(1, BotGuildData.BatchLimit + 1).Select(id => (ulong)id).ToList(), DateTime.UtcNow));
+            await RefusedAsync(() => data.SaveMemberCount(1, 10, day.AddHours(9), day.AddHours(9)));
+            await RefusedAsync(() => data.SaveMemberCount(1, 10, DateTime.SpecifyKind(day, DateTimeKind.Local), day));
+            await RefusedAsync(() => data.SaveMemberCount(1, 10, day, DateTime.Now));
+        }
+
+        // The server writer drops a server that's refused as it's called, and keeps one whose write failed
+        [Fact]
+        public void ServersAreRefusedBeforeTheCallReturns()
+        {
+            var data = new BotGuildData(database, NoDatabase.Names);
+
+            Assert.ThrowsAny<ArgumentException>(() => { _ = data.SaveGuild(Server() with { name = "" }, [], DateTime.UtcNow, 1, 1); });
+            Assert.ThrowsAny<ArgumentException>(() => { _ = data.LeaveGuild(1, DateTime.Now, 1, 1, null); });
+            Assert.ThrowsAny<ArgumentException>(() => { _ = data.MarkUnavailable([1], DateTime.Now); });
+            Assert.Equal(0, database.Created);
+        }
+
+        // Each limit is the column's or Discord's, so values just inside them are fine, and names past theirs are clipped
+        [Fact]
+        public async Task ServersAtTheLimitsPass()
+        {
+            var server = Server() with { name = new string('n', 150), icon_hash = new string('a', 64) };
+            var channels = Enumerable.Range(1, BotGuildData.ChannelLimit).Select(id => TextChannel((ulong)id) with { name = new string('c', 150) }).ToList();
+            var day = new DateTime(2026, 11, 17, 0, 0, 0, DateTimeKind.Utc);
+
+            // They get as far as building their SQL, which needs MinerBot's database
+            var missing = new BotGuildData(database, new DatabaseNames(new Dictionary<DBConnectionName, string>()));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => missing.SaveGuild(server, channels, DateTime.UtcNow, 1, 1));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => missing.LeaveGuild(1, DateTime.UtcNow, 1, 1, new string('d', 400)));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => missing.MarkUnavailable(Enumerable.Range(1, BotGuildData.BatchLimit).Select(id => (ulong)id).ToList(), DateTime.UtcNow));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => missing.SaveMemberCount(1, 10, day, DateTime.UtcNow));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => missing.ListGuildsIn());
+            Assert.Equal(0, database.Created);
         }
     }
 }

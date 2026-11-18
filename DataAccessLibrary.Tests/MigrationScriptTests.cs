@@ -80,7 +80,8 @@ namespace DataAccessLibrary.Tests
         static readonly Dictionary<string, string> Checksums = new()
         {
             ["0001_core"] = "71cf66af93eaa830b8ceebda61d5341971cbc4c82fbf37107149334574454aed",
-            ["0002_bot_status"] = "57cde1d9086d53d5d69c3009c3741e8ef126b3842ce57057b4830b54b199e597"
+            ["0002_bot_status"] = "57cde1d9086d53d5d69c3009c3741e8ef126b3842ce57057b4830b54b199e597",
+            ["0003_guilds"] = "25b0b8bd493209061734510450bd598124afd5dedc21571e0a58df0c97b6a285"
         };
 
         [Fact]
@@ -179,6 +180,27 @@ namespace DataAccessLibrary.Tests
                 Assert.DoesNotContain("CURDATE", statement);
                 Assert.DoesNotContain("CURRENT_", statement);
                 Assert.DoesNotContain("DEFAULT", statement.Replace("DEFAULT CHARSET", ""));
+            });
+        }
+
+        // The bot's copy of its servers, by the same rules as the status tables
+        [Fact]
+        public void ThirdMigrationCreatesTheGuildTables()
+        {
+            var third = MigrationScript.Embedded()[2];
+
+            Assert.Equal("0003_guilds", third.Name);
+            Assert.Equal(["guilds", "guild_channels", "guild_events", "guild_daily"], third.Statements.Select(TableName));
+            Assert.All(third.Statements, statement =>
+            {
+                Assert.EndsWith("ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_520_ci", statement);
+                Assert.DoesNotContain("TIMESTAMP", statement);
+                Assert.DoesNotContain("CHAR(36)", statement);
+                Assert.DoesNotContain("NOW(", statement);
+                Assert.DoesNotContain("CURDATE", statement);
+                Assert.DoesNotContain("CURRENT_", statement);
+                Assert.DoesNotContain("DEFAULT", statement.Replace("DEFAULT CHARSET", ""));
+                Assert.DoesNotContain("FOREIGN KEY", statement);
             });
         }
 
