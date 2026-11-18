@@ -6,6 +6,8 @@ using DataAccessLibrary.Blacklist;
 using DataAccessLibrary.Blacklist.Models;
 using DataAccessLibrary.Dashboard;
 using DataAccessLibrary.Dashboard.Models;
+using DataAccessLibrary.Guilds;
+using DataAccessLibrary.Guilds.Models;
 using DataAccessLibrary.Status;
 using DataAccessLibrary.Status.Models;
 using DataAccessLibrary.Tests.Database;
@@ -17,8 +19,8 @@ namespace DataAccessLibrary.Tests
     // MySql.Data uses the server's default character set when the connection string names none, and the live server's is
     // latin1, MariaDB's own default. Reading is unaffected, because MySql.Data asks for results as they're stored, but text sent to the server
     // that latin1 can't hold, such as an emoji or a zero-width space, arrives as a question mark. So every repository the
-    // dashboard uses, and the bot's status and history, sends utf8mb4 whatever its connection string says, which these tests
-    // check over strings that name no character set, while the bot's first queries keep theirs as configured.
+    // dashboard uses, and the bot's status, history and servers, sends utf8mb4 whatever its connection string says, which
+    // these tests check over strings that name no character set, while the bot's first queries keep theirs as configured.
     [Collection("Database")]
     public class CharacterSetTests(MariaDbFixture fixture)
     {
@@ -134,6 +136,23 @@ namespace DataAccessLibrary.Tests
 
             Assert.Equal([Name, Name, Name], await db.RootQueryAsync<string>(
                 $"SELECT detail FROM {MariaDbFixture.EventTable} UNION ALL SELECT detail FROM {MariaDbFixture.JobRunTable} UNION ALL SELECT last_detail FROM {MariaDbFixture.JobStatusTable}"));
+        }
+
+        // Server, channel and category names are Discord's, which take any character
+        [Fact]
+        public async Task TheBotsServersKeepEveryCharacter()
+        {
+            var db = fixture.Require();
+            await db.ClearAsync(MariaDbFixture.BotGuildTable, MariaDbFixture.BotChannelTable, MariaDbFixture.GuildEventTable);
+
+            var connections = WithoutCharacterSet();
+            var guilds = new BotGuildData(new SQLConnectionFactory(connections), new DatabaseNames(connections));
+
+            await guilds.SaveGuild(new BotGuild { guild_id = 1, name = Name, available = true },
+                [new BotGuildChannel { channel_id = 2, name = Name, type = GuildChannelType.Text, category = Name }], Noon, 1, 1);
+
+            Assert.Equal([Name, Name, Name], await db.RootQueryAsync<string>(
+                $"SELECT name FROM {MariaDbFixture.BotGuildTable} UNION ALL SELECT name FROM {MariaDbFixture.BotChannelTable} UNION ALL SELECT category FROM {MariaDbFixture.BotChannelTable}"));
         }
 
         // An edit of a blacklist entry, inside a transaction as the entry's page makes it, keeps them too

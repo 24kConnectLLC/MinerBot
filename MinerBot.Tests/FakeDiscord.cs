@@ -140,6 +140,25 @@ namespace MinerBot.Tests
         public BotRecorder Recorder => services.GetRequiredService<BotRecorder>();
         public DiscordStatusHandler DiscordStatus => services.GetRequiredService<DiscordStatusHandler>();
 
+        // The servers that changed, as the bot notes them for its server writer, and Discord.Net's cache, which the writer reads
+        public GuildWatcher Watcher => services.GetRequiredService<GuildWatcher>();
+        public DiscordSocketClient Client => client;
+
+        // The bot's clock, which tests can set
+        public FakeClock Clock => clock;
+
+        // Discord's approximate member count of each server, which its API gives the daily count, 42 for any other
+        public Dictionary<ulong, int> MemberCounts { get; } = new();
+
+        // Servers whose count Discord never sends, as for a request stuck behind a rate limit, whatever its cancel token says
+        public HashSet<ulong> UnansweredGuilds { get; } = new();
+
+        // Holds Discord's answer to each message the bot sends until it completes, as for a slow request
+        public Task? SendHold { get; set; }
+
+        // Servers Discord lists with the session as unavailable, in an outage, and doesn't send
+        ulong[] unavailableAtStart;
+
         // Name of the Discord request that gets refused, to test what happens when a reply can't be sent
         public string? FailStep { get; set; }
 
@@ -150,7 +169,7 @@ namespace MinerBot.Tests
 
         // Holds back READY, the way a slow gateway does, until ReleaseReadyAsync
         readonly TaskCompletionSource? readyGate;
-        readonly TaskCompletionSource ready = NewSignal();
+        TaskCompletionSource ready = NewSignal();
 
         // Set to make the bot's application belong to a team with this owner
         public ulong? TeamOwnerId { get; set; }
@@ -179,9 +198,10 @@ namespace MinerBot.Tests
 
         public Step Single(string name) => Assert.Single(Steps, step => step.Name == name);
 
-        FakeDiscord(bool holdReady)
+        FakeDiscord(bool holdReady, ulong[] unavailableGuilds)
         {
             readyGate = holdReady ? NewSignal() : null;
+            unavailableAtStart = unavailableGuilds;
 
             // Every run is a new pair of users, because cooldowns are static
             UserId = (ulong)Interlocked.Add(ref lastUserId, 2);
@@ -198,6 +218,8 @@ namespace MinerBot.Tests
                 GatewayIntents = GatewayIntents.Guilds,
                 LogGatewayIntentWarnings = false,
                 LogLevel = LogSeverity.Debug,
+                // How long Discord.Net waits for a server listed as unavailable before Ready, which the bot leaves at 10 seconds
+                MaxWaitBetweenGuildAvailablesBeforeReady = 1000,
                 RestClientProvider = _ => new FakeRest(this),
                 WebSocketProvider = () => gateway
             });
@@ -224,6 +246,7 @@ namespace MinerBot.Tests
                 .AddSingleton<NotificationState>()
                 .AddSingleton<BotRecorder>()
                 .AddSingleton<DiscordStatusHandler>()
+                .AddSingleton<GuildWatcher>()
                 .AddSingleton<TimeProvider>(clock)
                 .AddSingleton<IGetData>(Steam)
                 .AddSingleton<IArmorData>(Armor)
@@ -234,9 +257,9 @@ namespace MinerBot.Tests
                 .BuildServiceProvider();
         }
 
-        public static async Task<FakeDiscord> StartAsync(bool holdReady = false)
+        public static async Task<FakeDiscord> StartAsync(bool holdReady = false, ulong[]? unavailableGuilds = null)
         {
-            var discord = new FakeDiscord(holdReady);
+            var discord = new FakeDiscord(holdReady, unavailableGuilds ?? []);
             await discord.ConnectAsync();
             return discord;
         }
@@ -245,14 +268,75 @@ namespace MinerBot.Tests
         {
             readyGate!.SetResult();
             await WaitAsync(ready.Task);
+            await SyncedAsync();
+            await ConnectedAsync();
+        }
+
+        // A new session, as after the bot was offline: the gateway stopped and started again, with Discord listing these guilds
+        // as unavailable, in an outage, the first guild too when it's one of them
+        public async Task StartNewSessionAsync(params ulong[] unavailableGuilds)
+        {
+            await StopGatewayAsync();
+
+            unavailableAtStart = unavailableGuilds;
+            ready = NewSignal();
+
+            await client.StartAsync();
+            await WaitAsync(ready.Task);
+            await SyncedAsync();
+            await ConnectedAsync();
+        }
+
+        // Discord.Net's stop only starts the disconnect, which raises GuildUnavailable for every guild before it ends
+        public async Task StopGatewayAsync()
+        {
+            await client.StopAsync();
+
+            var waited = System.Diagnostics.Stopwatch.StartNew();
+
+            while (client.ConnectionState != ConnectionState.Disconnected)
+            {
+                if (waited.Elapsed > WaitLimit)
+                    throw new TimeoutException($"The gateway never disconnected. Console output: {ConsoleText}");
+
+                await Task.Delay(10);
+            }
+        }
+
+        // Discord.Net marks a guild synced on a task of its own once it has taken the guild, and until then raises no event for
+        // its channels, roles or members, so tests that send those right away wait for every guild the session sent whole. One
+        // sent with nothing but its ID, in an outage, never syncs, though Discord.Net counts it as connected; it has no name.
+        Task SyncedAsync() => WaitAsync(Task.WhenAll(client.Guilds.Where(guild => guild.IsConnected && guild.Name != null).Select(guild => guild.SyncPromise)));
+
+        // Discord.Net raises Ready and marks the gateway connected on tasks of their own, in either order, so tests whose
+        // first step needs the gateway connected, as the server writer's ticks do, wait for that too
+        async Task ConnectedAsync()
+        {
+            var waited = System.Diagnostics.Stopwatch.StartNew();
+
+            while (client.ConnectionState != ConnectionState.Connected)
+            {
+                if (waited.Elapsed > WaitLimit)
+                    throw new TimeoutException($"The gateway never connected. Console output: {ConsoleText}");
+
+                await Task.Delay(10);
+            }
+        }
+
+        // A GUILD_CREATE with all of a guild, which Discord.Net marks synced the same way
+        async Task DeliverGuildAsync(ulong guildId, string json)
+        {
+            await gateway.DeliverAsync("GUILD_CREATE", json);
+            await WaitAsync(client.GetGuild(guildId)?.SyncPromise ?? Task.CompletedTask);
         }
 
         async Task ConnectAsync()
         {
             Console.SetOut(console);
 
-            // In Program.cs's order: the status handler's Ready comes first
+            // In Program.cs's order: the status handler's Ready comes first, then the server watcher's handlers
             services.GetRequiredService<DiscordStatusHandler>().Initialize();
+            services.GetRequiredService<GuildWatcher>().Initialize();
             await services.GetRequiredService<InteractionHandler>().InitializeAsync();
             services.GetRequiredService<GuildEventHandler>().Initialize();
 
@@ -275,7 +359,11 @@ namespace MinerBot.Tests
             await client.StartAsync();
 
             if (readyGate == null)
+            {
                 await WaitAsync(ready.Task);
+                await SyncedAsync();
+                await ConnectedAsync();
+            }
         }
 
         // A timeout here means the bot never finished, and the console usually says why
@@ -432,6 +520,29 @@ namespace MinerBot.Tests
 
         public Task LeaveGuildAsync() => gateway.DeliverAsync("GUILD_DELETE", $$"""{"id":"{{GuildId}}"}""");
 
+        // Any dispatch, as Discord sends it. It returns once Discord.Net has processed it, the bot's handlers included.
+        public Task DeliverAsync(string eventName, string json) => gateway.DeliverAsync(eventName, json);
+
+        // GUILD_UPDATE with a new name, with the guild's roles, as Discord's guild object carries them
+        public Task UpdateGuildAsync(string name) => gateway.DeliverAsync("GUILD_UPDATE", GuildJson(name));
+
+        // A guild channel as CHANNEL_CREATE, CHANNEL_UPDATE and CHANNEL_DELETE carry it, with its guild and category
+        public static string ChannelEventJson(ulong guildId, ulong id, int position, string overwrites = "", int type = 0, string? name = null, ulong? parentId = null) => $$"""
+            {"id":"{{id}}","type":{{type}},"guild_id":"{{guildId}}","name":"{{name ?? $"channel-{id}"}}","position":{{position}},"parent_id":{{IdJson(parentId)}},"permission_overwrites":[{{overwrites}}]}
+            """;
+
+        // A role as GUILD_ROLE_CREATE and GUILD_ROLE_UPDATE carry it
+        public static string RoleEventJson(ulong guildId, ulong roleId, string name, GuildPermission permissions) =>
+            $$"""{"guild_id":"{{guildId}}","role":{{RoleJson(roleId, name, permissions)}}}""";
+
+        // The bot's own member with these roles, which Discord sends without the members intent
+        public static string BotMemberUpdateJson(ulong guildId, params ulong[] roles) =>
+            $$"""{"guild_id":"{{guildId}}","roles":[{{string.Join(",", roles.Select(role => $"\"{role}\""))}}],"user":{{UserJson(BotId, bot: true)}},"joined_at":"2026-01-01T00:00:00+00:00","deaf":false,"mute":false,"flags":0}""";
+
+        // Another member, which Discord would only send with the members intent
+        public static string MemberUpdateJson(ulong guildId, ulong userId) =>
+            $$"""{"guild_id":"{{guildId}}","roles":[],"user":{{UserJson(userId)}},"joined_at":"2026-01-01T00:00:00+00:00","deaf":false,"mute":false,"flags":0}""";
+
         // The bot's member the way Discord lists it with a guild. In the joined guild BotRoleId gives it Administrator,
         // and JoinedPosterRoleId only View Channel and Send Messages.
         public static string BotMemberJson(params ulong[] roles) => $$"""
@@ -441,7 +552,7 @@ namespace MinerBot.Tests
         // Being added to a server, which has only its general channel unless a test gives it a JSON list of channels.
         // An "unavailable":false here would make it an existing guild coming back, and JoinedGuild wouldn't fire.
         public Task JoinGuildAsync(string members, string? channels = null, ulong? systemChannelId = JoinedChannelId, ulong? publicUpdatesChannelId = null) =>
-            gateway.DeliverAsync("GUILD_CREATE", $$"""
+            DeliverGuildAsync(JoinedGuildId, $$"""
             {"id":"{{JoinedGuildId}}","name":"New guild","owner_id":"{{OtherUserId}}","verification_level":0,"default_message_notifications":0,
              "explicit_content_filter":0,"mfa_level":0,"premium_tier":0,"nsfw_level":0,"features":[],"emojis":[],"stickers":[],
              "system_channel_id":{{IdJson(systemChannelId)}},"public_updates_channel_id":{{IdJson(publicUpdatesChannelId)}},
@@ -465,11 +576,12 @@ namespace MinerBot.Tests
         static string IdJson(ulong? id) => id == null ? "null" : $"\"{id}\"";
 
         // A GUILD_CREATE during an outage, which has nothing but the guild's id. Discord.Net takes it as a join, even for a guild it has.
-        public Task SendUnavailableGuildAsync(ulong guildId) => gateway.DeliverAsync("GUILD_CREATE", $$"""{"id":"{{guildId}}","unavailable":true}""");
+        public Task SendUnavailableGuildAsync(ulong guildId) => gateway.DeliverAsync("GUILD_CREATE", UnavailableGuildJson(guildId));
 
-        // An outage in the first guild, and then its end, when Discord sends all of the guild again the way it does after a start
+        // An outage in the first guild, and then its end, when Discord sends all of the guild again the way it does after a start,
+        // with the name it may have been given meanwhile
         public Task MakeGuildUnavailableAsync() => gateway.DeliverAsync("GUILD_DELETE", $$"""{"id":"{{GuildId}}","unavailable":true}""");
-        public Task MakeGuildAvailableAsync() => gateway.DeliverAsync("GUILD_CREATE", GuildJson());
+        public Task MakeGuildAvailableAsync(string name = "Guild") => DeliverGuildAsync(GuildId, GuildJson(name));
 
         public Task SendOwnerAlertAsync(string message) => services.GetRequiredService<OwnerAlertService>().SendAsync(message);
 
@@ -490,6 +602,14 @@ namespace MinerBot.Tests
              "members":[{"membership_state":2,"permissions":["*"],"team_id":"{{TeamId}}","user":{{UserJson(ownerId)}}}]}
             """;
 
+        // A guild as Discord's API gives it with its counts. Discord.Net reads its preferred locale.
+        static string RestGuildJson(ulong id, int members) => $$"""
+            {"id":"{{id}}","name":"Guild","icon":null,"owner_id":"1","verification_level":0,"default_message_notifications":0,"explicit_content_filter":0,
+             "mfa_level":0,"premium_tier":0,"nsfw_level":0,"features":[],"emojis":[],"stickers":[],
+             "roles":[{"id":"{{id}}","name":"@everyone","permissions":"0","position":0,"color":0,"hoist":false,"managed":false,"mentionable":false}],
+             "preferred_locale":"en-US","approximate_member_count":{{members}},"approximate_presence_count":1}
+            """;
+
         static string DirectChannelJson(ulong userId) => $$"""
             {"id":"{{DirectChannelId}}","type":1,"last_message_id":null,"recipients":[{{UserJson(userId)}}]}
             """;
@@ -506,15 +626,22 @@ namespace MinerBot.Tests
              "attachments":[],"embeds":[],"pinned":false,"type":{{type}}}
             """;
 
-        // Discord sends only each guild's id here and the rest in a GUILD_CREATE right after, which leaves Discord.Net with the same guild
+        // Discord sends only each guild's id here and the rest in a GUILD_CREATE right after, which leaves Discord.Net with the same guild.
+        // A guild in an outage stays that way, the first guild too when the session lists it so.
         string ReadyJson() => $$"""
             {"v":10,"user":{{UserJson(BotId, bot: true)}},"session_id":"session","resume_gateway_url":"wss://gateway.invalid",
-             "private_channels":[],"application":{"id":"{{BotId}}","flags":0},"guilds":[{{GuildJson()}}]}
+             "private_channels":[],"application":{"id":"{{BotId}}","flags":0},
+             "guilds":[{{string.Join(",", unavailableAtStart.Contains(GuildId)
+                 ? unavailableAtStart.Select(UnavailableGuildJson)
+                 : unavailableAtStart.Select(UnavailableGuildJson).Prepend(GuildJson()))}}]}
             """;
 
+        // A guild in an outage, of which Discord sends nothing but its id
+        static string UnavailableGuildJson(ulong id) => $$"""{"id":"{{id}}","unavailable":true}""";
+
         // The first guild. Discord lists the bot's own member with every guild, even with only the Guilds intent. The owner makes it 2 members.
-        string GuildJson() => $$"""
-            {"id":"{{GuildId}}","name":"Guild","owner_id":"{{UserId}}","verification_level":0,"default_message_notifications":0,
+        string GuildJson(string name = "Guild") => $$"""
+            {"id":"{{GuildId}}","name":"{{name}}","owner_id":"{{UserId}}","verification_level":0,"default_message_notifications":0,
              "explicit_content_filter":0,"mfa_level":0,"premium_tier":0,"nsfw_level":0,"features":[],"emojis":[],"stickers":[],
              "roles":[{"id":"{{GuildId}}","name":"@everyone","permissions":"0","position":0,"color":0,"hoist":false,"managed":false,"mentionable":false},
                       {{RoleJson(PinnerRoleId, "Pinner", GuildPermission.ViewChannel | GuildPermission.PinMessages)}},
@@ -559,9 +686,15 @@ namespace MinerBot.Tests
             {
                 using var json = JsonDocument.Parse(data.AsMemory(index, count));
 
-                const int identifyOpCode = 2;
-                if (json.RootElement.GetProperty("op").GetInt32() == identifyOpCode)
+                const int identifyOpCode = 2, resumeOpCode = 6;
+                var opCode = json.RootElement.GetProperty("op").GetInt32();
+
+                if (opCode == identifyOpCode)
                     _ = Task.Run(() => LoginAsync());
+
+                // The session can't be resumed, so Discord.Net identifies and gets a new one, as after the bot was offline
+                if (opCode == resumeOpCode)
+                    _ = Task.Run(() => RaiseAsync("""{"op":9,"d":false}"""));
 
                 return Task.CompletedTask;
             }
@@ -633,10 +766,29 @@ namespace MinerBot.Tests
                 if (endpoint == $"channels/{DeletedChannelId}")
                     return Response(HttpStatusCode.NotFound, """{"code":10003,"message":"Unknown Channel"}""");
 
+                if (Regex.Match(endpoint, @"^guilds/(\d+)\?with_counts=true$") is { Success: true } guild)
+                {
+                    var id = ulong.Parse(guild.Groups[1].Value);
+
+                    if (discord.UnansweredGuilds.Contains(id))
+                        return new TaskCompletionSource<RestResponse>().Task;
+
+                    return Response(HttpStatusCode.OK, RestGuildJson(id, discord.MemberCounts.GetValueOrDefault(id, 42)));
+                }
+
                 if (endpoint.Contains("/commands") || endpoint.EndsWith("/pins"))
                     return Response(HttpStatusCode.OK, "[]");
 
+                if (name == "send message" && discord.SendHold is { } hold)
+                    return HeldAsync(hold);
+
                 return Response(HttpStatusCode.OK, MessageJson());
+            }
+
+            static async Task<RestResponse> HeldAsync(Task hold)
+            {
+                await hold;
+                return await Response(HttpStatusCode.OK, MessageJson());
             }
 
             // Requests during login aren't steps of a command
@@ -670,6 +822,9 @@ namespace MinerBot.Tests
 
                 if (method == "GET" && Regex.IsMatch(endpoint, @"^channels/\d+$"))
                     return "get channel";
+
+                if (method == "GET" && Regex.IsMatch(endpoint, @"^guilds/\d+\?with_counts=true$"))
+                    return "get guild";
 
                 if (endpoint.EndsWith("/messages"))
                     return "send message";

@@ -63,6 +63,19 @@ namespace DataAccessLibrary.Status
             return SaveDataCount(sql, new { before, take });
         }
 
+        // The bot's joins and leaves of servers. The servers' rows and their days' member counts are kept.
+        public Task<int> DeleteGuildEvents(DateTime before, int take)
+        {
+            RequireChunk(before, take);
+
+            string sql = $@"{Limits}DELETE FROM {_names.Bot}.guild_events
+                            WHERE at < @before
+                            ORDER BY at, id
+                            LIMIT @take";
+
+            return SaveDataCount(sql, new { before, take });
+        }
+
         public Task<int> DeleteJobRuns(DateTime before, int take)
         {
             RequireChunk(before, take);

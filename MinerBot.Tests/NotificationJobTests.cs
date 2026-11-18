@@ -13,6 +13,7 @@ namespace MinerBot.Tests
         const string ArmorTitle = "New Armor Styles:";
         const string LobbyTitle = "__NEW__ Murder Miners Public Lobbies";
         const string SendStep = "send message";
+        const string WaitingLine = "Couldn't send the notifications yet, because Discord hasn't sent the bot's servers";
 
         const int NewId = 100;
         const string NewMapTitle = "Map 100";
@@ -1110,6 +1111,205 @@ namespace MinerBot.Tests
             var announced = Assert.Single(discord.Steps, step => step.Name == SendStep).EmbedDescriptions.Single();
             Assert.Contains($"Host {NewId}", announced);
             Assert.DoesNotContain("Host 1`", announced);
+        }
+
+        // A row's channel must be one of its own server's: the bot is in that server too, so the channel is in the cache, but
+        // the post would go to another server. No channel is looked up over Discord's API either.
+        [Fact]
+        public async Task RowNamingAnotherServersChannelGetsNoPost()
+        {
+            await using var discord = await StartWithBaselineAsync();
+            await discord.JoinGuildAsync($"[{FakeDiscord.BotMemberJson(FakeDiscord.BotRoleId)}]");
+            var row = FakeGuildData.CreateGuild(FakeDiscord.ChannelId);
+            row.guild_id = FakeDiscord.JoinedGuildId;
+            discord.Guilds.AllGuilds = [row];
+            AddNewItems(discord);
+
+            await discord.RunNotificationJobAsync();
+
+            Assert.DoesNotContain(discord.Steps, step => step.Name == SendStep && step.SentTo == FakeDiscord.ChannelId);
+            Assert.DoesNotContain("get channel", discord.StepNames);
+
+            foreach (var kind in new[] { "armor", "map", "lobby" })
+                Assert.Contains($"Couldn't send the {kind} notification to channel {FakeDiscord.ChannelId} of guild {FakeDiscord.JoinedGuildId}, because that channel isn't in that server",
+                    discord.ConsoleText);
+        }
+
+        // A server the bot isn't in, or left, which keeps its row on the website until it's removed while the bot runs
+        [Fact]
+        public async Task RowOfAServerTheBotIsntInGetsNoPost()
+        {
+            await using var discord = await StartWithBaselineAsync();
+            var row = FakeGuildData.CreateGuild(FakeDiscord.ChannelId);
+            row.guild_id = 9999;
+            discord.Guilds.AllGuilds = [row];
+            AddNewItems(discord);
+
+            await discord.RunNotificationJobAsync();
+
+            Assert.DoesNotContain(SendStep, discord.StepNames);
+            Assert.DoesNotContain("get channel", discord.StepNames);
+            Assert.Contains($"Couldn't send the armor notification to channel {FakeDiscord.ChannelId} of guild 9999, because the bot isn't in that server", discord.ConsoleText);
+        }
+
+        // Discord.Net keeps the channels of a server in an outage, but Discord reports it unavailable. As the only server with
+        // posts on, its items wait for it, as for a post that failed.
+        [Fact]
+        public async Task OnlyServerWithPostsOnGetsThemOnceItsBack()
+        {
+            await using var discord = await StartWithBaselineAsync();
+            AddNewItems(discord);
+            await discord.MakeGuildUnavailableAsync();
+
+            await discord.RunNotificationJobAsync();
+
+            Assert.DoesNotContain(SendStep, discord.StepNames);
+            Assert.DoesNotContain("get channel", discord.StepNames);
+            Assert.Contains($"Couldn't send the map notification to channel {FakeDiscord.ChannelId} of guild {FakeDiscord.GuildId}, because Discord reports that server unavailable",
+                discord.ConsoleText);
+
+            await discord.MakeGuildAvailableAsync();
+            await discord.RunNotificationJobAsync();
+
+            Assert.Equal([ArmorTitle, NewMapTitle, LobbyTitle], SentTitles(discord));
+        }
+
+        // As for a post that failed, the items aren't tried again once another server got them, so a server in an outage
+        // misses them
+        [Fact]
+        public async Task ServerInAnOutageMissesWhatAnotherServerGot()
+        {
+            await using var discord = await StartWithBaselineAsync();
+            await discord.JoinGuildAsync($"[{FakeDiscord.BotMemberJson(FakeDiscord.BotRoleId)}]");
+            var other = FakeGuildData.CreateGuild(FakeDiscord.JoinedChannelId);
+            other.guild_id = FakeDiscord.JoinedGuildId;
+            discord.Guilds.AllGuilds.Add(other);
+            AddNewItems(discord);
+            await discord.MakeGuildUnavailableAsync();
+
+            // After the welcome the join sent
+            var from = discord.Steps.Count;
+            await discord.RunNotificationJobAsync();
+            await discord.MakeGuildAvailableAsync();
+            await discord.RunNotificationJobAsync();
+
+            Assert.Equal([FakeDiscord.JoinedChannelId, FakeDiscord.JoinedChannelId, FakeDiscord.JoinedChannelId],
+                discord.Steps.Skip(from).Where(step => step.Name == SendStep).Select(step => step.SentTo));
+        }
+
+        // Until the gateway's first READY since the start, Discord.Net has none of the bot's servers, so no post can be checked
+        // against its server. Those runs post nothing and don't count against the new items, which go out once READY comes.
+        // A run that found nothing new says nothing, such as the first, which only takes the baselines.
+        [Fact]
+        public async Task RunsBeforeTheFirstReadyWaitForIt()
+        {
+            await using var discord = await FakeDiscord.StartAsync(holdReady: true);
+            await discord.RunNotificationJobAsync();
+            await discord.RunNotificationJobAsync();
+
+            Assert.DoesNotContain(WaitingLine, discord.ConsoleText);
+
+            AddNewItems(discord);
+
+            for (var run = 0; run < NotificationState.MaxFailedRuns; run++)
+                await discord.RunNotificationJobAsync();
+
+            Assert.DoesNotContain(SendStep, discord.StepNames);
+            Assert.DoesNotContain("Gave up", discord.ConsoleText);
+            Assert.DoesNotContain("because the bot isn't in that server", discord.ConsoleText);
+            Assert.Contains(WaitingLine, discord.ConsoleText);
+
+            await discord.ReleaseReadyAsync();
+            await discord.RunNotificationJobAsync();
+
+            Assert.Equal([ArmorTitle, NewMapTitle, LobbyTitle], SentTitles(discord));
+        }
+
+        // From a READY until Discord sends each server, at a start or a new session, Discord.Net has nothing of the servers but
+        // their IDs. When the gateway drops in that window and stays down while Discord's API still works, as in an incident,
+        // the runs wait as they do before the first READY, rather than count against the new items as posts to channels that
+        // aren't there. The items go out once Discord has sent a server.
+        [Fact]
+        public async Task RunsWhileDiscordHasSentNoneOfTheServersWaitForThem()
+        {
+            await using var discord = await FakeDiscord.StartAsync(unavailableGuilds: [FakeDiscord.GuildId]);
+            await discord.StopGatewayAsync();
+
+            Assert.NotNull(discord.Client.CurrentUser);
+            Assert.Null(discord.Client.GetGuild(FakeDiscord.GuildId).Name);
+
+            await discord.RunNotificationJobAsync();
+            AddNewItems(discord);
+
+            for (var run = 0; run < NotificationState.MaxFailedRuns; run++)
+                await discord.RunNotificationJobAsync();
+
+            Assert.DoesNotContain(SendStep, discord.StepNames);
+            Assert.DoesNotContain("Gave up", discord.ConsoleText);
+            Assert.DoesNotContain("that channel isn't in that server", discord.ConsoleText);
+            Assert.Contains(WaitingLine, discord.ConsoleText);
+
+            await discord.StartNewSessionAsync();
+            await discord.RunNotificationJobAsync();
+
+            Assert.Equal([ArmorTitle, NewMapTitle, LobbyTitle], SentTitles(discord));
+        }
+
+        // A server Discord hasn't sent, while it has sent others, gets no post, and the log says why
+        [Fact]
+        public async Task ServerDiscordHasntSentGetsNoPostAndTheLogSaysWhy()
+        {
+            await using var discord = await FakeDiscord.StartAsync(unavailableGuilds: [FakeDiscord.GuildId]);
+            await discord.JoinGuildAsync($"[{FakeDiscord.BotMemberJson(FakeDiscord.BotRoleId)}]");
+            await discord.RunNotificationJobAsync();
+            await discord.StopGatewayAsync();
+
+            var joined = FakeGuildData.CreateGuild(FakeDiscord.JoinedChannelId);
+            joined.guild_id = FakeDiscord.JoinedGuildId;
+            discord.Guilds.AllGuilds = [FakeGuildData.CreateGuild(FakeDiscord.ChannelId), joined];
+            AddNewItems(discord);
+
+            await discord.RunNotificationJobAsync();
+
+            // The other server's posts, after its welcome
+            Assert.Equal([ArmorTitle, NewMapTitle, LobbyTitle], SentTitles(discord));
+            Assert.DoesNotContain(discord.Steps, step => step.Name == SendStep && step.SentTo == FakeDiscord.ChannelId);
+            Assert.Contains($"Couldn't send the armor notification to channel {FakeDiscord.ChannelId} of guild {FakeDiscord.GuildId}, because Discord hasn't sent that server yet",
+                discord.ConsoleText);
+            Assert.DoesNotContain("that channel isn't in that server", discord.ConsoleText);
+        }
+
+        // A channel the cache doesn't have, such as one that was deleted, isn't asked of Discord's API, which a lookup of the
+        // channel alone would do: the row gets no post
+        [Fact]
+        public async Task ChannelTheCacheDoesntHaveIsntLookedUp()
+        {
+            await using var discord = await StartWithBaselineAsync();
+            discord.Guilds.AllGuilds = [FakeGuildData.CreateGuild(FakeDiscord.DeletedChannelId)];
+            AddNewItems(discord);
+
+            await discord.RunNotificationJobAsync();
+
+            Assert.DoesNotContain("get channel", discord.StepNames);
+            Assert.DoesNotContain(SendStep, discord.StepNames);
+            Assert.Contains($"Couldn't send the lobby notification to channel {FakeDiscord.DeletedChannelId} of guild {FakeDiscord.GuildId}, because that channel isn't in that server",
+                discord.ConsoleText);
+        }
+
+        // While the bot's own gateway is down, as during a reconnect, Discord.Net shows every server as unavailable, which isn't
+        // Discord's outage: the posts still go through Discord's API
+        [Fact]
+        public async Task PostsGoWhileTheGatewayIsDown()
+        {
+            await using var discord = await StartWithBaselineAsync();
+            AddNewItems(discord);
+            await discord.StopGatewayAsync();
+
+            Assert.False(discord.Client.GetGuild(FakeDiscord.GuildId).IsConnected);
+
+            await discord.RunNotificationJobAsync();
+
+            Assert.Equal([ArmorTitle, NewMapTitle, LobbyTitle], SentTitles(discord));
         }
 
         [Fact]

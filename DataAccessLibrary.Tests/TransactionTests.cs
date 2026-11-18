@@ -6,6 +6,8 @@ using DataAccessLibrary.Audit.Models;
 using DataAccessLibrary.Blacklist.Models;
 using DataAccessLibrary.Dashboard;
 using DataAccessLibrary.Dashboard.Models;
+using DataAccessLibrary.Guilds;
+using DataAccessLibrary.Guilds.Models;
 using DataAccessLibrary.Status;
 using DataAccessLibrary.Status.Models;
 using DataAccessLibrary.Tests.Database;
@@ -192,7 +194,8 @@ namespace DataAccessLibrary.Tests
             // Every table the end checks, because the other classes leave their rows behind, and the order the classes run
             // in changes with the folder the tests run from
             await db.ClearAsync(MariaDbFixture.SessionTable, MariaDbFixture.StatusTable, MariaDbFixture.EventTable, MariaDbFixture.JobRunTable,
-                MariaDbFixture.JobStatusTable, MariaDbFixture.SampleTable, MariaDbFixture.DailyTable);
+                MariaDbFixture.JobStatusTable, MariaDbFixture.SampleTable, MariaDbFixture.DailyTable, MariaDbFixture.BotGuildTable, MariaDbFixture.BotChannelTable,
+                MariaDbFixture.GuildEventTable, MariaDbFixture.GuildDailyTable);
             const string alternative = "minerbot-alt`db";
             const string quoted = "`minerbot-alt``db`";
 
@@ -258,12 +261,25 @@ namespace DataAccessLibrary.Tests
             Assert.Equal(3, await retention.DeleteAuditRows(Noon.AddYears(1), 10));
             Assert.Equal(1, await retention.DeleteSessions(Noon.AddYears(1), 10));
 
-            foreach (var table in new[] { "bot_status", "job_status", "uptime_daily" })
+            // The bot's copy of its servers
+            var guilds = new BotGuildData(factory, names);
+
+            Assert.True(await guilds.SaveGuild(new BotGuild { guild_id = 1, name = "Test Server", available = true },
+                [new BotGuildChannel { channel_id = 2, name = "general", type = GuildChannelType.Text }], Noon, 1, 1));
+            Assert.Equal([1UL], await guilds.ListGuildsIn());
+            Assert.Equal(1, await guilds.MarkUnavailable([1], Noon));
+            await guilds.SaveMemberCount(1, 10, day, Noon);
+            Assert.Equal(1, await CountAsync($"{quoted}.guild_channels"));
+            Assert.True(await guilds.LeaveGuild(1, Noon.AddSeconds(1), 1, 2, null));
+            Assert.Equal(2, await retention.DeleteGuildEvents(Noon.AddSeconds(2), 10));
+
+            foreach (var table in new[] { "bot_status", "job_status", "uptime_daily", "guilds", "guild_daily" })
                 Assert.Equal(1, await CountAsync($"{quoted}.{table}"));
 
             // Nothing reached the real database's tables
             foreach (var table in new[] { MariaDbFixture.AuditTable, MariaDbFixture.ReviewTable, MariaDbFixture.SessionTable, MariaDbFixture.StatusTable,
-                MariaDbFixture.EventTable, MariaDbFixture.JobRunTable, MariaDbFixture.JobStatusTable, MariaDbFixture.SampleTable, MariaDbFixture.DailyTable })
+                MariaDbFixture.EventTable, MariaDbFixture.JobRunTable, MariaDbFixture.JobStatusTable, MariaDbFixture.SampleTable, MariaDbFixture.DailyTable,
+                MariaDbFixture.BotGuildTable, MariaDbFixture.BotChannelTable, MariaDbFixture.GuildEventTable, MariaDbFixture.GuildDailyTable })
                 Assert.Equal(0, await CountAsync(table));
         }
 

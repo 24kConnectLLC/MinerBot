@@ -209,6 +209,19 @@ mariadb <BOT_DB from server.conf> -e "SELECT heartbeat_at, TIMESTAMPDIFF(SECOND,
 mariadb <BOT_DB from server.conf> -e "SELECT at, kind, level, detail FROM bot_events ORDER BY id DESC LIMIT 20"
 ```
 
+and its copy of the servers it's in, which the dashboard's servers pages will read: the servers whose `left_at` is NULL
+are the ones the bot is in, as many as `discord_guilds` in `bot_status`, which counts Discord's own list while the bot
+is connected, each with `available` 1 unless Discord has an outage. A text channel the bot can see, made in a test
+server, shows up in `guild_channels` within 15 seconds. Only text and announcement channels are kept, and one the bot
+can't see comes from Discord named `___hidden___`, and is kept so, with `can_view` 0. The names are Discord's and can
+hold emoji, so these read them as utf8mb4:
+
+```bash
+mariadb --default-character-set=utf8mb4 <BOT_DB from server.conf> -e "SELECT guild_id, name, left_at, available FROM guilds"
+mariadb <BOT_DB from server.conf> -e "SELECT (SELECT COUNT(*) FROM guilds WHERE left_at IS NULL) AS servers_in, discord_guilds FROM bot_status"
+mariadb --default-character-set=utf8mb4 <BOT_DB from server.conf> -e "SELECT channel_id, name, type, can_view, can_send, can_embed, TIMESTAMPDIFF(SECOND, updated_at, UTC_TIMESTAMP(3)) AS seconds_old FROM guild_channels WHERE guild_id = <the test server's ID>"
+```
+
 `rollback.sh` puts its tags back when Compose never replaced the container: "Compose didn't recreate the <service> on
 <rev> (above), so it still runs <rev>, and its tags are back as they were. Nothing was changed." A rollback onto an
 image that isn't ready either is left there, and says so.

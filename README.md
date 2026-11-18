@@ -150,7 +150,7 @@ Create an `appsettings.json` file and fill in your credentials:
 }
 ```
 
-`DefaultConnection` is the website's database, which holds the armor, the blacklist and each server's channels. `BotConnection` is MinerBot's own database, which the web dashboard uses and where the bot records its status and history ([Status and history](#-status-and-history)). It can be left out: the bot then runs as before, records nothing, and says so once in its log as it starts. Both end in `CharSet=utf8mb4`, the tables' own character set: without it, MySql.Data sends text in the server's default character set, which can turn an emoji into a question mark.
+`DefaultConnection` is the website's database, which holds the armor, the blacklist and each server's channels. `BotConnection` is MinerBot's own database, which the web dashboard uses and where the bot records its status and history and keeps a copy of its servers ([Status and history](#-status-and-history)). It can be left out: the bot then runs and posts as before, records nothing, and says so once in its log as it starts. Both end in `CharSet=utf8mb4`, the tables' own character set: without it, MySql.Data sends text in the server's default character set, which can turn an emoji into a question mark.
 
 The dashboard writes its audit and review rows in the same transaction as the website change they record, on the website's connection. So the login in `DefaultConnection` also needs `INSERT` on MinerBot's `audit_log` and `armor_reviews` tables, or both strings can use one login with rights on both databases.
 
@@ -228,8 +228,11 @@ With `BotConnection` set, the bot records what it does in MinerBot's own databas
 - `uptime_samples`: one row for each minute the bot ran, with whether Discord and Steam were up; `uptime_daily` keeps each day's totals.
 - `bot_events`: what happened, such as `discord.disconnected`, `steam.logon_failed`, `job.failed`, `alert.sent` or `bot.unclean_end`.
 - `job_status` and `job_runs`: each scheduled job's schedule and next run, and every run with its result (ok, failed, cut off or skipped), duration and detail.
+- `guilds`, `guild_channels`, `guild_events` and `guild_daily`: the servers the bot is in or has left, with each one's name, icon, member count, when the bot joined, whether Discord reports it unavailable and whether the bot has Administrator there; each server's text and announcement channels, with whether the bot can view them, send messages and embed links there; the bot joining and leaving servers; and each server's member count once a day. The names are Discord's, the only text here that isn't the bot's own: a channel the bot can't view comes from Discord named `___hidden___`, and is kept so, with `can_view` 0.
 
-What the bot records waits in memory until it's written, up to 6 hours of uptime samples, 1,000 events and 500 job runs, so a database that's down costs only the recording: the bot logs one warning, tries again every 30 seconds to 5 minutes, and records the outage once it's back. A daily clean-up at 04:30 US Eastern keeps the audit log for 2 years with visitors' addresses cleared after 90 days, the events, job runs and minute samples for 90 days with each day's totals kept, and dashboard sessions until 7 days after they end.
+The copy of the servers follows Discord within seconds: the bot notes each server where something changed, a channel, a role, its own roles or the server itself, and every 5 seconds writes the ones that did, so a new channel shows up in `guild_channels` within 15 seconds. It looks at every server again each time it connects to Discord with a new session, when it also marks as left the servers it was removed from while it was offline, and every 15 minutes, in case an event never came. A server in an outage is marked unavailable, never left. Without the members intent, Discord's member count is only right when Discord sends the server, so at 04:21 US Eastern each day the bot asks Discord's API for each server's count, one server at a time.
+
+What the bot records waits in memory until it's written, up to 6 hours of uptime samples, 1,000 events and 500 job runs, so a database that's down costs only the recording: the bot logs one warning for its status and history, and one for its servers when they can't be written either, tries again every 30 seconds to 5 minutes, and records the outage once it's back. The servers are noted rather than queued, so they're written again whole once it's back. A daily clean-up at 04:30 US Eastern keeps the audit log for 2 years with visitors' addresses cleared after 90 days, the events, the joins and leaves of servers, the job runs and the minute samples for 90 days with each day's totals kept, and dashboard sessions until 7 days after they end. The servers' rows, left ones too, and their daily member counts are kept.
 
 ---
 
@@ -346,7 +349,7 @@ The direct message arrives only if that user shares a server with the bot and ac
 
 - **Database connection issues**
   - Verify host/port/credentials in `DefaultConnection`.
-  - For the bot's status and history only, the same in `BotConnection`: the bot's log has one warning when its writes start failing, with the error's number.
+  - For the bot's status and history and its copy of the servers only, the same in `BotConnection`: the bot's log has one warning for each when its writes start failing, with the error's number.
 
 - **Steam features not working**
   - Verify `STEAMWEB_KEY` (and publisher keys if applicable).

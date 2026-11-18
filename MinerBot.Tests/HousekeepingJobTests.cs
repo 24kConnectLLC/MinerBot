@@ -34,12 +34,13 @@ namespace MinerBot.Tests
         {
             retention.Addresses = 3;
             retention.Events = 12;
+            retention.GuildEvents = 4;
             retention.Days = 2;
             retention.Sessions = 1;
 
             var detail = await Job().ApplyRetention();
 
-            Assert.Equal("deleted 0 audit rows, 12 events, 0 job runs, 0 minutes (2 days totalled) and 1 session, and cleared 3 addresses", detail);
+            Assert.Equal("deleted 0 audit rows, 12 events, 4 server events, 0 job runs, 0 minutes (2 days totalled) and 1 session, and cleared 3 addresses", detail);
 
             var now = Now.UtcDateTime;
             var keepFrom = new DateTime(2026, 8, 16, 0, 0, 0, DateTimeKind.Utc);
@@ -49,6 +50,7 @@ namespace MinerBot.Tests
                 ("DeleteAuditRows", new DateTime(2024, 11, 14, 9, 30, 0, DateTimeKind.Utc), 5000),
                 ("ClearAuditAddresses", now.AddDays(-90), 5000),
                 ("DeleteEvents", now.AddDays(-90), 5000),
+                ("DeleteGuildEvents", now.AddDays(-90), 5000),
                 ("DeleteJobRuns", now.AddDays(-90), 5000),
                 ("TotalUptimeDays", keepFrom, 0),
                 ("DeleteSamples", keepFrom, 5000),
@@ -69,7 +71,7 @@ namespace MinerBot.Tests
 
             Assert.Equal([5000, 5000, 5000], retention.Calls.Where(call => call.Rule == "DeleteEvents").Select(call => call.Take));
             Assert.Equal(2, retention.Calls.Count(call => call.Rule == "DeleteAuditRows"));
-            Assert.Equal("deleted 5000 audit rows, 12000 events, 0 job runs, 0 minutes (0 days totalled) and 1 session, and cleared 0 addresses", detail);
+            Assert.Equal("deleted 5000 audit rows, 12000 events, 0 server events, 0 job runs, 0 minutes (0 days totalled) and 1 session, and cleared 0 addresses", detail);
         }
 
         [Fact]
@@ -95,13 +97,13 @@ namespace MinerBot.Tests
 
             var detail = await job.ApplyRetention();
 
-            Assert.Equal(["DeleteAuditRows", "ClearAuditAddresses", "DeleteEvents", "DeleteJobRuns", "TotalUptimeDays", "DeleteSamples", "DeleteSessions"],
+            Assert.Equal(["DeleteAuditRows", "ClearAuditAddresses", "DeleteEvents", "DeleteGuildEvents", "DeleteJobRuns", "TotalUptimeDays", "DeleteSamples", "DeleteSessions"],
                 retention.Calls.Select(call => call.Rule));
             Assert.StartsWith("deleted 5000 audit rows,", detail);
             Assert.EndsWith(" and 5000 sessions, and cleared 0 addresses; more is left for the next run", detail);
         }
 
-        // After the budget, the chunk under way ends and each later rule still runs its first chunk: at most eight
+        // After the budget, the chunk under way ends and each later rule still runs its first chunk: at most nine
         // statements when the budget runs out in the first rule, the totals being two, each within one call's limit, and
         // the totals' count is a read, which gets one more try after a passing problem. So the job ends before JobHandler
         // cuts it off.
@@ -110,7 +112,7 @@ namespace MinerBot.Tests
         {
             var callLimit = new RetentionData(new FakeDatabase(), new DatabaseNames(new Dictionary<DBConnectionName, string>())).CallLimit;
             var jobLimit = new JobHandler(NullLogger<JobHandler>.Instance, new ServiceCollection().BuildServiceProvider()).JobTimeLimit;
-            var longest = Job().TimeBudget + 9 * callLimit;
+            var longest = Job().TimeBudget + 10 * callLimit;
 
             Assert.True(longest < jobLimit, $"The clean-up may run {longest}, which isn't under JobHandler's limit of {jobLimit}");
         }
@@ -120,20 +122,21 @@ namespace MinerBot.Tests
         [Fact]
         public async Task EveryStatementCarriesTheServersLimits()
         {
-            var database = new FakeDatabase().Rows().Rows().Rows().Rows().Rows().Rows().Rows().Rows();
+            var database = new FakeDatabase().Rows().Rows().Rows().Rows().Rows().Rows().Rows().Rows().Rows();
             var data = new RetentionData(database, new DatabaseNames(new Dictionary<DBConnectionName, string> { [DBConnectionName.Bot] = Connection }));
             var today = new DateTime(2026, 11, 14, 0, 0, 0, DateTimeKind.Utc);
 
             await data.DeleteAuditRows(today, 1);
             await data.ClearAuditAddresses(today, 1);
             await data.DeleteEvents(today, 1);
+            await data.DeleteGuildEvents(today, 1);
             await data.DeleteJobRuns(today, 1);
             // The fake's rows aren't a count, so the totals fail once both of their statements have been sent
             await Assert.ThrowsAnyAsync<Exception>(() => data.TotalUptimeDays(today.AddDays(-90), today));
             await data.DeleteSamples(today, 1);
             await data.DeleteSessions(today, 1);
 
-            Assert.Equal(8, database.Commands.Count);
+            Assert.Equal(9, database.Commands.Count);
             Assert.All(database.Commands, command =>
                 Assert.StartsWith("SET STATEMENT max_statement_time = 14, lock_wait_timeout = 14, innodb_lock_wait_timeout = 14 FOR ", command));
         }
@@ -150,9 +153,9 @@ namespace MinerBot.Tests
 
             var failed = await Assert.ThrowsAsync<JobFailedException>(() => Job().ApplyRetention());
 
-            Assert.Equal("deleted 0 audit rows, 12000 events, 0 job runs, 0 minutes (0 days totalled) and 1 session, and cleared 0 addresses; "
+            Assert.Equal("deleted 0 audit rows, 12000 events, 0 server events, 0 job runs, 0 minutes (0 days totalled) and 1 session, and cleared 0 addresses; "
                 + "failed: job runs (TimeoutException); uptime totals (MySqlException, MySQL error 1205)", failed.Message);
-            Assert.Equal(7, retention.Calls.Select(call => call.Rule).Distinct().Count());
+            Assert.Equal(8, retention.Calls.Select(call => call.Rule).Distinct().Count());
             Assert.Equal(
             [
                 "The daily clean-up's rule for job runs failed (TimeoutException)",
@@ -161,13 +164,13 @@ namespace MinerBot.Tests
             Assert.DoesNotContain(jobLogger.Entries, entry => entry.Message.Contains("minerbot-bot") || entry.Exception != null);
         }
 
-        // A night when MinerBot's database is down: every rule fails the same way, and the details still name them all with
-        // MariaDB's number, inside the 300 characters that job_runs, job_status and bot_events keep, the event's with the
-        // job's name before it
+        // A night when MinerBot's database is down: every rule fails the same way, and the details say so with MariaDB's
+        // number, inside the 300 characters that job_runs, job_status and bot_events keep, the event's with the job's name
+        // before it. The log names each rule.
         [Fact]
         public async Task NightWithTheDatabaseDownNamesEveryRuleAndItsError()
         {
-            foreach (var rule in new[] { "DeleteAuditRows", "ClearAuditAddresses", "DeleteEvents", "DeleteJobRuns", "TotalUptimeDays", "DeleteSamples", "DeleteSessions" })
+            foreach (var rule in new[] { "DeleteAuditRows", "ClearAuditAddresses", "DeleteEvents", "DeleteGuildEvents", "DeleteJobRuns", "TotalUptimeDays", "DeleteSamples", "DeleteSessions" })
                 retention.Failures[rule] = Refused(1042);
 
             await using var services = new ServiceCollection()
@@ -185,13 +188,125 @@ namespace MinerBot.Tests
             var recorder = services.GetRequiredService<BotRecorder>();
             var run = Assert.Single(recorder.PeekJobRuns(10));
             var failedEvent = Assert.Single(recorder.PeekEvents(10), row => row.kind == BotEvents.JobFailed);
-            const string failures = "failed: audit rows, audit addresses, events, job runs, uptime totals, uptime minutes and sessions (MySqlException, MySQL error 1042)";
+            const string failures = "failed: every rule (MySqlException, MySQL error 1042)";
 
-            Assert.Equal($"deleted 0 audit rows, 0 events, 0 job runs, 0 minutes (0 days totalled) and 0 sessions, and cleared 0 addresses; {failures}", run.detail);
+            Assert.Equal($"deleted 0 audit rows, 0 events, 0 server events, 0 job runs, 0 minutes (0 days totalled) and 0 sessions, and cleared 0 addresses; {failures}", run.detail);
             Assert.EndsWith(failures, failedEvent.detail);
             Assert.True(failedEvent.detail!.Length <= 300, $"The job.failed event's detail is {failedEvent.detail.Length} characters, and its column keeps 300");
-            Assert.Equal(7, jobLogger.Entries.Count(entry => entry.Level == LogLevel.Warning && entry.Message.EndsWith(" failed (MySqlException, MySQL error 1042)")));
+            Assert.Equal(
+            [
+                "The daily clean-up's rule for audit rows failed (MySqlException, MySQL error 1042)",
+                "The daily clean-up's rule for audit addresses failed (MySqlException, MySQL error 1042)",
+                "The daily clean-up's rule for events failed (MySqlException, MySQL error 1042)",
+                "The daily clean-up's rule for server events failed (MySqlException, MySQL error 1042)",
+                "The daily clean-up's rule for job runs failed (MySqlException, MySQL error 1042)",
+                "The daily clean-up's rule for uptime totals failed (MySqlException, MySQL error 1042)",
+                "The daily clean-up's rule for uptime minutes failed (MySqlException, MySQL error 1042)",
+                "The daily clean-up's rule for sessions failed (MySqlException, MySQL error 1042)"
+            ], jobLogger.Entries.Where(entry => entry.Level == LogLevel.Warning).Select(entry => entry.Message));
             Assert.DoesNotContain(jobLogger.Entries, entry => entry.Message.Contains("minerbot-bot"));
+        }
+
+        // When every rule but one failed the same way, as when the database went down or came back during the run, they're
+        // named by the one that didn't, so the job.failed event still keeps MariaDB's number inside its 300 characters, the
+        // job's name before it. The rule that went through counts its rows.
+        [Theory]
+        [InlineData("DeleteAuditRows", "audit rows")]
+        [InlineData("ClearAuditAddresses", "audit addresses")]
+        [InlineData("DeleteEvents", "events")]
+        [InlineData("DeleteGuildEvents", "server events")]
+        [InlineData("DeleteJobRuns", "job runs")]
+        [InlineData("TotalUptimeDays", "uptime totals")]
+        [InlineData("DeleteSamples", "uptime minutes")]
+        [InlineData("DeleteSessions", "sessions")]
+        public async Task RulesThatMostlyFailedAlikeAreNamedByTheOneThatDidnt(string spared, string rule)
+        {
+            (retention.AuditRows, retention.Addresses, retention.Events, retention.GuildEvents) = (4999, 4999, 4999, 4999);
+            (retention.JobRuns, retention.Days, retention.Samples, retention.Sessions) = (4999, 90, 4999, 4999);
+
+            foreach (var other in Rules.Where(other => other != spared))
+                retention.Failures[other] = Refused(1042);
+
+            var (run, failedEvent) = await RunThroughJobHandler();
+            var failures = $"; failed: every rule but {rule} (MySqlException, MySQL error 1042)";
+
+            Assert.True(failedEvent.Length <= 300, $"The job.failed event's detail is {failedEvent.Length} characters, and its column keeps 300: {failedEvent}");
+            Assert.EndsWith(failures, run);
+            Assert.EndsWith(failures, failedEvent);
+        }
+
+        // A rule that failed another way, as one that was cut off as the database went down, is named beside them
+        [Fact]
+        public async Task RuleThatFailedAnotherWayIsNamedBesideTheRest()
+        {
+            retention.Failures["DeleteAuditRows"] = new TimeoutException("The database didn't answer within 15 seconds");
+
+            foreach (var rule in Rules.Skip(1))
+                retention.Failures[rule] = Refused(1042);
+
+            var (run, failedEvent) = await RunThroughJobHandler();
+            const string failures = "; failed: audit rows (TimeoutException); every rule but audit rows (MySqlException, MySQL error 1042)";
+
+            Assert.True(failedEvent.Length <= 300, $"The job.failed event's detail is {failedEvent.Length} characters, and its column keeps 300: {failedEvent}");
+            Assert.EndsWith(failures, run);
+            Assert.EndsWith(failures, failedEvent);
+        }
+
+        // The database down for the first rules and back for the rest, on a night with more left for the next run: that comes
+        // after the failures, so the job.failed event keeps MariaDB's number inside its 300 characters, the job's name before
+        // it, and the job run's detail keeps all of it
+        [Fact]
+        public async Task NightThatLeftMoreForTheNextRunKeepsMariaDBsNumberInTheEvent()
+        {
+            (retention.JobRuns, retention.Days, retention.Samples, retention.Sessions) = (600, 4, 600000, 12);
+
+            foreach (var rule in Rules.Take(4))
+                retention.Failures[rule] = Refused(1042);
+
+            var (run, failedEvent) = await RunThroughJobHandler();
+            const string failures = "; failed: audit rows, audit addresses, events and server events (MySqlException, MySQL error 1042)";
+
+            Assert.EndsWith($"{failures}; more is left for the next run", run);
+            Assert.True(run.Length <= 300, $"The job run's detail is {run.Length} characters, and its column keeps 300: {run}");
+            Assert.Contains(failures, DbBaseConnection.Clip(failedEvent, 300));
+        }
+
+        // Half of the rules failing alike are named themselves, which is shorter than naming the others
+        [Fact]
+        public async Task HalfOfTheRulesFailingAlikeAreNamed()
+        {
+            foreach (var rule in new[] { "DeleteEvents", "DeleteGuildEvents", "DeleteJobRuns", "TotalUptimeDays" })
+                retention.Failures[rule] = Refused(1042);
+
+            var failed = await Assert.ThrowsAsync<JobFailedException>(() => Job().ApplyRetention());
+
+            Assert.EndsWith("; failed: events, server events, job runs and uptime totals (MySqlException, MySQL error 1042)", failed.Message);
+        }
+
+        static readonly string[] Rules = ["DeleteAuditRows", "ClearAuditAddresses", "DeleteEvents", "DeleteGuildEvents", "DeleteJobRuns", "TotalUptimeDays", "DeleteSamples", "DeleteSessions"];
+
+        // The job as the bot runs it, failing: its run's detail and its job.failed event's
+        async Task<(string Run, string Event)> RunThroughJobHandler()
+        {
+            await using var services = new ServiceCollection()
+                .AddSingleton<IRetentionData>(retention)
+                .AddSingleton<TimeProvider>(clock)
+                .AddSingleton<IConfiguration>(BotRecorderTests.Settings(botConnection: Connection))
+                .AddSingleton<ILogger<HousekeepingJob>>(jobLogger)
+                .AddSingleton<BotRecorder>()
+                .BuildServiceProvider();
+
+            var handler = new JobHandler(new RecordingLogger<JobHandler>(), services);
+
+            await handler.RunDueJobsAsync([Housekeeping()], TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(15), TestContext.Current.CancellationToken);
+
+            var recorder = services.GetRequiredService<BotRecorder>();
+            var run = Assert.Single(recorder.PeekJobRuns(10));
+            var failedEvent = Assert.Single(recorder.PeekEvents(10), row => row.kind == BotEvents.JobFailed);
+
+            Assert.Equal(JobResult.Failed, run.result);
+
+            return (run.detail!, failedEvent.detail!);
         }
 
         // MySql.Data's messages can name the login, as this one does
@@ -290,7 +405,7 @@ namespace MinerBot.Tests
 
             var recorder = services.GetRequiredService<BotRecorder>();
             var run = Assert.Single(recorder.PeekJobRuns(10));
-            var counts = "deleted 0 audit rows, 2 events, 0 job runs, 0 minutes (0 days totalled) and 0 sessions, and cleared 0 addresses";
+            var counts = "deleted 0 audit rows, 2 events, 0 server events, 0 job runs, 0 minutes (0 days totalled) and 0 sessions, and cleared 0 addresses";
 
             Assert.Equal("HousekeepingJob.ApplyRetention", run.job);
             Assert.Equal(fails ? JobResult.Failed : JobResult.Ok, run.result);

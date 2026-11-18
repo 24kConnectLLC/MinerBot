@@ -4,6 +4,7 @@ using DataAccessLibrary.Audit;
 using DataAccessLibrary.Blacklist;
 using DataAccessLibrary.Dashboard;
 using DataAccessLibrary.Discord;
+using DataAccessLibrary.Guilds;
 using DataAccessLibrary.Health;
 using DataAccessLibrary.Status;
 using Microsoft.Extensions.Configuration;
@@ -94,6 +95,13 @@ namespace DataAccessLibrary
         public static IServiceCollection AddRetentionAccess(this IServiceCollection services)
         {
             services.AddTransient<IRetentionData, RetentionData>();
+            return services;
+        }
+
+        // MinerBot's own copy of the servers the bot is in, apart from the website's ihvph_discord_servers in AddGuildAccess
+        public static IServiceCollection AddBotGuildAccess(this IServiceCollection services)
+        {
+            services.AddTransient<IBotGuildData, BotGuildData>();
             return services;
         }
     }

@@ -43,6 +43,19 @@ namespace MinerBot_2._0.Jobs
             var newMaps = await GetNewMaps(now);
             var newLobbies = await GetNewLobbies();
 
+            // While Discord has sent none of the bot's servers, no post can be checked against its server: before the
+            // gateway's first READY since the start Discord.Net has none of them, and from a READY, at a start or a new
+            // session, nothing of them but their IDs until they arrive, which waits for the gateway if it drops meanwhile.
+            // The new items wait for a run after that, and this one doesn't count against them, with a line in the log when
+            // it had any.
+            if (_discord.CurrentUser == null || (_discord.Guilds.Count > 0 && _discord.Guilds.All(guild => guild.Name == null)))
+            {
+                if (newArmor is { Count: > 0 } || newMaps is { Count: > 0 } || newLobbies is { Count: > 0 })
+                    Console.WriteLine("Couldn't send the notifications yet, because Discord hasn't sent the bot's servers");
+
+                return;
+            }
+
             int armorDelivered = 0, mapsDelivered = 0, lobbiesDelivered = 0;
 
             var guilds = (await _DiscordService.GetAllGuilds()).ToList();
@@ -96,12 +109,13 @@ namespace MinerBot_2._0.Jobs
             if (newArmor == null || newArmor.Count == 0)
                 return 0;
 
+            if (ChannelOf("armor", guildId, channelId) is not { } channel)
+                return 0;
+
             int sentArmor = 0;
 
             try
             {
-                var channel = await _discord.GetChannelAsync(channelId) as IMessageChannel;
-
                 foreach (var (embed, armorCount) in ArmorService.NewArmorListEmbeds(newArmor))
                 {
                     await channel.SendMessageAsync(embed: embed);
@@ -143,12 +157,13 @@ namespace MinerBot_2._0.Jobs
             if (newMaps == null || newMaps.Count == 0)
                 return 0;
 
+            if (ChannelOf("map", guildId, channelId) is not { } channel)
+                return 0;
+
             int sentMaps = 0;
 
             try
             {
-                var channel = await _discord.GetChannelAsync(channelId) as IMessageChannel;
-
                 foreach (var (text, embeds) in await _SteamAPIService.GetLatestMapsMessages(newMaps.Select(post => (post.Map, post.IsNew)).ToList()))
                 {
                     await channel.SendMessageAsync(text: text, embeds: embeds);
@@ -189,9 +204,11 @@ namespace MinerBot_2._0.Jobs
             if (newLobbies == null || newLobbies.Count == 0)
                 return 0;
 
+            if (ChannelOf("lobby", guildId, channelId) is not { } channel)
+                return 0;
+
             try
             {
-                var channel = await _discord.GetChannelAsync(channelId) as IMessageChannel;
                 await channel.SendMessageAsync(
                     embed: await _SteamAPIService.LobbyListEmbed(await _SteamAPIService.GetLobbiesDisplay(newLobbies, hideEmpty: true), type: "__NEW__"));
                 return newLobbies.Count;
@@ -201,6 +218,34 @@ namespace MinerBot_2._0.Jobs
                 Console.WriteLine($"Couldn't send the lobby notification to channel {channelId} of guild {guildId}\n{e.Message}");
                 return 0;
             }
+        }
+
+        // The row's channel, only when it's a channel of the server the row names that Discord.Net counts as a text channel:
+        // a text or announcement channel, or, as before, a voice, stage or thread channel, whose classes derive from its text
+        // channel. From the cache: a row can't send a post to another server's channel, and no channel is looked up over
+        // Discord's API. A server the bot isn't in, one Discord reports unavailable, in an outage, or one it hasn't sent yet
+        // gets no post either. Each of these is a post that couldn't be sent, with a line in the log: as for a post that
+        // failed, its items are tried again at the next run only when no server got them.
+        private SocketTextChannel? ChannelOf(string kind, ulong guildId, ulong channelId)
+        {
+            var guild = _discord.GetGuild(guildId);
+            string problem;
+
+            if (guild == null)
+                problem = "the bot isn't in that server";
+            // While the gateway itself is down, every server shows as unavailable, and a post can still go through Discord's API
+            else if (!guild.IsConnected && _discord.ConnectionState == ConnectionState.Connected)
+                problem = "Discord reports that server unavailable";
+            // Discord.Net has nothing of it but its ID, from a READY or an outage, so none of its channels
+            else if (guild.Name == null)
+                problem = "Discord hasn't sent that server yet";
+            else if (guild.GetTextChannel(channelId) is { } channel)
+                return channel;
+            else
+                problem = "that channel isn't in that server";
+
+            Console.WriteLine($"Couldn't send the {kind} notification to channel {channelId} of guild {guildId}, because {problem}");
+            return null;
         }
 
         public async Task LeaveForPerms()

@@ -29,6 +29,9 @@ builder.Services.AddSingleton<DiscordStatusHandler>();
 builder.Services.AddSingleton<IDiscordStatus>(services => services.GetRequiredService<DiscordStatusHandler>());
 builder.Services.AddHostedService<StatusWriter>();
 builder.Services.AddHostedService<StatusSampler>();
+// The servers and channels the bot is in, which GuildWriter copies to MinerBot's database as GuildWatcher notes them
+builder.Services.AddSingleton<GuildWatcher>();
+builder.Services.AddHostedService<GuildWriter>();
 builder.Services.AddHostedService<Worker>();
 builder.Services.AddSingleton(new DiscordSocketConfig { GatewayIntents = GatewayIntents.Guilds });
 builder.Services.AddSingleton<DiscordSocketClient>();
@@ -55,7 +58,8 @@ builder.Services.AddDataAccessServices(builder.Configuration)
                 .AddBlacklistAccess()
                 .AddGuildAccess()
                 .AddBotStatusAccess()
-                .AddRetentionAccess();
+                .AddRetentionAccess()
+                .AddBotGuildAccess();
 
 // Steam API Access
 builder.Services.AddSteamAPIServices();
@@ -84,6 +88,10 @@ await client.SetGameAsync("Murder Miners on my PC", type:ActivityType.Playing);
 // Before connecting, and before the other Ready handlers: Discord.Net skips the ones after a Ready handler that throws,
 // and without this one's Ready the bot never counts as up, so its health check would fail
 host.Services.GetRequiredService<DiscordStatusHandler>().Initialize();
+
+// Also before connecting and the other handlers, so the servers that change from the start are noted, and a handler that
+// throws, such as GuildEventHandler's LeftGuild when the website's database fails, can't skip the notes
+host.Services.GetRequiredService<GuildWatcher>().Initialize();
 
 // Before connecting, because a Ready event during this would register an empty list and delete every command
 await host.Services.GetRequiredService<InteractionHandler>().InitializeAsync();

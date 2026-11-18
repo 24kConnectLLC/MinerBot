@@ -1,6 +1,4 @@
-using Dapper;
 using DataAccessLibrary.Status.Models;
-using System.Text;
 using System.Text.RegularExpressions;
 
 namespace DataAccessLibrary.Status
@@ -266,48 +264,12 @@ namespace DataAccessLibrary.Status
             return SaveDataCount(sql, parameters);
         }
 
-        // One statement for the whole batch, with each row's parameters numbered, such as @seq0 and @seq1. The names are
-        // the columns', which only this code gives.
-        static (string Values, DynamicParameters Parameters) Rows<T>(IReadOnlyList<T> rows, params (string Column, Func<T, object?> Value)[] columns)
-        {
-            var values = new StringBuilder();
-            var parameters = new DynamicParameters();
-
-            for (var i = 0; i < rows.Count; i++)
-            {
-                values.Append(i == 0 ? "(" : ", (");
-
-                for (var c = 0; c < columns.Length; c++)
-                {
-                    var name = $"{columns[c].Column}{i}";
-                    values.Append(c == 0 ? "@" : ", @").Append(name);
-                    parameters.Add(name, columns[c].Value(rows[i]));
-                }
-
-                values.Append(')');
-            }
-
-            return (values.ToString(), parameters);
-        }
-
         static void RequireBatch<T>(IReadOnlyList<T> rows)
         {
             ArgumentNullException.ThrowIfNull(rows);
 
             if (rows.Count > BatchLimit)
                 throw new ArgumentException($"One call writes at most {BatchLimit} rows", nameof(rows));
-        }
-
-        static void RequireSeq(uint seq)
-        {
-            if (seq == 0)
-                throw new ArgumentException("Sequence numbers count from 1", nameof(seq));
-        }
-
-        static void RequireUtcOrNull(DateTime? time, string name)
-        {
-            if (time is { } value)
-                RequireUtc(value, name);
         }
 
         static void RequireFits(string? text, int limit, string what)

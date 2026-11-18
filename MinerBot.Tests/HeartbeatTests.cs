@@ -173,6 +173,17 @@ namespace MinerBot.Tests
             Assert.True(status < At("host.Services.GetRequiredService<GuildEventHandler>().Initialize();"), "The status handler comes after the server handler");
             Assert.True(status < At("await client.LoginAsync("), "The status handler is attached after the login");
 
+            // The servers' copy: its writer, and its watcher before the handlers that can throw, such as the server handler's
+            // LeftGuild, which awaits the website's database
+            At("builder.Services.AddSingleton<GuildWatcher>();");
+            At(".AddBotGuildAccess()");
+            Assert.True(At("builder.Services.AddHostedService<GuildWriter>();") < worker, "The server writer is registered after the worker, so it stops first");
+
+            var watcher = At("host.Services.GetRequiredService<GuildWatcher>().Initialize();");
+            Assert.True(watcher < At("host.Services.GetRequiredService<InteractionHandler>().InitializeAsync();"), "The server watcher comes after the interaction handler");
+            Assert.True(watcher < At("host.Services.GetRequiredService<GuildEventHandler>().Initialize();"), "The server watcher comes after the server handler");
+            Assert.True(watcher < At("await client.LoginAsync("), "The server watcher is attached after the login");
+
             Assert.True(At("steamApi.RecordEvent = recorder.Record;") < At("steamApi.AuthenticateClient();"), "Steam signs in before its events are recorded");
         }
 

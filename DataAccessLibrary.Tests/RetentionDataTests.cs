@@ -17,7 +17,7 @@ namespace DataAccessLibrary.Tests
         {
             var db = fixture.Require();
             await db.ClearAsync(MariaDbFixture.AuditTable, MariaDbFixture.SessionTable, MariaDbFixture.EventTable, MariaDbFixture.JobRunTable,
-                MariaDbFixture.SampleTable, MariaDbFixture.DailyTable);
+                MariaDbFixture.SampleTable, MariaDbFixture.DailyTable, MariaDbFixture.GuildEventTable, MariaDbFixture.BotGuildTable, MariaDbFixture.GuildDailyTable);
             return db;
         }
 
@@ -95,6 +95,25 @@ namespace DataAccessLibrary.Tests
 
             Assert.Equal(1, await db.Retention().DeleteEvents(Cutoff, Chunk));
             Assert.Equal([Cutoff, Cutoff.AddMilliseconds(1)], await TimesAsync("at", MariaDbFixture.EventTable));
+        }
+
+        // The bot's joins and leaves of servers. The servers' rows and their days' member counts stay, however old.
+        [Fact]
+        public async Task GuildEventsGoBeforeTheCutoff()
+        {
+            var db = await StartAsync();
+
+            foreach (var (seq, at) in new[] { (1, Cutoff.AddMilliseconds(-1)), (2, Cutoff), (3, Cutoff.AddMilliseconds(1)) })
+                await fixture.RootExecuteAsync($"INSERT INTO {MariaDbFixture.GuildEventTable} (run_id, seq, guild_id, at, kind) VALUES (1, @seq, 2, @at, 'joined')", new { seq, at });
+
+            await fixture.RootExecuteAsync($@"INSERT INTO {MariaDbFixture.BotGuildTable} (guild_id, name, first_seen_at, left_at, available, bot_administrator, bot_permissions, updated_at)
+                                              VALUES (2, 'Test Server', @old, @old, 1, 0, 0, @old)", new { old = Cutoff.AddYears(-3) });
+            await fixture.RootExecuteAsync($"INSERT INTO {MariaDbFixture.GuildDailyTable} (day, guild_id, member_count) VALUES (@day, 2, 12)", new { day = Cutoff.Date.AddYears(-3) });
+
+            Assert.Equal(1, await db.Retention().DeleteGuildEvents(Cutoff, Chunk));
+            Assert.Equal([Cutoff, Cutoff.AddMilliseconds(1)], await TimesAsync("at", MariaDbFixture.GuildEventTable));
+            Assert.Equal(1, (await fixture.RootQueryAsync<long>($"SELECT COUNT(*) FROM {MariaDbFixture.BotGuildTable}")).Single());
+            Assert.Equal(1, (await fixture.RootQueryAsync<long>($"SELECT COUNT(*) FROM {MariaDbFixture.GuildDailyTable}")).Single());
         }
 
         // By when each run started, so a run that was cut off and never ended goes too
