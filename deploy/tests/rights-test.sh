@@ -8,9 +8,10 @@
 #
 # MariaDB runs in a throwaway container without a network, with latin1 as the server's default character set and root
 # reached through /root/.my.cnf, as on the server. It gets the website's three tables from
-# docs/schema/wordpress-tables.sql and MinerBot's first migration, DataAccessLibrary/Migrations/0001_core.sql, under the
-# test names website_db and minerbot_db. The checks compare the dashboard's login with a login they give the file's
-# rights themselves, without common.sh.
+# docs/schema/wordpress-tables.sql and MinerBot's migrations, DataAccessLibrary/Migrations/0001_core.sql,
+# 0002_bot_status.sql and 0003_guilds.sql, under the test names website_db and minerbot_db, since the file gives rights on
+# tables from each. The checks compare the dashboard's login with a login they give the file's rights themselves, without
+# common.sh.
 #
 # Run it from Git Bash or Linux: bash deploy/tests/rights-test.sh. It needs Docker. It prints one line per check, then
 # "N of M passed", and exits 1 if any check failed. Its container is named mbtest-rights-<its PID>, ends by itself after
@@ -199,11 +200,13 @@ extras_refused() {
 
 forbidden_refused() {
     local statement out
-    # The login may read the audit log, the armor and its review history, and the blacklist, so these try what it may
-    # not: moving a ban to another account, changing an audit row, deleting history and changing an armor's name
+    # The login may read the audit log, the armor and its review history, the blacklist, the bot's status, history and
+    # servers, and the servers' settings, so these try what it may not: moving a ban to another account, changing an audit
+    # row, deleting history, changing an armor's name, deleting the bot's copy of a server's channels and changing a
+    # server's setting
     for statement in "UPDATE $site.ihvph_blacklist SET steam_id = 1" "UPDATE $bot.audit_log SET outcome = 'x'" \
         "DELETE FROM $bot.armor_reviews" "UPDATE $site.ihvph_armor_styles SET ArmorName = 'x'" \
-        "SELECT armor_channel_id FROM $site.ihvph_discord_servers" \
+        "DELETE FROM $bot.guild_channels" \
         "UPDATE $site.ihvph_discord_servers SET armor_channel_id = 1" "CREATE TABLE $bot.rights_check (a INT)" \
         "SELECT * FROM mysql.user"; do
         out=$(as_login "$bot" "$statement")
@@ -222,8 +225,8 @@ statement_time() {
 
 proxy_caught() {
     local out
-    # A table right the file doesn't give, since it gives SELECT on the servers' guild_id alone
-    out=$(sql "GRANT SELECT ON $site.ihvph_discord_servers TO '$login'@'localhost';
+    # A table right the file doesn't give, since it gives SELECT on the servers' settings and nothing more
+    out=$(sql "GRANT INSERT ON $site.ihvph_discord_servers TO '$login'@'localhost';
         GRANT ALL ON $bot.* TO '$login'@'127.0.0.1';
         GRANT PROXY ON 'someone'@'localhost' TO '$login'@'localhost';") \
         || problem "couldn't add the rights by hand" "$out"
@@ -235,7 +238,7 @@ proxy_caught() {
 hand_rights_gone() {
     local now
     now=$(login_rights)
-    if grep -E "^table SELECT $site ihvph_discord_servers\$|^schema " <<< "$now" > /dev/null; then
+    if grep -E "^table INSERT $site ihvph_discord_servers\$|^schema " <<< "$now" > /dev/null; then
         problem "a right added by hand is still there" "$now"
     fi
 }
@@ -256,7 +259,7 @@ missing_table_stops() {
     { cat /opt/minerbot/dashboard-rights.sql; echo 'GRANT INSERT ON `{{BOT_DB}}`.`bot_commands` TO {{GRANTEES}};'; } \
         > /work/rights-missing.sql
     # A right the file would take away, so a REVOKE that reached the real login would show
-    out=$(sql "GRANT SELECT ON $site.ihvph_discord_servers TO '$login'@'localhost';") || problem "couldn't add a right by hand" "$out"
+    out=$(sql "GRANT INSERT ON $site.ihvph_discord_servers TO '$login'@'localhost';") || problem "couldn't add a right by hand" "$out"
     before=$(login_rights)
     run_common apply_rights /work/rights-missing.sql
     [ "$status" != 0 ] || problem "apply_rights passed a right on a table that doesn't exist" "$said"
@@ -364,10 +367,10 @@ applied_copy_kept() {
 }
 
 # move-database.sh's database steps, with the real common.sh: the new database, and the bot's own login with exactly the
-# rights the migrations need there, none anywhere else and none it can pass on, also when it's made again; the first
-# migration runs with it; and it can make no view, routine, trigger or event, which root's scripts would run
+# rights the migrations need there, none anywhere else and none it can pass on, also when it's made again; the migrations
+# run with it; and it can make no view, routine, trigger or event, which root's scripts would run
 moved_login() {
-    local pw out want got kind
+    local pw out want got kind migration
     pw=$(head -c 600 /dev/urandom | tr -dc 'A-Za-z0-9' | cut -c 1-40)
     out=$(sql "CREATE DATABASE minerbot CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_520_ci") \
         || problem "couldn't make the database minerbot" "$out"
@@ -387,10 +390,12 @@ moved_login() {
             problem "the bot's login on $host doesn't have exactly the migrations' rights in minerbot" "$got"
         fi
     done
-    out=$(tr -d '\r' < /work/0001_core.sql | timeout -k 5 60 mariadb --defaults-file=/tmp/bot.cnf minerbot 2>&1) \
-        || problem "the first migration didn't run with the bot's login" "$out"
-    [ "$(sql "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'minerbot' AND TABLE_NAME IN ('audit_log', 'dashboard_sessions')")" = 2 ] \
-        || problem "the first migration didn't make the dashboard's tables in minerbot"
+    for migration in 0001_core 0002_bot_status 0003_guilds; do
+        out=$(tr -d '\r' < "/work/$migration.sql" | timeout -k 5 60 mariadb --defaults-file=/tmp/bot.cnf minerbot 2>&1) \
+            || problem "the migration $migration didn't run with the bot's login" "$out"
+    done
+    [ "$(sql "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'minerbot' AND TABLE_NAME IN ('audit_log', 'dashboard_sessions', 'bot_status', 'guilds')")" = 4 ] \
+        || problem "the migrations didn't make the dashboard's and the bot's tables in minerbot"
     for kind in "CREATE VIEW v AS SELECT 1" "CREATE FUNCTION f() RETURNS INT RETURN 1" \
         "CREATE TRIGGER t BEFORE INSERT ON audit_log FOR EACH ROW SET @x = 1" \
         "CREATE EVENT e ON SCHEDULE EVERY 1 DAY DO SELECT 1"; do
@@ -420,7 +425,7 @@ moved_rights() {
 # ---------- In the container: the databases, then the checks
 
 inside_container() {
-    local ready="" out before reference
+    local ready="" out before reference migration
     trap 'stop "The container'\''s setup failed at line $LINENO."' ERR
     [ -n "${MARIADB_ROOT_PASSWORD:-}" ] || stop "The container has no MARIADB_ROOT_PASSWORD."
     for _ in $(seq 120); do
@@ -439,8 +444,10 @@ inside_container() {
         || stop "Couldn't make the databases: $out"
     out=$(tr -d '\r' < /work/wordpress-tables.sql | timeout -k 5 60 mariadb "$site" 2>&1) \
         || stop "Couldn't make the website's tables: $out"
-    out=$(tr -d '\r' < /work/0001_core.sql | timeout -k 5 60 mariadb "$bot" 2>&1) \
-        || stop "Couldn't run MinerBot's first migration: $out"
+    for migration in 0001_core 0002_bot_status 0003_guilds; do
+        out=$(tr -d '\r' < "/work/$migration.sql" | timeout -k 5 60 mariadb "$bot" 2>&1) \
+            || stop "Couldn't run MinerBot's migration $migration: $out"
+    done
 
     # The dashboard's login, made as setup-dashboard.sh makes it: a 40-character password, on stdin
     password=$(head -c 600 /dev/urandom | tr -dc 'A-Za-z0-9' | cut -c 1-40)
@@ -506,7 +513,7 @@ inside_container() {
     extras_refused || true
     verdict "19. A trigger that rewrites the dashboard's audit rows, an event and a procedure in MinerBot's database, which no migration makes, stop apply_rights before it touches the login, each named; once they're dropped, it passes."
     moved_login || true
-    verdict "20. move-database.sh's steps: the bot's own login has exactly the migrations' rights in minerbot and none elsewhere, also when it's made again; the first migration runs with it; it can make no view, function, trigger or event."
+    verdict "20. move-database.sh's steps: the bot's own login has exactly the migrations' rights in minerbot and none elsewhere, also when it's made again; the migrations run with it; it can make no view, function, trigger or event."
     moved_rights || true
     verdict "21. apply_rights with server.conf naming minerbot gives the dashboard's login exactly the file's rights there and none on the old database."
 
@@ -554,7 +561,7 @@ on_host() {
 
     echo "Checking apply_rights in deploy/common.sh, with the real rights files, against $image"
     for file in deploy/common.sh deploy/dashboard-rights.sql deploy/rights-list.sql docs/schema/wordpress-tables.sql \
-        DataAccessLibrary/Migrations/0001_core.sql; do
+        DataAccessLibrary/Migrations/0001_core.sql DataAccessLibrary/Migrations/0002_bot_status.sql DataAccessLibrary/Migrations/0003_guilds.sql; do
         [ -f "$repo/$file" ] || stop "There's no file at $repo/$file."
     done
     timeout -k 10 30 docker version > /dev/null 2>&1 || stop "Docker isn't running, or doesn't answer."
@@ -574,6 +581,8 @@ on_host() {
     copy_in "$repo/deploy/rights-list.sql" /opt/minerbot/rights-list.sql
     copy_in "$repo/docs/schema/wordpress-tables.sql" /work/wordpress-tables.sql
     copy_in "$repo/DataAccessLibrary/Migrations/0001_core.sql" /work/0001_core.sql
+    copy_in "$repo/DataAccessLibrary/Migrations/0002_bot_status.sql" /work/0002_bot_status.sql
+    copy_in "$repo/DataAccessLibrary/Migrations/0003_guilds.sql" /work/0003_guilds.sql
     echo "The real common.sh and rights files are in /opt/minerbot in $name."
 
     # The checks print their own lines and count. This counts the ok lines as well, for when the limit stops them.

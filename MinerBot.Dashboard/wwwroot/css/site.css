@@ -13,6 +13,9 @@
     /* What blocks an approval, and what needs a look, as text on the background or the surface */
     --danger: #b3261e;
     --warn: #8a5300;
+    /* What's working, as text, and the uptime strip's second band, which only needs 3:1 as a shape */
+    --ok: #1e7b34;
+    --ok-low: #6b8e23;
     /* Behind --text, for what submitter text hides */
     --mark: #fff3bf;
 }
@@ -28,6 +31,8 @@
         --border: #3a3f48;
         --danger: #ffb4ab;
         --warn: #ffd28a;
+        --ok: #7ee2a1;
+        --ok-low: #c5e17a;
         --mark: #4d3f00;
     }
 }
@@ -85,6 +90,15 @@ h1 {
     font-size: 1.75rem;
     line-height: 1.25;
     margin: 0 0 1rem;
+}
+
+/* A server's page heads itself with its ID, 19 digits that can't break: about 306 px at 1.75rem in a bold system font,
+   wider than the 288 px column of a 320 px screen, or of a 1280 px window at 400%, so the page would scroll sideways.
+   The narrowest screens get a smaller heading, which fits it whole. */
+@media (max-width: 22.5rem) {
+    h1 {
+        font-size: 1.5rem;
+    }
 }
 
 code {
@@ -233,9 +247,12 @@ h2 {
     margin: 0 0 0.75rem;
 }
 
+/* A server's page heads each group of channels with its category's name, which is Discord's, so it breaks where it must:
+   a long one with no space, or a line of box-drawing characters, would otherwise widen a phone's page */
 h3 {
     font-size: 1.1rem;
     margin: 1.25rem 0 0.5rem;
+    overflow-wrap: anywhere;
 }
 
 /* The armor list's tabs, as links, so they work without scripts */
@@ -360,6 +377,15 @@ caption {
 
 .marker-warn {
     color: var(--warn);
+}
+
+/* The status pages' marks: what works, and what's neither a problem nor working, such as a kind that's off */
+.marker-ok {
+    color: var(--ok);
+}
+
+.marker-quiet {
+    color: var(--muted);
 }
 
 .pager {
@@ -704,6 +730,8 @@ mark {
     margin: 0 0 0.25rem;
 }
 
+/* A time, or a day, in a table's cell stays whole: when another column wants the room, the table's automatic layout
+   would otherwise cut it at a hyphen, even on a desktop */
 .audit-when {
     white-space: nowrap;
 }
@@ -732,4 +760,144 @@ mark {
 
 .audit-table td.address {
     overflow-wrap: break-word;
+}
+
+/* One line of a table's cell, such as a server's name with its ID under it */
+.cell-line {
+    margin: 0 0 0.25rem;
+}
+
+/* An identifier on a line of its own in a table's cell, such as a job's name in the bot's code or a channel's ID, one in
+   a cell's sentence, such as the server a setting's channel is in, and a cell that holds only an ID, stay whole, as the
+   audit table's addresses do: with anywhere, a column could shrink to one character and cut them into pieces. A table
+   too narrow for them scrolls on its own. */
+.cell-line.address,
+.cell-line .address,
+td.address {
+    overflow-wrap: break-word;
+}
+
+/* The status box's explanations, each on a line of its own under its state */
+.status-box dd .muted {
+    display: block;
+}
+
+/* A tick box with its label beside it, under a form's other fields */
+.field-check {
+    margin-bottom: 0.75rem;
+}
+
+.field-check label {
+    font-weight: 600;
+    margin-left: 0.25rem;
+}
+
+.field-check p {
+    margin: 0.25rem 0 0;
+    font-size: 0.9rem;
+}
+
+/* What opens on demand, such as a job's last runs or the uptime strip's table */
+details {
+    margin: 0 0 1rem;
+}
+
+summary {
+    cursor: pointer;
+    font-weight: 600;
+}
+
+details[open] > summary {
+    margin-bottom: 0.5rem;
+}
+
+/* The last 90 days, one cell for each UTC day, by Discord's uptime. Every cell's size is set here, by its band, so none
+   needs a style of its own. The numbers are in each cell's title and in the table after the strip. */
+.strip {
+    display: grid;
+    grid-template-columns: repeat(90, minmax(0, 1fr));
+    gap: 1px;
+    align-items: end;
+    height: 2rem;
+    margin: 0 0 1rem;
+    padding: 0;
+    list-style: none;
+}
+
+.strip li {
+    min-width: 0;
+    height: 2rem;
+    border-radius: 1px;
+}
+
+/* Each band below the top is shorter than the one above it, so a bad day stands out without telling red from green, as
+   the bands' colours alone don't for many colour-blind people. A day with no record keeps the full height, as an outline. */
+.strip .strip-good {
+    height: 1.5rem;
+}
+
+.strip .strip-fair {
+    height: 1rem;
+}
+
+.strip .strip-poor {
+    height: 0.5rem;
+}
+
+.strip-top {
+    background: var(--ok);
+}
+
+.strip-good {
+    background: var(--ok-low);
+}
+
+.strip-fair {
+    background: var(--warn);
+}
+
+.strip-poor {
+    background: var(--danger);
+}
+
+/* No record isn't down, so it's an outline, in a colour with the contrast a shape needs */
+.strip-none {
+    box-shadow: inset 0 0 0 1px var(--muted);
+}
+
+/* The strip's key, in the sentence above it */
+.strip-swatch {
+    display: inline-block;
+    width: 0.9rem;
+    height: 0.9rem;
+    vertical-align: -0.1rem;
+    border-radius: 2px;
+}
+
+/* A server's icon from Discord's CDN beside its name, or a plain circle for one without. The name is Discord's, so it
+   breaks where it must, as a display name in the header does: a long one with no space, or one whose hidden characters
+   show as their codes, would otherwise widen a phone's page, or push the servers list's settings out of view. The ID
+   under it in the list stays whole. */
+.server-name {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    overflow-wrap: anywhere;
+}
+
+.server-icon {
+    flex: none;
+    width: 2rem;
+    height: 2rem;
+    border-radius: 50%;
+}
+
+.server-icon-none {
+    display: inline-block;
+    background: var(--border);
+}
+
+/* A setting's mark in the servers list, which can name three missing permissions, wraps in its column */
+.servers .marker {
+    white-space: normal;
 }

@@ -6,6 +6,7 @@ using MinerBot.Dashboard.Health;
 using MinerBot.Dashboard.Hosting;
 using MinerBot.Dashboard.Security;
 using MinerBot.Dashboard.Settings;
+using MinerBot.Dashboard.Status;
 
 // The deploy's migration step and the container's health check need none of the web settings, and must never try to
 // take the port or socket the running dashboard holds
@@ -40,11 +41,15 @@ builder.Services.AddDataAccessServices(builder.Configuration)
                 .AddDatabaseHealthAccess()
                 .AddArmorSubmissionAccess()
                 .AddArmorReviewAccess()
-                .AddBlacklistAccess();
+                .AddBlacklistAccess()
+                .AddBotStatusReads()
+                .AddBotGuildReads()
+                .AddGuildSettingsReads();
 
 builder.Services.AddDashboardSignIn();
 builder.Services.AddArmorReview();
 builder.Services.AddBlacklistChanges();
+builder.Services.AddStatusPages();
 
 // No fallback policy: it would also apply to addresses that match no page and turn every 404 into a sign-in. Deny by
 // default is the endpoint test's job instead.
@@ -114,7 +119,8 @@ app.UseStatusCodePagesWithReExecute("/error");
 //    cookies alone can't stop it.
 app.UseMiddleware<OriginCheck>();
 
-// 9. The stylesheet comes before sign-in, so it costs no session lookup and still loads while the database is down.
+// 9. The stylesheet and the status pages' script come before sign-in, so they cost no session lookup and still load while
+//    the database is down.
 app.UseStaticFiles(StaticFiles.Options);
 
 // 10. Which page or endpoint the request is for.

@@ -38,13 +38,14 @@ GRANT SELECT (`guild_id`) ON `{{SITE_DB}}`.`ihvph_discord_servers` TO {{GRANTEES
 GRANT SELECT, INSERT, UPDATE, DELETE ON `{{BOT_DB}}`.`dashboard_sessions` TO {{GRANTEES}};
 GRANT INSERT ON `{{BOT_DB}}`.`audit_log` TO {{GRANTEES}};
 
--- The audit page reads the log back, and so does each blacklist entry's history. On a line of its own, so the INSERT
--- line above stays word for word what older dashboards' own files have, which deploy.sh compares statement by statement.
+-- The audit page reads the log back, and so do each blacklist entry's history, the Overview's latest changes and each
+-- server's page. On a line of its own, so the INSERT line above stays word for word what older dashboards' own files
+-- have, which deploy.sh compares statement by statement.
 GRANT SELECT ON `{{BOT_DB}}`.`audit_log` TO {{GRANTEES}};
 
 -- Armor review reads every submission, whatever its status, for its list and its review page, and changes nothing but
--- the status. An approval's name check reads with FOR UPDATE, which needs no more than SELECT. The website stays the
--- only one that adds, edits or deletes armor.
+-- the status. An approval's name check reads with FOR UPDATE, which needs no more than SELECT. The Overview reads how
+-- many wait and the oldest's date. The website stays the only one that adds, edits or deletes armor.
 GRANT SELECT ON `{{SITE_DB}}`.`ihvph_armor_styles` TO {{GRANTEES}};
 GRANT UPDATE (`Status`) ON `{{SITE_DB}}`.`ihvph_armor_styles` TO {{GRANTEES}};
 
@@ -57,3 +58,27 @@ GRANT SELECT, INSERT ON `{{BOT_DB}}`.`armor_reviews` TO {{GRANTEES}};
 -- leaves out steam_id, so an edit can't move an entry to another account: a wrong number is removed and added again.
 GRANT SELECT, INSERT, DELETE ON `{{SITE_DB}}`.`ihvph_blacklist` TO {{GRANTEES}};
 GRANT UPDATE (`username`, `reason`, `expire_date`, `notes`) ON `{{SITE_DB}}`.`ihvph_blacklist` TO {{GRANTEES}};
+
+-- The Overview and the Bot status page read the bot's status and history, which only the bot writes: its status row, its
+-- minutes and days of uptime, its events, and its jobs and their runs. The servers pages read its status row and events
+-- too, for how current their copy is. Nothing here changes them.
+GRANT SELECT ON `{{BOT_DB}}`.`bot_status` TO {{GRANTEES}};
+GRANT SELECT ON `{{BOT_DB}}`.`uptime_samples` TO {{GRANTEES}};
+GRANT SELECT ON `{{BOT_DB}}`.`uptime_daily` TO {{GRANTEES}};
+GRANT SELECT ON `{{BOT_DB}}`.`bot_events` TO {{GRANTEES}};
+GRANT SELECT ON `{{BOT_DB}}`.`job_status` TO {{GRANTEES}};
+GRANT SELECT ON `{{BOT_DB}}`.`job_runs` TO {{GRANTEES}};
+
+-- The servers pages read the bot's copy of its servers, which only the bot writes: the servers, their channels with the
+-- bot's permissions in each, its joins and leaves, and each day's member count. The Overview reads the servers and
+-- their channels too, for its banner about the settings MinerBot can't post in.
+GRANT SELECT ON `{{BOT_DB}}`.`guilds` TO {{GRANTEES}};
+GRANT SELECT ON `{{BOT_DB}}`.`guild_channels` TO {{GRANTEES}};
+GRANT SELECT ON `{{BOT_DB}}`.`guild_events` TO {{GRANTEES}};
+GRANT SELECT ON `{{BOT_DB}}`.`guild_daily` TO {{GRANTEES}};
+
+-- The servers pages and that banner read each server's four channel settings from the website, which hold its ID and
+-- four channel IDs, nothing private. On a line of its own, so the guild_id line above stays word for word what older
+-- dashboards' own files have, which deploy.sh compares statement by statement. Only the website and the bot's /admin
+-- set_channels change them.
+GRANT SELECT ON `{{SITE_DB}}`.`ihvph_discord_servers` TO {{GRANTEES}};

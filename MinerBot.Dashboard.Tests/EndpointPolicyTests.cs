@@ -36,7 +36,10 @@ namespace MinerBot.Dashboard.Tests
             Assert.Superset(Public, routes);
             Assert.Contains("Admin", routes);
 
-            // The armor, blacklist and audit log pages, spelt with the capital A that the check below needs
+            // The status, servers, armor, blacklist and audit log pages, spelt with the capital A that the check below needs
+            Assert.Contains("Admin/Bot", routes);
+            Assert.Contains("Admin/Servers", routes);
+            Assert.Contains("Admin/Servers/{id:long}", routes);
             Assert.Contains("Admin/Armor", routes);
             Assert.Contains("Admin/Armor/{id:long}", routes);
             Assert.Contains("Admin/Blacklist", routes);

@@ -104,5 +104,26 @@ namespace DataAccessLibrary
             services.AddTransient<IBotGuildData, BotGuildData>();
             return services;
         }
+
+        // The dashboard's reads of the bot's status and history, without the bot's writes
+        public static IServiceCollection AddBotStatusReads(this IServiceCollection services)
+        {
+            services.AddTransient<IBotStatusReads, BotStatusReads>();
+            return services;
+        }
+
+        // The dashboard's reads of the bot's copy of its servers, without the bot's writes
+        public static IServiceCollection AddBotGuildReads(this IServiceCollection services)
+        {
+            services.AddTransient<IBotGuildReads, BotGuildReads>();
+            return services;
+        }
+
+        // The dashboard's reads of the website's channel settings, without GuildData's saves and deletes
+        public static IServiceCollection AddGuildSettingsReads(this IServiceCollection services)
+        {
+            services.AddTransient<IGuildSettingsReads, GuildSettingsReads>();
+            return services;
+        }
     }
 }

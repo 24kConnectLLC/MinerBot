@@ -33,6 +33,14 @@
           Link="dashboard-source\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Visible="false" />
   </ItemGroup>
 
+  <!-- The bot's two lists of its event kinds, read as text by StatusRulesTests and AuditWordsTests, so a kind the bot gains
+       without a label fails there. A kind BotEvents' list names from another file fails StatusRulesTests until that file
+       is added here. Copied, never compiled: the dashboard and its tests reference nothing of the bot's. -->
+  <ItemGroup>
+    <None Include="..\MinerBot 2.0\Status\BotEvents.cs" Link="bot-source\BotEvents.cs" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    <None Include="..\SteamWebAPIAccess\SteamStatus.cs" Link="bot-source\SteamStatus.cs" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.13" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />

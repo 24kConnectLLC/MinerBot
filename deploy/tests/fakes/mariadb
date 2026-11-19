@@ -74,8 +74,13 @@ the_rights() {   # what the rights file gives, one per line, as deploy/rights-li
         "table INSERT minerbot_db armor_reviews" "table INSERT minerbot_db audit_log" \
         "table INSERT minerbot_db dashboard_sessions" "table INSERT website_db ihvph_blacklist" \
         "table SELECT minerbot_db armor_reviews" "table SELECT minerbot_db audit_log" \
-        "table SELECT minerbot_db dashboard_sessions" "table SELECT website_db ihvph_armor_styles" \
-        "table SELECT website_db ihvph_blacklist" "table UPDATE minerbot_db dashboard_sessions"
+        "table SELECT minerbot_db bot_events" "table SELECT minerbot_db bot_status" \
+        "table SELECT minerbot_db dashboard_sessions" "table SELECT minerbot_db guild_channels" \
+        "table SELECT minerbot_db guild_daily" "table SELECT minerbot_db guild_events" "table SELECT minerbot_db guilds" \
+        "table SELECT minerbot_db job_runs" "table SELECT minerbot_db job_status" "table SELECT minerbot_db uptime_daily" \
+        "table SELECT minerbot_db uptime_samples" "table SELECT website_db ihvph_armor_styles" \
+        "table SELECT website_db ihvph_blacklist" "table SELECT website_db ihvph_discord_servers" \
+        "table UPDATE minerbot_db dashboard_sessions"
 }
 
 refuse() {   # refuse <message>

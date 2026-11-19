@@ -131,6 +131,11 @@ namespace DataAccessLibrary.Tests.Database
         public BlacklistData Blacklist() => new(Factory);
         public GuildData Guilds() => new(Factory);
 
+        // The dashboard's reads of what the bot writes, and of the website's settings
+        public BotStatusReads StatusReads() => new(Factory, Names);
+        public BotGuildReads GuildReads() => new(Factory, Names);
+        public GuildSettingsReads GuildSettings() => new(Factory);
+
         // Each test starts from empty tables. TRUNCATE also starts AUTO_INCREMENT again, which DELETE doesn't, so an ID
         // that a test wrote past a 32-bit int can't reach the next test's new rows.
         public async Task ClearAsync(params string[] tables)

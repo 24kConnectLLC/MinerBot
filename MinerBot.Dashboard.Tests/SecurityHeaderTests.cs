@@ -2,6 +2,7 @@ using System.Net;
 using DataAccessLibrary.Tests.Database;
 using MinerBot.Dashboard.Auth;
 using MinerBot.Dashboard.Security;
+using MinerBot.Dashboard.Status;
 using MinerBot.Dashboard.Tests.Support;
 
 namespace MinerBot.Dashboard.Tests
@@ -85,6 +86,7 @@ namespace MinerBot.Dashboard.Tests
             await Add("no proxy key", factory.Visitor(proxyKey: false).Client.GetAsync("/", Token), HttpStatusCode.NotFound);
             await Add("refused origin", SignInSteps.PostAsync(visitor, "/signout", "made-up", origin: "https://murderminershub.com"), HttpStatusCode.Forbidden);
             await Add("stylesheet", visitor.Client.GetAsync("/css/site.css", Token), HttpStatusCode.OK, cacheable: true);
+            await Add("script", visitor.Client.GetAsync("/js/refresh.js", Token), HttpStatusCode.OK, cacheable: true);
 
             using (var local = factory.Local())
                 await Add("health", local.GetAsync("/health/live", Token), HttpStatusCode.OK);
@@ -99,6 +101,7 @@ namespace MinerBot.Dashboard.Tests
             var admin = factory.Visitor("203.0.113.78");
             await SignInSteps.SignedInAsync(factory, admin, TestUsers.Admin);
             await Add("overview", admin.Client.GetAsync("/admin", Token), HttpStatusCode.OK);
+            await Add("status fragment", admin.Client.GetAsync("/admin?handler=status", Token), HttpStatusCode.OK);
 
             // A database that's down, behind a cookie that has to be looked up
             var dead = new DeadDatabase();
@@ -106,6 +109,7 @@ namespace MinerBot.Dashboard.Tests
             var deadVisitor = deadFactory.Visitor();
             deadVisitor.Jar.Add(DashboardFactory.PublicAddress, new Cookie(DashboardAuth.SessionCookie, SessionKeys.New()) { Secure = true });
             await Add("database down", deadVisitor.Client.GetAsync("/admin", Token), HttpStatusCode.ServiceUnavailable);
+            await Add("database down, for the fragment", deadVisitor.Client.GetAsync("/admin?handler=status", Token), HttpStatusCode.ServiceUnavailable);
 
             foreach (var (what, response, status, cacheable) in responses)
             {
@@ -121,6 +125,13 @@ namespace MinerBot.Dashboard.Tests
             // no-transform joins a Cache-Control that's already there, and makes one with no-store where there's none
             Assert.Equal(["no-store", "no-transform"], Directives(responses.Single(response => response.What == "home").Response).Order(StringComparer.Ordinal));
             Assert.Equal(["max-age=604800", "no-transform", "public"], Directives(responses.Single(response => response.What == "stylesheet").Response).Order(StringComparer.Ordinal));
+            Assert.Equal(["max-age=604800", "no-transform", "public"], Directives(responses.Single(response => response.What == "script").Response).Order(StringComparer.Ordinal));
+
+            // Only the fragment carries its marker, set on the response itself, so the 503 page, written on a cleared
+            // response, never does
+            Assert.Equal([StatusBoxes.Fragment], Values(responses.Single(response => response.What == "status fragment").Response, BackgroundRefresh.FragmentHeader));
+            Assert.All(responses.Where(response => response.What != "status fragment"),
+                response => Assert.True(Values(response.Response, BackgroundRefresh.FragmentHeader).Count == 0, $"{response.What} carries the fragment's marker"));
         }
     }
 }

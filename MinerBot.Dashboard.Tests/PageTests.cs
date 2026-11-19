@@ -6,7 +6,8 @@ using MinerBot.Shared.Armor;
 
 namespace MinerBot.Dashboard.Tests
 {
-    // The pages work without scripts, pass the Content-Security-Policy as they are, and speak plain English
+    // The pages work without scripts, pass the Content-Security-Policy as they are, and speak plain English. The status
+    // pages load the one script there is, which only keeps their status box current.
     [Collection("Database")]
     public partial class PageTests(MariaDbFixture fixture)
     {
@@ -14,7 +15,8 @@ namespace MinerBot.Dashboard.Tests
 
         static readonly string[] Reasons = ["unlisted", "mfa", "scope", "cancelled", "failed"];
 
-        // Fails on markup the policy would block, such as an inline script or style, or on a page that needs a script
+        // Fails on markup the policy would block, such as an inline script or style, or on a page that needs a script. The
+        // only script tag a page may have is refresh.js's, from the dashboard's own files, with its version, and deferred.
         internal static void AssertAccessible(string what, string html)
         {
             Assert.True(html.Contains("<html lang=\"en\">", StringComparison.Ordinal), $"{what} has no lang");
@@ -24,9 +26,61 @@ namespace MinerBot.Dashboard.Tests
             Assert.True(NonEmptyTitle().IsMatch(html), $"{what} has no title");
             Assert.True(html.Contains("<meta name=\"color-scheme\" content=\"light dark\"", StringComparison.Ordinal), $"{what} has no color-scheme");
             Assert.True(html.Contains("/css/site.css?v=", StringComparison.Ordinal), $"{what} has no versioned stylesheet");
+            Assert.True(RefreshScript().Count(html) <= 1, $"{what} loads refresh.js more than once");
 
             foreach (var blocked in new[] { "<script", " style=", "<style" })
-                Assert.False(html.Contains(blocked, StringComparison.OrdinalIgnoreCase), $"{what} has {blocked}");
+                Assert.False(RefreshScript().Replace(html, "").Contains(blocked, StringComparison.OrdinalIgnoreCase), $"{what} has {blocked}");
+        }
+
+        // Whether a page loads refresh.js, the one way AssertAccessible allows
+        internal static bool LoadsRefreshScript(string html) => RefreshScript().IsMatch(html);
+
+        // A table's wrapper with nothing in it the keyboard can reach takes the focus itself, as a group named by an element
+        // of the page, so a keyboard can scroll a table too wide for a phone: Safari doesn't make a scrolling box focusable on
+        // its own, as Chrome and Firefox do. Fails on a page with no such wrapper, so it can't pass on nothing.
+        internal static void AssertTablesTakeTheKeyboard(string what, string html)
+        {
+            var checkedWrappers = 0;
+
+            foreach (Match start in TableWrap().Matches(html))
+            {
+                // The wrapper ends at the div that closes it, counting the divs inside it, such as a server's name's
+                var depth = 0;
+                var end = html.Length;
+
+                foreach (Match tag in DivTag().Matches(html, start.Index))
+                {
+                    depth += tag.Value.StartsWith("</", StringComparison.Ordinal) ? -1 : 1;
+
+                    if (depth == 0)
+                    {
+                        end = tag.Index;
+                        break;
+                    }
+                }
+
+                if (Focusable().IsMatch(html[(start.Index + start.Length)..end]))
+                    continue;
+
+                checkedWrappers++;
+                var group = FocusableGroup().Match(start.Value);
+                Assert.True(group.Success, $"{what} has a table no keyboard can scroll: {start.Value}");
+                Assert.True(Regex.Count(html, $"\\sid=\"{Regex.Escape(group.Groups[1].Value)}\"") == 1, $"{what} names a table's wrapper by {group.Groups[1].Value}, which isn't one element's ID");
+            }
+
+            Assert.True(checkedWrappers > 0, $"{what} has no table without a link");
+        }
+
+        // A table's cell that holds only a day, or a time in UTC, keeps it whole: when another column wants the room, the
+        // table's automatic layout would otherwise cut it at a hyphen, as 2026-11- over 15. Fails on a page with no such
+        // cell, so it can't pass on nothing.
+        internal static void AssertTimesStayWhole(string what, string html)
+        {
+            var cells = TimeCell().Matches(html);
+            Assert.True(cells.Count > 0, $"{what} has no cell that holds only a time");
+
+            foreach (Match cell in cells)
+                Assert.True(cell.Groups[2].Value.Contains(" class=\"audit-when\"", StringComparison.Ordinal), $"{what} has a time that can break: {cell.Value}");
         }
 
         [Fact]
@@ -188,9 +242,10 @@ namespace MinerBot.Dashboard.Tests
             await SignInSteps.SignedInAsync(factory, owner, TestUsers.Owner);
             var ownerPage = WebUtility.HtmlDecode(await owner.Client.GetStringAsync("/admin", Token));
             Assert.Contains($"You're signed in as Test Owner, Discord ID {TestUsers.Owner.IdText}, with the Owner role.", ownerPage);
-            Assert.Contains("Review armor submissions under <a href=\"/admin/armor\">Armor</a>", ownerPage);
-            Assert.Contains("Keep the list of players to ban under <a href=\"/admin/blacklist\">Blacklist</a>: add, change or remove entries. Nothing enforces it yet", ownerPage);
-            Assert.Contains("See every change made on the dashboard, every sign-in and sign-out, and the changes and sign-ins it refused, in the <a href=\"/admin/audit\">Audit log</a>.", ownerPage);
+
+            // What it's for, in its sections' order
+            var headings = Regex.Matches(ownerPage, "<h2 id=\"[a-z]+\">([^<]+)</h2>").Select(match => match.Groups[1].Value);
+            Assert.Equal(["What needs you", "Status", "The last notification run", "Pending armor", "The latest changes"], headings);
 
             var admin = factory.Visitor("203.0.113.72");
             await SignInSteps.SignedInAsync(factory, admin, TestUsers.Admin);
@@ -209,8 +264,52 @@ namespace MinerBot.Dashboard.Tests
 
             var html = await admin.Client.GetStringAsync("/admin", Token);
 
-            Assert.DoesNotContain("<script", html, StringComparison.OrdinalIgnoreCase);
+            // The Overview loads refresh.js, which AssertAccessible allows, and nothing else
+            Assert.DoesNotContain("<script>alert(1)</script>", html, StringComparison.OrdinalIgnoreCase);
             Assert.Contains("&lt;script&gt;alert(1)&lt;/script&gt;", html);
+            AssertAccessible("the Overview with a made-up name", html);
+        }
+
+        // The status pages' script, as JavaScript, which nosniff needs before a browser runs it, in ASCII, since it's served
+        // without a charset, and sending the headers the dashboard checks. Only the pages whose status box refreshes load it.
+        [Fact]
+        public async Task RefreshScriptIsServedAndOnlyWhereItsUsed()
+        {
+            await using var factory = new DashboardFactory(await fixture.ReadyBotAsync());
+
+            var response = await factory.Visitor().Client.GetAsync("/js/refresh.js", Token);
+            var js = await response.Content.ReadAsStringAsync(Token);
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Equal("text/javascript", response.Content.Headers.ContentType?.MediaType);
+            Assert.All(js, c => Assert.True(c < 128, $"refresh.js holds {(int)c}, which isn't ASCII"));
+            Assert.Contains($"'{Auth.BackgroundRefresh.Header}': '{Auth.BackgroundRefresh.Value}'", js);
+            Assert.Contains($"response.headers.get('{Auth.BackgroundRefresh.FragmentHeader}') !== fragment", js);
+            Assert.Contains("redirect: 'manual'", js);
+            Assert.Contains("cache: 'no-store'", js);
+            Assert.DoesNotContain("innerHTML", js.Replace("box.innerHTML = html;", ""));
+
+            // Every 30 seconds, only while the page is visible, and only from the dashboard's own address
+            Assert.Contains("var every = 30000;", js);
+            Assert.Contains("if (stopped || document.visibilityState !== 'visible') {", js);
+            Assert.Contains("if (address.origin !== window.location.origin || !fragment) {", js);
+
+            // Coming back to a page hidden for longer than the wait refreshes at once and starts the 30 seconds again, since
+            // the interval keeps its own count while the page is hidden and its next tick could follow a moment later
+            var visible = VisibleHandler().Match(js);
+            Assert.True(visible.Success, "refresh.js has no visible() handler");
+            Assert.Contains("refresh();", visible.Value);
+            Assert.Contains("window.clearInterval(timer);", visible.Value);
+            Assert.Contains("timer = window.setInterval(refresh, every);", visible.Value);
+
+            var owner = factory.Visitor("203.0.113.75");
+            await SignInSteps.SignedInAsync(factory, owner, TestUsers.Owner);
+
+            foreach (var page in new[] { "/admin", "/admin/bot" })
+                Assert.True(LoadsRefreshScript(await owner.Client.GetStringAsync(page, Token)), $"{page} doesn't load refresh.js");
+
+            foreach (var page in new[] { "/admin/servers", "/admin/armor", "/admin/blacklist", "/admin/audit", "/" })
+                Assert.False(LoadsRefreshScript(await owner.Client.GetStringAsync(page, Token)), $"{page} loads refresh.js");
         }
 
         [Fact]
@@ -240,5 +339,29 @@ namespace MinerBot.Dashboard.Tests
 
         [GeneratedRegex("<title>[^<]*\\S[^<]*</title>")]
         private static partial Regex NonEmptyTitle();
+
+        [GeneratedRegex("<script src=\"/js/refresh\\.js\\?v=[A-Za-z0-9_-]+\" defer></script>")]
+        private static partial Regex RefreshScript();
+
+        // refresh.js's visibilitychange handler, up to the brace that closes it at its own indent
+        [GeneratedRegex("function visible\\(\\) \\{.*?\\n        \\}", RegexOptions.Singleline)]
+        private static partial Regex VisibleHandler();
+
+        [GeneratedRegex("<div class=\"table-wrap\"[^>]*>")]
+        private static partial Regex TableWrap();
+
+        [GeneratedRegex("</?div\\b[^>]*>")]
+        private static partial Regex DivTag();
+
+        // What takes the keyboard's focus without a tabindex
+        [GeneratedRegex("<(a|button|input|select|textarea|summary)\\b")]
+        private static partial Regex Focusable();
+
+        [GeneratedRegex("^<div class=\"table-wrap\" tabindex=\"0\" role=\"group\" aria-labelledby=\"([^\"]+)\">$")]
+        private static partial Regex FocusableGroup();
+
+        // A th or a td with its attributes, holding only a day, or a day and a time in UTC, as TimeWords writes them
+        [GeneratedRegex("<(td|th)((?: [a-z-]+=\"[^\"]*\")*)>\\s*\\d{4}-\\d{2}-\\d{2}(?: \\d{2}:\\d{2}:\\d{2} UTC)?\\s*</\\1>")]
+        private static partial Regex TimeCell();
     }
 }

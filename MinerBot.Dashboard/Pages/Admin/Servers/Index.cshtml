@@ -1,0 +1,154 @@
+@page
+@model ServerListModel
+@using System.Globalization
+@using MinerBot.Dashboard.Armor
+@using MinerBot.Dashboard.Servers
+@using MinerBot.Dashboard.Status
+@*
+    Server and channel names are Discord's, which anyone in a server can set, so each goes through RevealedText, inside a
+    bdi, and the title never holds one. IDs are text. A server's link is its name, revealed, which the bot never stores
+    empty and which shows even its hidden characters, with its ID as text below; in the settings of servers MinerBot isn't
+    in, which have no name, the ID is the link. An icon is drawn only from an ID and a hash in Discord's form.
+*@
+@{
+    ViewData["Title"] = "Servers";
+
+    // Each row holds a server and its four settings side by side
+    ViewData["Wide"] = true;
+    var now = Model.Now;
+}
+<h1>Servers</h1>
+<p>Every server MinerBot is in or has left, from its own copy of them, with the four channels each server chose on the website and whether MinerBot can post in each.</p>
+<partial name="_CopyFreshness" model="Model.Freshness" />
+
+<nav aria-label="Servers by state" class="tabs">
+    <ul>
+        @foreach (var filter in ServerListModel.Filters)
+        {
+            <li><a href="@ServerRows.FilterLink(filter)" aria-current="@(filter == Model.Filter ? "page" : null)">@filter.Label (@Model.Count(filter).ToString("N0", CultureInfo.InvariantCulture))</a></li>
+        }
+    </ul>
+</nav>
+
+@if (Model.AtLimit)
+{
+    <p>The copy holds more servers than this page reads, so only the first @Model.All.Count.ToString("N0", CultureInfo.InvariantCulture) by name are here.</p>
+}
+
+@if (Model.Rows.Count == 0)
+{
+    <p>No server here.</p>
+}
+else
+{
+    <div class="table-wrap">
+        <table class="servers">
+            <thead>
+                <tr>
+                    <th scope="col">Server</th>
+                    <th scope="col">Members</th>
+                    <th scope="col">Joined</th>
+                    @foreach (var kind in SettingStatuses.Kinds)
+                    {
+                        <th scope="col">@SettingStatuses.KindLabel(kind)</th>
+                    }
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var row in Model.Rows)
+                {
+                    var guild = row.Guild;
+                    <tr>
+                        <td>
+                            <div class="server-name">
+                                @if (row.IconUrl is { } icon)
+                                {
+                                    <img class="server-icon" src="@icon" alt="" width="32" height="32" />
+                                }
+                                else
+                                {
+                                    <span class="server-icon server-icon-none"></span>
+                                }
+                                <div>
+                                    <p class="cell-line">@if (row.Link is { } link) {<a href="@link">@RevealedText.Html(guild.name)</a>} else {@RevealedText.Html(guild.name)}</p>
+                                    <p class="cell-line muted address">@row.IdText</p>
+                                    @if (!row.IsIn && guild.left_at is { } left)
+                                    {
+                                        <p class="cell-line"><span class="marker marker-quiet">Left on @TimeWords.Day(left)</span></p>
+                                    }
+                                    @if (row.Unavailable)
+                                    {
+                                        <p class="cell-line"><span class="marker marker-warn">Outage: Discord reports it unavailable</span></p>
+                                    }
+                                    @if (row.IsIn && guild.bot_administrator)
+                                    {
+                                        <p class="cell-line"><span class="marker marker-warn">Has Administrator</span></p>
+                                    }
+                                </div>
+                            </div>
+                        </td>
+                        <td>
+                            @if (guild.member_count is { } members)
+                            {
+                                <p class="cell-line">@members.ToString("N0", CultureInfo.InvariantCulture)</p>
+                            }
+                            else
+                            {
+                                <p class="cell-line">Not counted</p>
+                            }
+                            @if (row.Trend is { } trend)
+                            {
+                                <p class="cell-line muted">@ServerRows.TrendWords(trend, ServerListModel.TrendDays)</p>
+                            }
+                        </td>
+                        <td class="audit-when">@if (guild.bot_joined_at is { } joined) {@TimeWords.Day(joined)} else {<text>Not known</text>}</td>
+                        @foreach (var setting in row.Settings)
+                        {
+                            <td><partial name="_SettingMark" model="setting" /></td>
+                        }
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+    <p class="muted">Has Administrator: @ServerRows.AdministratorAdvice Can't check: the channel isn't a text or announcement channel MinerBot's copy has. It may be a voice channel's chat, which posts do reach, a forum, or a deleted channel. Members are Discord's count once a day; joined days are in UTC.</p>
+}
+
+<section aria-labelledby="elsewhere">
+    <h2 id="elsewhere">Settings for servers MinerBot isn't in</h2>
+    @if (Model.Elsewhere.Count == 0)
+    {
+        <p>None: every server with settings on the website has MinerBot in it.</p>
+    }
+    else
+    {
+        <p>The website has settings for these servers, but MinerBot has left them or was never recorded in them, so its posts to them are skipped.</p>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th scope="col">Server ID</th>
+                        @foreach (var kind in SettingStatuses.Kinds)
+                        {
+                            <th scope="col">@SettingStatuses.KindLabel(kind)</th>
+                        }
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var settings in Model.Elsewhere)
+                    {
+                        var id = settings.guild_id.ToString(CultureInfo.InvariantCulture);
+                        <tr>
+                            <td class="address">@if (ServerRows.Link(settings.guild_id) is { } link) {<a href="@link">@id</a>} else {@id}</td>
+                            @foreach (var kind in SettingStatuses.Kinds)
+                            {
+                                var channel = SettingStatuses.ChannelOf(settings, kind);
+                                <td class="address">@(channel == DataAccessLibrary.Discord.Models.Guild.ChannelOff ? "Off" : channel.ToString(CultureInfo.InvariantCulture))</td>
+                            }
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+</section>

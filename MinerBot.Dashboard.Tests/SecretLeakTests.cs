@@ -27,7 +27,7 @@ namespace MinerBot.Dashboard.Tests
 
         async Task CrawlAsync(FakeCloudflareAccess? access)
         {
-            var db = await fixture.ReadyAsync();
+            var db = await fixture.ReadyBotAsync();
             await using var factory = new DashboardFactory(db, access == null ? null : new DashboardFactoryOptions
             {
                 Settings = new Dictionary<string, string?>
@@ -61,7 +61,7 @@ namespace MinerBot.Dashboard.Tests
                 "VALUES (2, 'Pending Approval', 'Approved', 'Looks right', 1000000000000000002, 'Test Admin', UTC_TIMESTAMP(3))");
 
             // A blacklist entry with its history, an account no longer on it, and a row no account number can be, each with
-            // the address of whoever made the change, which only the Owner's audit page shows
+            // the address of whoever made the change, which only the Owner's pages show
             await db.AddEntriesAsync(BlacklistSteps.Entry(12345));
             await db.RootExecuteAsync($"INSERT INTO {MariaDbFixture.BlacklistTable} (steam_id, username) VALUES (5000000000, 'Cut Player')");
             await db.RootExecuteAsync($"INSERT INTO {MariaDbFixture.AuditTable} (at, actor_id, actor_name, actor_role, action, outcome, target_type, target_id, after_json, ip) " +
@@ -77,13 +77,21 @@ namespace MinerBot.Dashboard.Tests
                     "/error", "/nothing-here", "/signout", "/signin", "/css/site.css",
                     "/admin/armor?status=all", "/admin/armor/1", "/admin/armor/2", "/admin/armor/2?done=approved", "/admin/armor/999",
                     "/admin/blacklist/12345", "/admin/blacklist/12345?done=added", "/admin/blacklist/54321", "/admin/blacklist/99999",
-                    "/admin/audit?type=blacklist&id=12345"])
+                    "/admin/audit?type=blacklist&id=12345", "/js/refresh.js", "/admin?handler=status", "/admin/bot?routine=1",
+                    "/admin/servers?show=all", $"/admin/servers/{StatusSteps.ServerId}", $"/admin/servers/{StatusSteps.SettingsOnlyId}", "/admin/servers/99999"])
                 .Distinct()
                 .ToList();
 
-            // The review page's and a blacklist entry's routes are the ones with a parameter, so a new one fails here until
-            // it's crawled too
-            Assert.Equal(["Admin/Armor/{id:long}", "Admin/Blacklist/{account:long}"], factory.Services.GetRequiredService<EndpointDataSource>().Endpoints
+            // A server with a hidden channel, settings and a change of its own, a server the website has settings for and the
+            // bot isn't in, and the bot's status with every part of the status box, so the status pages show all they can
+            await StatusSteps.ServersAsync(db);
+            await StatusSteps.StatusAsync(db, factory.Clock.GetUtcNow().UtcDateTime);
+            await db.RootExecuteAsync($"INSERT INTO {MariaDbFixture.AuditTable} (at, actor_id, actor_name, actor_role, action, outcome, guild_id, target_type, ip) " +
+                $"VALUES (UTC_TIMESTAMP(3), 1000000000000000002, 'Test Admin', 'admin', 'auth.signin', 'ok', {StatusSteps.ServerId}, 'session', '192.0.2.52')");
+
+            // The review page's, a blacklist entry's and a server's routes are the ones with a parameter, so a new one fails
+            // here until it's crawled too
+            Assert.Equal(["Admin/Armor/{id:long}", "Admin/Blacklist/{account:long}", "Admin/Servers/{id:long}"], factory.Services.GetRequiredService<EndpointDataSource>().Endpoints
                 .OfType<RouteEndpoint>().Where(endpoint => endpoint.RoutePattern.Parameters.Count > 0).Select(endpoint => endpoint.RoutePattern.RawText!.Trim('/'))
                 .Order(StringComparer.Ordinal));
 
@@ -175,9 +183,18 @@ namespace MinerBot.Dashboard.Tests
             Assert.Contains(seen, page => page.What == "admin /admin/blacklist/99999" && page.Response.StatusCode == HttpStatusCode.NotFound);
             Assert.Contains(seen, page => page.What == "owner /admin/audit" && page.Response.StatusCode == HttpStatusCode.OK);
             Assert.Contains(seen, page => page.What == "admin /admin/audit" && page.Response.StatusCode == HttpStatusCode.OK);
+            Assert.Contains(seen, page => page.What == "admin /admin/bot?routine=1" && page.Response.StatusCode == HttpStatusCode.OK);
+            Assert.Contains(seen, page => page.What == "admin /admin?handler=status" && page.Response.StatusCode == HttpStatusCode.OK);
+            Assert.Contains(seen, page => page.What == "admin /admin/servers?show=all" && page.Response.StatusCode == HttpStatusCode.OK);
+            Assert.Contains(seen, page => page.What == $"admin /admin/servers/{StatusSteps.ServerId}" && page.Response.StatusCode == HttpStatusCode.OK);
+            Assert.Contains(seen, page => page.What == $"admin /admin/servers/{StatusSteps.SettingsOnlyId}" && page.Response.StatusCode == HttpStatusCode.OK);
+            Assert.Contains(seen, page => page.What == "admin /admin/servers/99999" && page.Response.StatusCode == HttpStatusCode.NotFound);
 
-            // The visitors' addresses are the Owner's alone: on the Owner's audit page, and nowhere an Admin or a visitor sees
+            // The visitors' addresses are the Owner's alone: on the Owner's audit page, Overview and server page, and nowhere an
+            // Admin or a visitor sees
             Assert.Contains("192.0.2.50", seen.Single(page => page.What == "owner /admin/audit").Text);
+            Assert.Contains("192.0.2.52", seen.Single(page => page.What == "owner /admin").Text);
+            Assert.Contains("192.0.2.52", seen.Single(page => page.What == $"owner /admin/servers/{StatusSteps.ServerId}").Text);
             Assert.All(seen.Where(page => !page.What.StartsWith("owner ", StringComparison.Ordinal) && !page.What.StartsWith("local ", StringComparison.Ordinal)),
                 page => Assert.False(page.Text.Contains("192.0.2.5", StringComparison.Ordinal), $"{page.What} shows an address"));
         }

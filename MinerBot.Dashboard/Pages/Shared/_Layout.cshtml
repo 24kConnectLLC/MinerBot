@@ -1,6 +1,8 @@
 @*
-    One layout for every page. No scripts and no inline styles, because the Content-Security-Policy allows only the
-    dashboard's own files, and the stylesheet follows the device's light or dark setting.
+    One layout for every page. No inline scripts or styles, because the Content-Security-Policy allows only the dashboard's
+    own files, and the stylesheet follows the device's light or dark setting. The one script, refresh.js, is only on the
+    pages whose status box refreshes, through the Scripts section, so every other page needs no script, and those work
+    without it: it only keeps the box current.
 *@
 @{
     var user = SignedInUser.From(User);
@@ -17,6 +19,7 @@
     <meta name="color-scheme" content="light dark" />
     <title>@ViewData["Title"] - MinerBot dashboard</title>
     <link rel="stylesheet" href="~/css/site.css" asp-append-version="true" />
+    @await RenderSectionAsync("Scripts", required: false)
 </head>
 <body>
     <a class="skip-link" href="#main">Skip to the content</a>
@@ -32,6 +35,8 @@
                 </form>
                 <nav aria-label="Dashboard" class="site-nav">
                     <a href="/admin">Overview</a>
+                    <a href="/admin/bot">Bot</a>
+                    <a href="/admin/servers">Servers</a>
                     <a href="/admin/armor">Armor</a>
                     <a href="/admin/blacklist">Blacklist</a>
                     <a href="/admin/audit">Audit log</a>

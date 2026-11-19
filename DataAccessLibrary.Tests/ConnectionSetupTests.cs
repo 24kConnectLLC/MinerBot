@@ -67,7 +67,10 @@ namespace DataAccessLibrary.Tests
                 .AddDatabaseHealthAccess()
                 .AddBotStatusAccess()
                 .AddRetentionAccess()
-                .AddBotGuildAccess();
+                .AddBotGuildAccess()
+                .AddBotStatusReads()
+                .AddBotGuildReads()
+                .AddGuildSettingsReads();
 
             if (factory != null)
                 services.AddSingleton(factory);
@@ -109,6 +112,9 @@ namespace DataAccessLibrary.Tests
             var status = provider.GetRequiredService<IBotStatusData>();
             var retention = provider.GetRequiredService<IRetentionData>();
             var guilds = provider.GetRequiredService<IBotGuildData>();
+            var statusReads = provider.GetRequiredService<IBotStatusReads>();
+            var guildReads = provider.GetRequiredService<IBotGuildReads>();
+            provider.GetRequiredService<IGuildSettingsReads>();
             Assert.IsType<DatabaseHealthData>(provider.GetRequiredService<IDatabaseHealthData>());
 
             var now = DateTime.UtcNow;
@@ -136,6 +142,24 @@ namespace DataAccessLibrary.Tests
                 () => guilds.LeaveGuild(1, now, 1, 1, null),
                 () => guilds.MarkUnavailable([1], now),
                 () => guilds.SaveMemberCount(1, 10, day, now),
+                () => statusReads.GetStatus(),
+                () => statusReads.ListEvents(new EventQuery()),
+                () => statusReads.LatestEvent("discord.connected"),
+                () => statusReads.FirstEventAfter("discord.disconnected", null),
+                () => statusReads.CountEvents(["bot.started"], now.AddDays(-30), now.AddDays(-7)),
+                () => statusReads.ListJobs(),
+                () => statusReads.ListJobRuns(["ArmorJob.AddColorArrays"], 50),
+                () => statusReads.ListUptimeDays(day.AddDays(-89), day),
+                () => statusReads.CountSampleDays(day, now),
+                () => statusReads.CountSamples(now.AddDays(-1), now),
+                () => statusReads.FirstRecord(),
+                () => guildReads.ListGuilds(),
+                () => guildReads.GetGuild(1),
+                () => guildReads.ListChannels(1),
+                () => guildReads.FindChannels([1]),
+                () => guildReads.ListGuildEvents(1, 50),
+                () => guildReads.ListMemberDays(1, day.AddDays(-89), day.AddDays(1)),
+                () => guildReads.MemberTrends(day.AddDays(-30)),
                 () => audit.ListAudit(new AuditQuery()),
                 () => audit.LatestChanges("blacklist", ["12345"]),
                 () => audit.AddAudit(new AuditEntry { at = DateTime.UtcNow, actor_role = AuditRole.Owner, action = "armor.approve", outcome = AuditOutcome.Ok }),
@@ -245,7 +269,10 @@ namespace DataAccessLibrary.Tests
                 new DashboardSessionData(factory, names),
                 new BotStatusData(factory, names),
                 new RetentionData(factory, names),
-                new BotGuildData(factory, names)
+                new BotGuildData(factory, names),
+                new BotStatusReads(factory, names),
+                new BotGuildReads(factory, names),
+                new GuildSettingsReads(factory)
             }, repository => Assert.Equal("utf8mb4", CharacterSet(repository, factory)));
 
             var configured = new MySqlConnectionStringBuilder(Site + setting).CharacterSet;

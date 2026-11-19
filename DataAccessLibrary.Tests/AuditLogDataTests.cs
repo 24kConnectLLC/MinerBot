@@ -197,7 +197,7 @@ namespace DataAccessLibrary.Tests
             Assert.Equal(new string('r', 64), stored.request_id);
         }
 
-        // The visitor's address comes back only for a caller that asks, which only the audit page does, for the Owner
+        // The visitor's address comes back only for a caller that asks, which the dashboard's pages do for the Owner alone
         [Fact]
         public async Task AddressOnlyWhenAskedFor()
         {

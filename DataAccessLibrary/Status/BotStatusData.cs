@@ -13,14 +13,14 @@ namespace DataAccessLibrary.Status
         public const int BatchLimit = 100;
 
         const int VersionLimit = 40;
-        const int KindLimit = 40;
+        internal const int KindLimit = 40;
         const int JobLimit = 100;
         const int ScheduleLimit = 100;
         const int ResultNameLimit = 40;
         const int DetailLimit = 300;
 
-        // Words in small letters joined by one dot, such as discord.connected
-        static readonly Regex Kind = new(@"^[a-z_]+\.[a-z_]+\z", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+        // Words in small letters joined by one dot, such as discord.connected. BotStatusReads checks a kind it's given with it too.
+        internal static readonly Regex Kind = new(@"^[a-z_]+\.[a-z_]+\z", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
 
         private readonly DatabaseNames _names;
 

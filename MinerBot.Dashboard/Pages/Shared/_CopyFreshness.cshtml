@@ -1,0 +1,27 @@
+@model CopyFreshness
+@using MinerBot.Dashboard.Servers
+@using MinerBot.Dashboard.Status
+@*
+    How current MinerBot's copy of its servers is, for the servers list and a server's page. A row's updated_at is when the
+    bot last wrote it, not when it last checked it, so the age comes from the bot's status and events instead.
+*@
+@if (Model.Current)
+{
+    <p class="muted">@Model.Reason</p>
+}
+else
+{
+    <div class="banner" role="note">
+        <p>
+            @if (Model.AsOf is { } asOf)
+            {
+                <strong>As of @TimeWords.Utc(asOf), @TimeWords.Ago(asOf, Model.Now):</strong>
+            }
+            else
+            {
+                <strong>Not known to be current:</strong>
+            }
+            @Model.Reason
+        </p>
+    </div>
+}

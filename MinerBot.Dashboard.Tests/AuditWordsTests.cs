@@ -4,6 +4,7 @@ using DataAccessLibrary.Audit;
 using MinerBot.Dashboard.Armor;
 using MinerBot.Dashboard.Audit;
 using MinerBot.Dashboard.Blacklist;
+using MinerBot.Dashboard.Tests.Support;
 
 namespace MinerBot.Dashboard.Tests
 {
@@ -46,7 +47,8 @@ namespace MinerBot.Dashboard.Tests
         }
 
         // No other file of the dashboard writes an action word as a bare string, which the list could miss. The test's
-        // build copies the dashboard's code next to it.
+        // build copies the dashboard's code next to it. EventWords holds the bot's event kinds, which have the same form,
+        // so it may hold exactly the bot's own kinds, read from the bot's source, and nothing else.
         [Fact]
         public void NoOtherFileWritesAnActionWord()
         {
@@ -55,6 +57,7 @@ namespace MinerBot.Dashboard.Tests
 
             Assert.Contains(files, file => Path.GetFileName(file) == "DbTicketStore.cs");
             Assert.Contains(files, file => Path.GetFileName(file) == "BlacklistChanges.cs");
+            Assert.Contains(files, file => Path.GetFileName(file) == "EventWords.cs");
 
             foreach (var file in files)
             {
@@ -62,6 +65,8 @@ namespace MinerBot.Dashboard.Tests
 
                 if (Path.GetFileName(file) == "AuditWords.cs")
                     Assert.All(words.Where(word => word.Contains('.')), word => Assert.Contains(word, Listed));
+                else if (Path.GetFileName(file) == "EventWords.cs")
+                    Assert.Equal(BotSource.EventKinds(), words.Distinct().Order(StringComparer.Ordinal));
                 else
                     Assert.True(words.Count == 0, $"{Path.GetFileName(file)} writes {string.Join(", ", words)} as a bare string, which belongs in AuditWords");
             }

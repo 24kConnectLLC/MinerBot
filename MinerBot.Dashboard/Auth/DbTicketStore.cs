@@ -120,7 +120,9 @@ namespace MinerBot.Dashboard.Auth
                 return null;
             }
 
-            if (now - lastSeen >= TouchEvery && !await DatabaseCalls.Guard(() => sessions.TouchSession(key, now.UtcDateTime), logger))
+            // A status box's refresh is never use, so an open page alone can't keep the session going (BackgroundRefresh)
+            if (now - lastSeen >= TouchEvery && !BackgroundRefresh.Marks(httpContext.Request)
+                && !await DatabaseCalls.Guard(() => sessions.TouchSession(key, now.UtcDateTime), logger))
                 return null;
 
             // The row's times, never the ticket's, and no refresh, so the end can't slide. MySql.Data reads DATETIME back
