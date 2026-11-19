@@ -1,10 +1,112 @@
 @page
 @model OverviewModel
+@using System.Globalization
+@using MinerBot.Dashboard.Status
+@*
+    What needs someone comes first, each banner saying what to do with a link to where to do it, and when it was drawn,
+    since only the status box refreshes itself, through refresh.js; the page works without it. Times are UTC, apart from
+    armor's, which are the website's.
+*@
 @{
     ViewData["Title"] = "Overview";
+
+    // The latest changes are the audit page's own rows, which for the Owner hold an address too
+    ViewData["Wide"] = true;
+    var now = Model.Box.Now;
+}
+@section Scripts {
+    <script src="~/js/refresh.js" asp-append-version="true" defer></script>
 }
 <h1>Overview</h1>
 <p>You're signed in as @Model.Name, Discord ID @Model.UserId, with the @Model.Role role.</p>
-<p>Review armor submissions under <a href="/admin/armor">Armor</a>: approve, reject or take them down, with the rules the bot needs checked first. The bot's status and servers arrive in later updates.</p>
-<p>Keep the list of players to ban under <a href="/admin/blacklist">Blacklist</a>: add, change or remove entries. Nothing enforces it yet, so entries are kept for when the game's API can.</p>
-<p>See every change made on the dashboard, every sign-in and sign-out, and the changes and sign-ins it refused, in the <a href="/admin/audit">Audit log</a>.</p>
+
+<section aria-labelledby="needs">
+    <h2 id="needs">What needs you</h2>
+    @if (Model.Banners.Count == 0)
+    {
+        <p>Nothing needs you right now.</p>
+    }
+    else
+    {
+        @foreach (var banner in Model.Banners)
+        {
+            <div class="notice notice-problem">
+                <p>@banner.Text <a href="@banner.Link">@banner.LinkText</a></p>
+            </div>
+        }
+    }
+    <p class="muted">As of @TimeWords.Utc(now). Unlike the status box below, this part doesn't refresh itself: reload the page for the latest.</p>
+</section>
+
+<section aria-labelledby="status">
+    <h2 id="status">Status</h2>
+    <div data-refresh="@StatusBoxes.Address" data-fragment="@StatusBoxes.Fragment">
+        <partial name="_StatusBox" model="Model.Box" />
+    </div>
+    <p class="muted" role="status" data-refresh-stopped="Not updating: reload the page."></p>
+    <p><a href="/admin/bot">The bot's uptime, jobs and events</a></p>
+</section>
+
+<section aria-labelledby="notifications">
+    <h2 id="notifications">The last notification run</h2>
+    @if (Model.Notifications is { last_started_at: { } started } run)
+    {
+        <dl class="details">
+            <dt>Started</dt>
+            <dd>@TimeWords.Utc(started), @TimeWords.Ago(started, now)</dd>
+            <dt>Result</dt>
+            <dd>@JobWords.Result(run.last_result)</dd>
+            <dt>Took</dt>
+            <dd>@(run.last_duration_ms is { } duration ? TimeWords.Duration(duration) : "Not recorded")</dd>
+            @if (!string.IsNullOrEmpty(run.last_detail))
+            {
+                <dt>Detail</dt>
+                <dd>@run.last_detail</dd>
+            }
+            @if (run.next_run_at is { } next)
+            {
+                <dt>Next run</dt>
+                <dd>@TimeWords.Utc(next), @TimeWords.Until(next, now)</dd>
+            }
+        </dl>
+    }
+    else
+    {
+        <p>No notification run is recorded yet.</p>
+    }
+</section>
+
+<section aria-labelledby="armor">
+    <h2 id="armor">Pending armor</h2>
+    @if (Model.Armor is not { } armor)
+    {
+        <p>@(Model.FailedReads.HasFlag(WebsiteReads.Armor) ? "Reading pending armor from the website's database failed, so it can't be shown." : "The website's database isn't answering, so pending armor can't be shown.")</p>
+    }
+    else if (armor.Count == 0 || armor.Oldest is not { } oldest)
+    {
+        <p>No armor is waiting for a review.</p>
+    }
+    else
+    {
+        var waited = WebsiteClock.ToUtc(oldest) is { } sent ? ", " + TimeWords.Span(now - sent) + " ago" : "";
+        <p>@armor.Count.ToString("N0", CultureInfo.InvariantCulture) armor waiting for a review. The oldest was sent on @oldest.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) by the website's clock@(waited).</p>
+        <p><a href="/admin/armor?status=pending">Review them</a></p>
+    }
+</section>
+
+<section aria-labelledby="changes">
+    <h2 id="changes">The latest changes</h2>
+    @if (Model.Changes.Rows.Count == 0)
+    {
+        <p>The audit log is empty.</p>
+    }
+    else
+    {
+        <partial name="_AuditRows" model="Model.Changes" />
+    }
+    <p><a href="/admin/audit">The whole audit log</a></p>
+    @if (!Model.ShowsAddresses)
+    {
+        <p class="muted">Each row's visitor address is shown to the Owner alone.</p>
+    }
+</section>

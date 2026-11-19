@@ -50,7 +50,8 @@ namespace MinerBot.Dashboard.Security
                 headers[name] = value;
 
             // Nothing dynamic is stored anywhere. A Cache-Control that's already set is kept: the exception handler's and the
-            // cookie handler's say no-store too, and the stylesheet's may be cached because its links carry a version.
+            // cookie handler's say no-store too, and the stylesheet's and the script's may be cached because their links carry a
+            // version.
             // Every response also gets no-transform, which Cloudflare's documentation says makes it leave a response
             // uncompressed. The pages hold secrets next to text visitors control, which is why Program.cs leaves
             // compression out, and nginx has gzip off for the same reason.

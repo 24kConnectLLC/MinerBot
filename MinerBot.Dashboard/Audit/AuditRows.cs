@@ -19,20 +19,26 @@ namespace MinerBot.Dashboard.Audit
     public sealed record AuditTarget(string Text, string? Link);
 
     // One audit row as the pages show it. NoActor is a person Discord didn't name, such as a sign-in refused for its
-    // permissions before Discord said who it was. Ip is null unless the page shows addresses, which only the Owner's audit
-    // page does, so for anyone else it isn't in the model at all.
+    // permissions before Discord said who it was. Ip is null unless the page shows addresses, which the audit page, the
+    // Overview and a server's page do for the Owner alone, so for anyone else it isn't in the model at all.
     public sealed record AuditRow(DateTime At, ulong? ActorId, string? ActorName, string Role, bool NoActor, string Action, string Outcome,
         ulong? GuildId, AuditTarget? Target, AuditChange? Before, AuditChange? After, string? Detail, string? Ip);
 
-    // The rows the shared partial draws, and whether it has the address column
-    public sealed record AuditTable(IReadOnlyList<AuditRow> Rows, bool ShowIp);
+    // The rows the shared partial draws, whether it has the address column, and the ID of the heading that names the table
+    // when no row holds a link, for a page whose rows can all be without one
+    public sealed record AuditTable(IReadOnlyList<AuditRow> Rows, bool ShowIp, string? LabelledBy = null);
 
     internal static class AuditRows
     {
         // The most of one value a page shows: the JSON can hold 16,000 characters, which nobody reads in a table
         public const int ValueLimit = 300;
 
-        public static AuditTable Table(IEnumerable<AuditEntry> entries, bool showIp) => new(entries.Select(entry => Row(entry, showIp)).ToList(), showIp);
+        public static AuditTable Table(IEnumerable<AuditEntry> entries, bool showIp, string? labelledBy = null) =>
+            new(entries.Select(entry => Row(entry, showIp)).ToList(), showIp, labelledBy);
+
+        // Whether the partial draws a link in the row: its person's Discord ID, an armor or a blacklist entry, or its server.
+        // A sign-in refused before Discord said who it was has none of these.
+        public static bool HasLink(AuditRow row) => row.ActorId != null || row.Target?.Link != null || row.GuildId != null;
 
         // MySql.Data reads the time back with no kind, and the dashboard writes it in UTC
         public static AuditRow Row(AuditEntry entry, bool showIp) => new(

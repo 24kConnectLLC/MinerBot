@@ -1,0 +1,311 @@
+@page "/Admin/Servers/{id:long}"
+@model ServerPageModel
+@using System.Globalization
+@using DataAccessLibrary.Guilds
+@using MinerBot.Dashboard.Armor
+@using MinerBot.Dashboard.Servers
+@using MinerBot.Dashboard.Status
+@*
+    Server, category and channel names are Discord's, which anyone in a server can set, so each goes through RevealedText,
+    inside a bdi, and the title never holds one. IDs are text. Channels hidden from MinerBot are counted, not listed, since
+    Discord sends each one with the same made-up name. Apart from the dashboard's changes, a table here holds no link, or
+    only a setting's link to another server, so each one's wrapper takes the keyboard's focus itself, as a group named by
+    its heading, and a keyboard can scroll one too wide for a phone: Safari, unlike Chrome and Firefox, doesn't make a
+    scrolling box focusable on its own.
+*@
+@{
+    ViewData["Title"] = "Server " + Model.IdText;
+    ViewData["Wide"] = true;
+    var server = Model.Server;
+    var now = Model.Now;
+}
+<p><a href="/admin/servers">Back to the servers</a></p>
+<h1>Server @Model.IdText</h1>
+
+@if (server == null)
+{
+    <div class="banner" role="note">
+        <p>MinerBot isn't in this server: its copy of its servers has never recorded it. The website has settings for it, so posts to it are skipped.</p>
+    </div>
+}
+else
+{
+    @if (Model.Freshness is { } freshness)
+    {
+        <partial name="_CopyFreshness" model="freshness" />
+    }
+
+    <section aria-labelledby="server">
+        <h2 id="server">The server</h2>
+        <div class="server-name">
+            @if (Model.IconUrl is { } icon)
+            {
+                <img class="server-icon" src="@icon" alt="" width="32" height="32" />
+            }
+            else
+            {
+                <span class="server-icon server-icon-none"></span>
+            }
+            <p class="cell-line">@RevealedText.Html(server.name)</p>
+        </div>
+        <dl class="details">
+            <dt>Server ID</dt>
+            <dd class="address">@Model.IdText</dd>
+            <dt>MinerBot</dt>
+            <dd>
+                @if (server.left_at is { } left)
+                {
+                    <text>Left on @TimeWords.Utc(left), so posts to this server are skipped.</text>
+                }
+                else
+                {
+                    <text>In this server</text>@if (server.bot_joined_at is { } joined) {<text> since @TimeWords.Utc(joined)</text>}<text>.</text>
+                }
+            </dd>
+            @if (server.left_at != null && server.bot_joined_at is { } joinedBefore)
+            {
+                <dt>Joined</dt>
+                <dd>@TimeWords.Utc(joinedBefore)</dd>
+            }
+            <dt>Members</dt>
+            <dd>
+                @if (server.member_count is { } members)
+                {
+                    @members.ToString("N0", CultureInfo.InvariantCulture)
+                }
+                else
+                {
+                    <text>Not counted</text>
+                }
+                @if (Model.Trend is { } trend)
+                {
+                    <span class="muted">(@ServerRows.TrendWords(trend, ServerPageModel.TrendDays))</span>
+                }
+            </dd>
+            @if (Model.IsIn && server.bot_administrator)
+            {
+                <dt>Permissions</dt>
+                <dd><span class="marker marker-warn">Has Administrator</span> @ServerRows.AdministratorAdvice</dd>
+            }
+            @if (Model.IsIn && !server.available)
+            {
+                <dt>Outage</dt>
+                <dd><span class="marker marker-warn">Unavailable</span> Discord reports this server unavailable, so its channels are as they were before, and posts to it are skipped until it's back.</dd>
+            }
+        </dl>
+        @if (Model.MemberDays.Count > 0)
+        {
+            <details>
+                <summary id="member-days">Members on each day counted, over the last @ServerPageModel.TrendDays days</summary>
+                <div class="table-wrap" tabindex="0" role="group" aria-labelledby="member-days">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th scope="col">Day</th>
+                                <th scope="col">Members</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var day in Model.MemberDays.Reverse())
+                            {
+                                <tr>
+                                    <th scope="row" class="audit-when">@TimeWords.Day(day.day)</th>
+                                    <td>@(day.member_count is { } count ? count.ToString("N0", CultureInfo.InvariantCulture) : "Not counted")</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </details>
+        }
+    </section>
+}
+
+<section aria-labelledby="settings">
+    <h2 id="settings">Its channels for MinerBot's posts</h2>
+    @if (Model.Settings == null)
+    {
+        <p>Not set up: this server never chose its channels with /admin set_channels, so MinerBot posts nothing to it.</p>
+    }
+    <div class="table-wrap" tabindex="0" role="group" aria-labelledby="settings">
+        <table>
+            <thead>
+                <tr>
+                    <th scope="col">Posts</th>
+                    <th scope="col">Channel</th>
+                    <th scope="col">Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var setting in Model.Statuses)
+                {
+                    var channelId = setting.ChannelId.ToString(CultureInfo.InvariantCulture);
+                    <tr>
+                        <th scope="row">@SettingStatuses.KindLabel(setting.Kind)</th>
+                        <td>
+                            @if (setting.Channel is { } channel && channel.guild_id == Model.Id)
+                            {
+                                <p class="cell-line">@if (ChannelGroups.IsHidden(channel)) {<text>A channel hidden from MinerBot</text>} else {@RevealedText.Html(channel.name)}</p>
+                                <p class="cell-line muted address">@channelId</p>
+                            }
+                            else if (setting.ChannelId != 0)
+                            {
+                                <p class="cell-line address">@channelId</p>
+                            }
+                            else
+                            {
+                                <text>None</text>
+                            }
+                        </td>
+                        <td>
+                            <span class="marker @SettingStatuses.Marker(setting.State)">@SettingStatuses.Words(setting)</span>
+                            @switch (setting.State)
+                            {
+                                case SettingState.Off:
+                                    <p class="cell-line muted">The server turned this kind of post off.</p>
+                                    break;
+                                case SettingState.CantPost:
+                                    <p class="cell-line muted">Give MinerBot @string.Join(", ", setting.Missing) in this channel, or choose another.</p>
+                                    break;
+                                case SettingState.OtherServer:
+                                    var other = setting.Channel!.guild_id;
+                                    <p class="cell-line muted">The channel is in server @if (ServerRows.Link(other) is { } otherLink) {<a href="@otherLink" class="address">@other.ToString(CultureInfo.InvariantCulture)</a>} else {<span class="address">@other.ToString(CultureInfo.InvariantCulture)</span>}, and MinerBot never posts one server's notifications in another's channel.</p>
+                                    break;
+                                case SettingState.CantCheck:
+                                    <p class="cell-line muted">MinerBot's copy has no text or announcement channel with this ID. It may be a voice channel's chat, which posts do reach, a forum, or a channel that was deleted.</p>
+                                    break;
+                            }
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+</section>
+
+@if (server != null)
+{
+    <section aria-labelledby="channels">
+        <h2 id="channels">Its channels</h2>
+        @if (Model.Groups.Count == 0)
+        {
+            <p>@(Model.IsIn ? "MinerBot's copy has no text or announcement channel in this server." : "MinerBot's copy keeps no channels of a server it has left.")</p>
+        }
+        else
+        {
+            <p>The text and announcement channels, in Discord's order, with whether MinerBot can see each, send messages and embed links there.</p>
+            @for (var index = 0; index < Model.Groups.Count; index++)
+            {
+                var group = Model.Groups[index];
+                var category = "category-" + (index + 1).ToString(CultureInfo.InvariantCulture);
+                <h3 id="@category">
+                    @if (group.CategoryId == null)
+                    {
+                        <text>Outside any category</text>
+                    }
+                    else if (ChannelGroups.IsHiddenCategory(group.Category))
+                    {
+                        <text>A category hidden from MinerBot</text>
+                    }
+                    else if (string.IsNullOrEmpty(group.Category))
+                    {
+                        <text>A category with no name</text>
+                    }
+                    else
+                    {
+                        @RevealedText.Html(group.Category)
+                    }
+                </h3>
+                @if (group.Channels.Count > 0)
+                {
+                    <div class="table-wrap" tabindex="0" role="group" aria-labelledby="@category">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th scope="col">Channel</th>
+                                    <th scope="col">Type</th>
+                                    <th scope="col">View Channel</th>
+                                    <th scope="col">Send Messages</th>
+                                    <th scope="col">Embed Links</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var channel in group.Channels)
+                                {
+                                    <tr>
+                                        <th scope="row">
+                                            <p class="cell-line">@RevealedText.Html(channel.name)</p>
+                                            <p class="cell-line muted address">@channel.channel_id.ToString(CultureInfo.InvariantCulture)</p>
+                                        </th>
+                                        <td>@(channel.type == GuildChannelType.Announcement ? "Announcement" : channel.type == GuildChannelType.Text ? "Text" : channel.type)</td>
+                                        <td>@(channel.can_view ? "Yes" : "No")</td>
+                                        <td>@(channel.can_send ? "Yes" : "No")</td>
+                                        <td>@(channel.can_embed ? "Yes" : "No")</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                }
+                @if (group.Hidden > 0)
+                {
+                    <p class="muted">@TimeWords.Count(group.Hidden, "channel") hidden from MinerBot.</p>
+                }
+            }
+        }
+    </section>
+
+    <section aria-labelledby="joins">
+        <h2 id="joins">Its joins and leaves</h2>
+        @if (Model.JoinsAndLeaves.Count == 0)
+        {
+            <p>None recorded in the last 90 days.</p>
+        }
+        else
+        {
+            <div class="table-wrap" tabindex="0" role="group" aria-labelledby="joins">
+                <table>
+                    <thead>
+                        <tr>
+                            <th scope="col">When</th>
+                            <th scope="col">What</th>
+                            <th scope="col">Detail</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var row in Model.JoinsAndLeaves)
+                        {
+                            <tr>
+                                <td class="audit-when">@TimeWords.Utc(row.at)</td>
+                                <td>@(row.kind == GuildEventKind.Joined ? "Joined" : row.kind == GuildEventKind.Left ? "Left" : row.kind)</td>
+                                <td>@row.detail</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </section>
+}
+
+<section aria-labelledby="changes">
+    <h2 id="changes">Changes made to it on the dashboard</h2>
+    @if (Model.Changes.Rows.Count == 0)
+    {
+        <p>None.</p>
+    }
+    else
+    {
+        <p>@TimeWords.Count(Model.ChangeTotal, "change"), newest first.</p>
+        <partial name="_AuditRows" model="Model.Changes" />
+        @if (Model.ChangeTotal > Model.Changes.Rows.Count)
+        {
+            <p><a href="@Model.ChangesLink">All of them in the audit log</a></p>
+        }
+    }
+    @if (!Model.ShowsAddresses)
+    {
+        <p class="muted">Each row's visitor address is shown to the Owner alone.</p>
+    }
+</section>
+<p class="muted">Times are in UTC.</p>

@@ -1,0 +1,12 @@
+@model SettingStatus
+@using MinerBot.Dashboard.Armor
+@using MinerBot.Dashboard.Servers
+@*
+    One of a server's four settings in the servers list: its status in words, with what's missing named as Discord names
+    it, and the channel's name as Discord gave it, through RevealedText, when the copy has the channel
+*@
+<span class="marker @SettingStatuses.Marker(Model.State)">@SettingStatuses.Words(Model)</span>
+@if (Model.Channel is { } channel)
+{
+    <p class="cell-line muted">@if (ChannelGroups.IsHidden(channel)) {<text>A channel hidden from MinerBot</text>} else {@RevealedText.Html(channel.name)}</p>
+}

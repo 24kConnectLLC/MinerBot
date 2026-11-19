@@ -52,4 +52,16 @@ namespace DataAccessLibrary.Status
 
         public static bool IsKnown(string? state) => state is LoggedOn or Offline or NeedsSignIn;
     }
+
+    // A disconnect Discord asked for, its op 7, after which the bot connects again at once. The bot records it as
+    // discord.disconnected with the exception's type as the detail, and the dashboard shows it as routine and leaves it out
+    // of the events unless asked. Exact, in letter case too, here and in BotStatusReads' SQL, which compares as binary
+    // because the column's collation would ignore case and trailing spaces.
+    public static class RoutineReconnect
+    {
+        public const string Kind = "discord.disconnected";
+        public const string Detail = "GatewayReconnectException";
+
+        public static bool Is(string? kind, string? detail) => kind == Kind && detail == Detail;
+    }
 }

@@ -209,7 +209,7 @@ mariadb <BOT_DB from server.conf> -e "SELECT heartbeat_at, TIMESTAMPDIFF(SECOND,
 mariadb <BOT_DB from server.conf> -e "SELECT at, kind, level, detail FROM bot_events ORDER BY id DESC LIMIT 20"
 ```
 
-and its copy of the servers it's in, which the dashboard's servers pages will read: the servers whose `left_at` is NULL
+and its copy of the servers it's in, which the dashboard's servers pages read: the servers whose `left_at` is NULL
 are the ones the bot is in, as many as `discord_guilds` in `bot_status`, which counts Discord's own list while the bot
 is connected, each with `available` 1 unless Discord has an outage. A text channel the bot can see, made in a test
 server, shows up in `guild_channels` within 15 seconds. Only text and announcement channels are kept, and one the bot
@@ -220,6 +220,27 @@ hold emoji, so these read them as utf8mb4:
 mariadb --default-character-set=utf8mb4 <BOT_DB from server.conf> -e "SELECT guild_id, name, left_at, available FROM guilds"
 mariadb <BOT_DB from server.conf> -e "SELECT (SELECT COUNT(*) FROM guilds WHERE left_at IS NULL) AS servers_in, discord_guilds FROM bot_status"
 mariadb --default-character-set=utf8mb4 <BOT_DB from server.conf> -e "SELECT channel_id, name, type, can_view, can_send, can_embed, TIMESTAMPDIFF(SECOND, updated_at, UTC_TIMESTAMP(3)) AS seconds_old FROM guild_channels WHERE guild_id = <the test server's ID>"
+```
+
+The dashboard's status and servers pages show what those tables hold, so after a deploy that changes them the owner checks
+them against the same: the Overview's state (online, late, offline or stopped) and its last check-in against `./status.sh`
+and `heartbeat_at` above, and each of its banners against what it names, or "Nothing needs you right now." when nothing
+does; Bot's uptime against `uptime_daily` (a day the 04:30 Eastern clean-up hasn't totalled yet, today always, counts
+from `uptime_samples`, and a minute without a sample counts as down from the first minute recorded on), its jobs against
+`job_status` and `job_runs`, and its events against `bot_events`, where the reconnects Discord asks for, the
+`discord.disconnected` rows whose detail is `GatewayReconnectException`, show only with "Show routine reconnects"
+ticked; Servers against Discord's own list and `guilds`, as many in the default list as `servers_in` above; and one
+server's page against its channels in Discord, in Discord's order, with each setting's channel and what the bot can do
+there. A setting that names a voice channel shows "Can't check", since the copy keeps only text and announcement
+channels, and that isn't a problem: the bot's posts reach a voice channel's chat. A forum or a deleted channel shows
+"Can't check" too, and the bot's posts reach neither: for armor, maps and lobbies its log says
+"that channel isn't in that server" whenever it has one to post there, so look in Discord at what each "Can't check"
+setting names. A status box left open refreshes every 30 seconds; during a swap nginx answers 503 for a moment, so the
+box stops and says "Not updating: reload the page".
+
+```bash
+mariadb <BOT_DB from server.conf> -e "SELECT day, sampled_minutes, discord_minutes, steam_minutes FROM uptime_daily ORDER BY day DESC LIMIT 7"
+mariadb <BOT_DB from server.conf> -e "SELECT job, schedule, last_started_at, last_result, last_detail, next_run_at FROM job_status"
 ```
 
 `rollback.sh` puts its tags back when Compose never replaced the container: "Compose didn't recreate the <service> on
@@ -679,7 +700,8 @@ How the file grows. The approved plan's list is the ceiling:
 |---|---|
 | PR 4, armor review | `SELECT`, `UPDATE (Status)` on `ihvph_armor_styles`; `SELECT, INSERT` on `armor_reviews` |
 | PR 5, blacklist and audit page | `SELECT, INSERT, UPDATE, DELETE` on `ihvph_blacklist`; `SELECT` on `audit_log` |
-| The server channels page | `SELECT, INSERT, UPDATE (armor_channel_id, map_channel_id, lobby_channel_id, announcements_channel_id)` on `ihvph_discord_servers` |
+| PR 8, status and servers pages | `SELECT` on `bot_status`, `uptime_samples`, `uptime_daily`, `bot_events`, `job_status`, `job_runs`, `guilds`, `guild_channels`, `guild_events` and `guild_daily`, which only the bot writes; `SELECT` on `ihvph_discord_servers`, each server's ID and four channel IDs |
+| The server channels page | `INSERT, UPDATE (armor_channel_id, map_channel_id, lobby_channel_id, announcements_channel_id)` on `ihvph_discord_servers`, whose `SELECT` PR 8 gave |
 | The bot's command, switch and note tables | `INSERT` on `bot_commands`; `SELECT, INSERT, UPDATE, DELETE` on the dashboard's switches and notes, each in the PR that creates the table |
 
 ## The settings rule

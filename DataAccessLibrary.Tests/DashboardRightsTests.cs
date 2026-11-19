@@ -11,8 +11,12 @@ using DataAccessLibrary.Dashboard;
 using DataAccessLibrary.Dashboard.Models;
 using DataAccessLibrary.Discord;
 using DataAccessLibrary.Discord.Models;
+using DataAccessLibrary.Guilds;
+using DataAccessLibrary.Guilds.Models;
 using DataAccessLibrary.Health;
 using DataAccessLibrary.Migrations;
+using DataAccessLibrary.Status;
+using DataAccessLibrary.Status.Models;
 using DataAccessLibrary.Tests.Database;
 using MinerBot.Shared.Armor;
 using MySql.Data.MySqlClient;
@@ -61,9 +65,20 @@ namespace DataAccessLibrary.Tests
             "table INSERT website_db ihvph_blacklist",
             "table SELECT minerbot_db armor_reviews",
             "table SELECT minerbot_db audit_log",
+            "table SELECT minerbot_db bot_events",
+            "table SELECT minerbot_db bot_status",
             "table SELECT minerbot_db dashboard_sessions",
+            "table SELECT minerbot_db guild_channels",
+            "table SELECT minerbot_db guild_daily",
+            "table SELECT minerbot_db guild_events",
+            "table SELECT minerbot_db guilds",
+            "table SELECT minerbot_db job_runs",
+            "table SELECT minerbot_db job_status",
+            "table SELECT minerbot_db uptime_daily",
+            "table SELECT minerbot_db uptime_samples",
             "table SELECT website_db ihvph_armor_styles",
             "table SELECT website_db ihvph_blacklist",
+            "table SELECT website_db ihvph_discord_servers",
             "table UPDATE minerbot_db dashboard_sessions"
         ];
 
@@ -203,15 +218,17 @@ namespace DataAccessLibrary.Tests
 
         // Every repository call the dashboard makes today, under its login: the sessions, the audit rows, on MinerBot's own
         // connection and inside a transaction on the website's, and the audit page's reads of them, armor review's reads and
-        // each kind of its transactions, the blacklist's reads and each kind of its changes, and the readiness check of both
-        // databases
+        // each kind of its transactions, the blacklist's reads and each kind of its changes, the status and servers pages'
+        // reads of what the bot writes and of the website's settings, and the readiness check of both databases
         [Fact]
         public async Task EverythingTodaysDashboardDoesWorks()
         {
             await WithLoginAsync(async (db, password) =>
             {
                 await db.ClearAsync(MariaDbFixture.SessionTable, MariaDbFixture.AuditTable, MariaDbFixture.ArmorTable, MariaDbFixture.ReviewTable,
-                    MariaDbFixture.BlacklistTable);
+                    MariaDbFixture.BlacklistTable, MariaDbFixture.StatusTable, MariaDbFixture.EventTable, MariaDbFixture.JobRunTable, MariaDbFixture.JobStatusTable,
+                    MariaDbFixture.SampleTable, MariaDbFixture.DailyTable, MariaDbFixture.BotGuildTable, MariaDbFixture.BotChannelTable, MariaDbFixture.GuildEventTable,
+                    MariaDbFixture.GuildDailyTable, MariaDbFixture.GuildTable);
                 await db.AddArmorAsync(Armor(1, ArmorStatus.Pending, "Test Armor 1"));
                 await db.AddArmorAsync(Armor(2, ArmorStatus.Approved, "Test Armor 2"));
 
@@ -345,6 +362,49 @@ namespace DataAccessLibrary.Tests
                 Assert.Equal(3, (await audit.ListAudit(new AuditQuery { TargetType = "blacklist", TargetId = "12345" })).Total);
                 Assert.Equal("blacklist.remove", Assert.Single(await audit.LatestChanges("blacklist", ["12345", "54321"])).action);
 
+                // The status pages' reads, of rows the bot's own code writes with the bot's rights
+                var day = Noon.Date;
+                await db.Status().SaveStatus(new BotStatus { run_id = 1, started_at = Noon, heartbeat_at = Noon, discord_state = DiscordState.Connected, steam_state = SteamState.LoggedOn });
+                await db.Status().AddEvents([new BotEvent { run_id = 1, seq = 1, at = Noon, kind = "discord.connected", level = EventLevel.Info },
+                    new BotEvent { run_id = 1, seq = 2, at = Noon.AddSeconds(1), kind = "discord.disconnected", level = EventLevel.Warning, detail = "GatewayReconnectException" }]);
+                await db.Status().SaveJobStatus([new JobStatus { job = "ArmorJob.AddColorArrays", schedule = "0 * * * *", updated_at = Noon }]);
+                await db.Status().SaveJobRuns([new JobRun { run_id = 1, seq = 1, job = "ArmorJob.AddColorArrays", started_at = Noon, result = JobResult.Ok }]);
+                await db.Status().SaveSamples([new UptimeSample { minute = day.AddDays(-1), discord_up = true, steam_up = true }]);
+                await db.Retention().TotalUptimeDays(day.AddDays(-1), day);
+                await db.Status().SaveSamples([new UptimeSample { minute = day, discord_up = true, steam_up = false }]);
+
+                var statusReads = new BotStatusReads(factory, names);
+                Assert.NotNull(await statusReads.GetStatus());
+                Assert.Equal(2, (await statusReads.ListEvents(new EventQuery { IncludeRoutine = true })).Total);
+                Assert.Equal(1, (await statusReads.ListEvents(new EventQuery())).Total);
+                var connected = await statusReads.LatestEvent("discord.connected");
+                Assert.NotNull(await statusReads.FirstEventAfter("discord.disconnected", connected));
+                Assert.Single(await statusReads.CountEvents(["discord.connected"], day.AddDays(-30), day.AddDays(-7)));
+                Assert.Single(await statusReads.ListJobs());
+                Assert.Single(await statusReads.ListJobRuns(["ArmorJob.AddColorArrays"], 50));
+                Assert.Single(await statusReads.ListUptimeDays(day.AddDays(-89), day));
+                Assert.Single(await statusReads.CountSampleDays(day, day.AddDays(1)));
+                Assert.Equal(1, (await statusReads.CountSamples(day, day.AddDays(1))).discord_minutes);
+                Assert.Equal(day.AddDays(-1), (await statusReads.FirstRecord()).first_day);
+
+                // The servers pages' reads, of the bot's copy and of the website's settings
+                await db.BotGuilds().SaveGuild(new BotGuild { guild_id = 1000000000000000005, name = "Test Server", available = true },
+                    [new BotGuildChannel { channel_id = 2, name = "general", type = GuildChannelType.Text, can_view = true }], Noon, 1, 1);
+                await db.BotGuilds().SaveMemberCount(1000000000000000005, 10, day, Noon);
+                await db.Guilds().SaveGuild(new Guild { guild_id = 1000000000000000005, armor_channel_id = 2 });
+
+                var guildReads = new BotGuildReads(factory, names);
+                var settings = new GuildSettingsReads(factory);
+                Assert.Single(await guildReads.ListGuilds());
+                Assert.NotNull(await guildReads.GetGuild(1000000000000000005));
+                Assert.Single(await guildReads.ListChannels(1000000000000000005));
+                Assert.Single(await guildReads.FindChannels([2, 3]));
+                Assert.Single(await guildReads.ListGuildEvents(1000000000000000005, 50));
+                Assert.Single(await guildReads.ListMemberDays(1000000000000000005, day.AddDays(-89), day.AddDays(1)));
+                Assert.Single(await guildReads.MemberTrends(day.AddDays(-30)));
+                Assert.Equal(2UL, Assert.Single(await settings.ListSettings()).armor_channel_id);
+                Assert.NotNull(await settings.GetSettings(1000000000000000005));
+
                 var health = new DatabaseHealthData(factory);
                 Assert.True(await health.Answers(DBConnectionName.Armor, TimeSpan.FromSeconds(5)).WaitAsync(CallLimit, Token));
                 Assert.True(await health.Answers(DBConnectionName.Bot, TimeSpan.FromSeconds(5)).WaitAsync(CallLimit, Token));
@@ -372,31 +432,39 @@ namespace DataAccessLibrary.Tests
             { "add to schema_version", $"INSERT INTO {Bot}.schema_version (version, name, checksum, applied_at) VALUES (9999, 'x', 'x', NOW(3))" },
             { "change schema_version", $"UPDATE {Bot}.schema_version SET name = 'changed' WHERE 1 = 0" },
             { "delete from schema_version", $"DELETE FROM {Bot}.schema_version WHERE 1 = 0" },
-            // The bot's status and history, which only the bot writes, and which the dashboard can't read until a pull
-            // request gives it the right for its status pages
-            { "read bot_status", $"SELECT * FROM {Bot}.bot_status" },
+            // The bot's status and history, which only the bot writes, and which the status pages only read
+            { "add to bot_status", $"INSERT INTO {Bot}.bot_status (id, run_id, started_at, heartbeat_at, discord_state, steam_state) VALUES (2, 1, NOW(3), NOW(3), 'connected', 'offline')" },
             { "change bot_status", $"UPDATE {Bot}.bot_status SET version = NULL WHERE 1 = 0" },
+            { "delete from bot_status", $"DELETE FROM {Bot}.bot_status WHERE 1 = 0" },
             { "add to bot_events", $"INSERT INTO {Bot}.bot_events (run_id, seq, at, kind, level) VALUES (1, 1, NOW(3), 'bot.started', 'info')" },
-            { "read bot_events", $"SELECT * FROM {Bot}.bot_events" },
+            { "change bot_events", $"UPDATE {Bot}.bot_events SET detail = NULL WHERE 1 = 0" },
             { "delete from bot_events", $"DELETE FROM {Bot}.bot_events WHERE 1 = 0" },
-            { "read job_status", $"SELECT * FROM {Bot}.job_status" },
+            { "add to job_status", $"INSERT INTO {Bot}.job_status (job, schedule, updated_at) VALUES ('X.Y', '0 * * * *', NOW(3))" },
+            { "change job_status", $"UPDATE {Bot}.job_status SET last_detail = NULL WHERE 1 = 0" },
             { "delete from job_status", $"DELETE FROM {Bot}.job_status WHERE 1 = 0" },
-            { "read job_runs", $"SELECT * FROM {Bot}.job_runs" },
+            { "add to job_runs", $"INSERT INTO {Bot}.job_runs (run_id, seq, job, started_at, result) VALUES (1, 1, 'X.Y', NOW(3), 'ok')" },
             { "change job_runs", $"UPDATE {Bot}.job_runs SET detail = NULL WHERE 1 = 0" },
-            { "read uptime_samples", $"SELECT * FROM {Bot}.uptime_samples" },
+            { "delete from job_runs", $"DELETE FROM {Bot}.job_runs WHERE 1 = 0" },
             { "add to uptime_samples", $"INSERT INTO {Bot}.uptime_samples (minute, discord_up, steam_up) VALUES (NOW(), 1, 1)" },
-            { "read uptime_daily", $"SELECT * FROM {Bot}.uptime_daily" },
+            { "change uptime_samples", $"UPDATE {Bot}.uptime_samples SET discord_up = 1 WHERE 1 = 0" },
+            { "delete from uptime_samples", $"DELETE FROM {Bot}.uptime_samples WHERE 1 = 0" },
+            { "add to uptime_daily", $"INSERT INTO {Bot}.uptime_daily (day, sampled_minutes, discord_minutes, steam_minutes) VALUES (CURDATE(), 1, 1, 1)" },
+            { "change uptime_daily", $"UPDATE {Bot}.uptime_daily SET discord_minutes = 1 WHERE 1 = 0" },
             { "delete from uptime_daily", $"DELETE FROM {Bot}.uptime_daily WHERE 1 = 0" },
-            // The bot's copy of its servers, which only the bot writes, and which the dashboard can't read until a pull
-            // request gives it the right for its servers pages
-            { "read guilds", $"SELECT * FROM {Bot}.guilds" },
+            // The bot's copy of its servers, which only the bot writes, and which the servers pages only read
+            { "add to guilds", $"INSERT INTO {Bot}.guilds (guild_id, name, first_seen_at, available, bot_administrator, bot_permissions, updated_at) VALUES (1, 'x', NOW(3), 1, 0, 0, NOW(3))" },
             { "change guilds", $"UPDATE {Bot}.guilds SET name = 'changed' WHERE 1 = 0" },
-            { "read guild_channels", $"SELECT * FROM {Bot}.guild_channels" },
+            { "delete from guilds", $"DELETE FROM {Bot}.guilds WHERE 1 = 0" },
+            { "truncate guilds", $"TRUNCATE TABLE {Bot}.guilds" },
+            { "add to guild_channels", $"INSERT INTO {Bot}.guild_channels (channel_id, guild_id, name, type, `position`, can_view, can_send, can_embed, updated_at) VALUES (1, 1, 'x', 'text', 0, 1, 1, 1, NOW(3))" },
+            { "change guild_channels", $"UPDATE {Bot}.guild_channels SET can_send = 1 WHERE 1 = 0" },
             { "delete from guild_channels", $"DELETE FROM {Bot}.guild_channels WHERE 1 = 0" },
             { "add to guild_events", $"INSERT INTO {Bot}.guild_events (run_id, seq, guild_id, at, kind) VALUES (1, 1, 1, NOW(3), 'joined')" },
-            { "read guild_events", $"SELECT * FROM {Bot}.guild_events" },
-            { "read guild_daily", $"SELECT * FROM {Bot}.guild_daily" },
+            { "change guild_events", $"UPDATE {Bot}.guild_events SET detail = NULL WHERE 1 = 0" },
+            { "delete from guild_events", $"DELETE FROM {Bot}.guild_events WHERE 1 = 0" },
             { "add to guild_daily", $"INSERT INTO {Bot}.guild_daily (day, guild_id, member_count) VALUES (CURDATE(), 1, 1)" },
+            { "change guild_daily", $"UPDATE {Bot}.guild_daily SET member_count = 1 WHERE 1 = 0" },
+            { "delete from guild_daily", $"DELETE FROM {Bot}.guild_daily WHERE 1 = 0" },
             // Structure, in both databases
             { "create a table in MinerBot's database", $"CREATE TABLE {Bot}.rights_check (id INT)" },
             { "create a table in the website's database", $"CREATE TABLE {Site}.rights_check (id INT)" },
@@ -415,10 +483,8 @@ namespace DataAccessLibrary.Tests
             { "create a temporary table in MinerBot's database", $"CREATE TEMPORARY TABLE {Bot}.rights_check (id INT)" },
             { "create a temporary table in the website's database", $"CREATE TEMPORARY TABLE {Site}.rights_check (id INT)" },
             // The website's tables: armor is read and only its status changed, the blacklist is read, added to and deleted
-            // from and four of its columns changed, but never an entry's account, the servers' one column is read, and
+            // from and four of its columns changed, but never an entry's account, the servers' settings are read, and
             // nothing else is read or written
-            { "read another column of the servers", $"SELECT armor_channel_id FROM {Site}.ihvph_discord_servers" },
-            { "read every column of the servers", $"SELECT * FROM {Site}.ihvph_discord_servers" },
             { "add armor", $"INSERT INTO {Site}.ihvph_armor_styles (Author) VALUES ('x')" },
             { "change an armor's name", $"UPDATE {Site}.ihvph_armor_styles SET ArmorName = 'x' WHERE 1 = 0" },
             { "change an armor's ID", $"UPDATE {Site}.ihvph_armor_styles SET ID = ID WHERE 1 = 0" },
@@ -482,7 +548,7 @@ namespace DataAccessLibrary.Tests
         }
 
         // The repositories later pull requests use are refused, which records what the server channels page and later ones
-        // must add to the file
+        // must add to the file: the servers' settings are read since the status pages, but never saved or deleted
         [Fact]
         public async Task RepositoriesNotUsedYetAreRefused()
         {
@@ -492,8 +558,8 @@ namespace DataAccessLibrary.Tests
 
                 var calls = new (string What, Func<Task> Call)[]
                 {
-                    ("GuildData.GetAllGuilds", () => new GuildData(factory).GetAllGuilds()),
-                    ("GuildData.SaveGuild", () => new GuildData(factory).SaveGuild(new Guild { guild_id = 1000000000000000005, armor_channel_id = 1 }))
+                    ("GuildData.SaveGuild", () => new GuildData(factory).SaveGuild(new Guild { guild_id = 1000000000000000005, armor_channel_id = 1 })),
+                    ("GuildData.DeleteGuild", () => new GuildData(factory).DeleteGuild(1000000000000000005))
                 };
 
                 foreach (var (what, call) in calls)
@@ -501,6 +567,55 @@ namespace DataAccessLibrary.Tests
                     var refused = await Assert.ThrowsAsync<MySqlException>(call);
                     Assert.True(Refusals.Contains(refused.Number), $"{what} failed with {refused.Number}, which isn't a refusal");
                 }
+            });
+        }
+
+        // The bot's own writes of its status, history and servers, each through the bot's own code, are refused: the
+        // dashboard reads them and nothing more. The servers' save and leave start with a locked read, which SELECT allows,
+        // and their transactions roll back at the first write.
+        [Fact]
+        public async Task TheBotsWritesAreRefused()
+        {
+            await WithLoginAsync(async (db, password) =>
+            {
+                await db.ClearAsync(MariaDbFixture.StatusTable, MariaDbFixture.EventTable, MariaDbFixture.JobRunTable, MariaDbFixture.JobStatusTable,
+                    MariaDbFixture.SampleTable, MariaDbFixture.DailyTable, MariaDbFixture.BotGuildTable, MariaDbFixture.BotChannelTable, MariaDbFixture.GuildEventTable,
+                    MariaDbFixture.GuildDailyTable);
+
+                var connections = Connections(db, password);
+                var factory = new SQLConnectionFactory(connections);
+                var names = new DatabaseNames(connections);
+                var status = new BotStatusData(factory, names);
+                var guilds = new BotGuildData(factory, names);
+                var retention = new RetentionData(factory, names);
+                var day = Noon.Date;
+
+                var calls = new (string What, Func<Task> Call)[]
+                {
+                    ("BotStatusData.SaveStatus", () => status.SaveStatus(new BotStatus { run_id = 1, started_at = Noon, heartbeat_at = Noon, discord_state = DiscordState.Connected, steam_state = SteamState.LoggedOn })),
+                    ("BotStatusData.AddEvents", () => status.AddEvents([new BotEvent { run_id = 1, seq = 1, at = Noon, kind = "bot.started", level = EventLevel.Info }])),
+                    ("BotStatusData.SaveJobRuns", () => status.SaveJobRuns([new JobRun { run_id = 1, seq = 1, job = "ArmorJob.AddColorArrays", started_at = Noon, result = JobResult.Ok }])),
+                    ("BotStatusData.SaveJobStatus", () => status.SaveJobStatus([new JobStatus { job = "ArmorJob.AddColorArrays", schedule = "0 * * * *", updated_at = Noon }])),
+                    ("BotStatusData.DeleteOtherJobs", () => status.DeleteOtherJobs(["ArmorJob.AddColorArrays"])),
+                    ("BotStatusData.SaveSamples", () => status.SaveSamples([new UptimeSample { minute = day }])),
+                    ("BotGuildData.SaveGuild", () => guilds.SaveGuild(new BotGuild { guild_id = 1, name = "Test Server" }, [], Noon, 1, 1)),
+                    ("BotGuildData.LeaveGuild", () => guilds.LeaveGuild(1, Noon, 1, 2, null)),
+                    ("BotGuildData.MarkUnavailable", () => guilds.MarkUnavailable([1], Noon)),
+                    ("BotGuildData.SaveMemberCount", () => guilds.SaveMemberCount(1, 10, day, Noon)),
+                    ("RetentionData.TotalUptimeDays", () => retention.TotalUptimeDays(day.AddDays(-1), day)),
+                    ("RetentionData.DeleteEvents", () => retention.DeleteEvents(Noon, 1)),
+                    ("RetentionData.DeleteSamples", () => retention.DeleteSamples(day, 1))
+                };
+
+                foreach (var (what, call) in calls)
+                {
+                    var refused = await Assert.ThrowsAsync<MySqlException>(call);
+                    Assert.True(Refusals.Contains(refused.Number), $"{what} failed with {refused.Number}, which isn't a refusal");
+                }
+
+                foreach (var table in new[] { MariaDbFixture.StatusTable, MariaDbFixture.EventTable, MariaDbFixture.JobRunTable, MariaDbFixture.JobStatusTable,
+                    MariaDbFixture.SampleTable, MariaDbFixture.DailyTable, MariaDbFixture.BotGuildTable, MariaDbFixture.GuildEventTable, MariaDbFixture.GuildDailyTable })
+                    Assert.Equal(0, (await db.RootQueryAsync<long>($"SELECT COUNT(*) FROM {table}")).Single());
             });
         }
 
@@ -528,12 +643,14 @@ namespace DataAccessLibrary.Tests
                 await db.RootExecuteAsync($"GRANT DELETE ON {Bot}.armor_reviews TO {Grantee}");
                 await db.RootExecuteAsync($"GRANT ALL PRIVILEGES ON {Bot}.* TO {Grantee}");
                 await db.RootExecuteAsync($"GRANT SELECT (armor_channel_id) ON {Site}.ihvph_discord_servers TO {Grantee}");
+                await db.RootExecuteAsync($"GRANT INSERT ON {Bot}.bot_status TO {Grantee}");
                 await db.RootExecuteAsync($"ALTER USER {Grantee} WITH MAX_USER_CONNECTIONS 100 MAX_STATEMENT_TIME 0");
 
                 var added = await RightsAsync(db);
                 Assert.Contains("table DELETE minerbot_db armor_reviews", added);
                 Assert.Contains("schema SELECT minerbot_db", added);
                 Assert.Contains("column SELECT website_db ihvph_discord_servers armor_channel_id", added);
+                Assert.Contains("table INSERT minerbot_db bot_status", added);
                 Assert.Contains("limits 100 0.000000 0 0 0", added);
 
                 await ApplyAsync(db);
@@ -551,7 +668,7 @@ namespace DataAccessLibrary.Tests
             var file = DeployFile("dashboard-rights.sql");
             var tables = TableNames().Matches(file).Select(match => (Database: Database(match.Groups[1].Value), Table: match.Groups[2].Value)).Distinct().ToList();
 
-            Assert.Equal(6, tables.Count);
+            Assert.Equal(16, tables.Count);
 
             foreach (var (database, table) in tables)
             {

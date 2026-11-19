@@ -247,8 +247,9 @@ namespace MinerBot.Dashboard.Tests
                 var nav = System.Text.RegularExpressions.Regex.Match(await reviewer.Client.GetStringAsync("/admin", Token),
                     "<nav aria-label=\"Dashboard\" class=\"site-nav\">(.*?)</nav>", System.Text.RegularExpressions.RegexOptions.Singleline).Groups[1].Value;
 
-                Assert.Equal(["<a href=\"/admin\">Overview</a>", "<a href=\"/admin/armor\">Armor</a>", "<a href=\"/admin/blacklist\">Blacklist</a>",
-                    "<a href=\"/admin/audit\">Audit log</a>"], nav.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+                Assert.Equal(["<a href=\"/admin\">Overview</a>", "<a href=\"/admin/bot\">Bot</a>", "<a href=\"/admin/servers\">Servers</a>",
+                    "<a href=\"/admin/armor\">Armor</a>", "<a href=\"/admin/blacklist\">Blacklist</a>", "<a href=\"/admin/audit\">Audit log</a>"],
+                    nav.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
             }
         }
 

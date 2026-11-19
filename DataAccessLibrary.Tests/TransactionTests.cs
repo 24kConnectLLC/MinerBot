@@ -247,8 +247,26 @@ namespace DataAccessLibrary.Tests
             await status.SaveSamples([new UptimeSample { minute = day.AddDays(-1), discord_up = true, steam_up = true }]);
 
             Assert.NotNull(await status.GetStatus());
+
+            // And the dashboard's reads of them, both statements of a page and both halves of the record's start included
+            var statusReads = new BotStatusReads(factory, names);
+            Assert.Equal(1UL, (await statusReads.GetStatus())?.run_id);
+            var events = await statusReads.ListEvents(new EventQuery());
+            Assert.Equal(1, events.Total);
+            Assert.Single(events.Rows);
+            Assert.NotNull(await statusReads.LatestEvent("bot.started"));
+            Assert.NotNull(await statusReads.FirstEventAfter("bot.started", null));
+            Assert.Single(await statusReads.CountEvents(["bot.started"], Noon.AddDays(-30), Noon.AddDays(-7)));
+            Assert.Equal(2, (await statusReads.ListJobs()).Count);
+            Assert.Single(await statusReads.ListJobRuns(["ArmorJob.AddColorArrays"], 50));
+            Assert.Single(await statusReads.CountSampleDays(day.AddDays(-1), day));
+            Assert.Equal(1, (await statusReads.CountSamples(day.AddDays(-1), day)).sampled_minutes);
+            Assert.Equal(day.AddDays(-1), (await statusReads.FirstRecord()).first_minute);
+
             Assert.Equal(1, await status.DeleteOtherJobs(["ArmorJob.AddColorArrays"]));
             Assert.Equal(1, await retention.TotalUptimeDays(day.AddDays(-1), day));
+            Assert.Single(await statusReads.ListUptimeDays(day.AddDays(-1), day));
+            Assert.Equal(day.AddDays(-1), (await statusReads.FirstRecord()).first_day);
             Assert.Equal(1, await retention.DeleteSamples(day, 10));
             Assert.Equal(1, await retention.DeleteEvents(Noon.AddSeconds(1), 10));
             Assert.Equal(1, await retention.DeleteJobRuns(Noon.AddSeconds(1), 10));
@@ -270,6 +288,17 @@ namespace DataAccessLibrary.Tests
             Assert.Equal(1, await guilds.MarkUnavailable([1], Noon));
             await guilds.SaveMemberCount(1, 10, day, Noon);
             Assert.Equal(1, await CountAsync($"{quoted}.guild_channels"));
+
+            // And the dashboard's reads of it, before the leave deletes the channels
+            var guildReads = new BotGuildReads(factory, names);
+            Assert.Equal("Test Server", Assert.Single(await guildReads.ListGuilds()).name);
+            Assert.NotNull(await guildReads.GetGuild(1));
+            Assert.Single(await guildReads.ListChannels(1));
+            Assert.Single(await guildReads.FindChannels([2]));
+            Assert.Single(await guildReads.ListGuildEvents(1, 50));
+            Assert.Single(await guildReads.ListMemberDays(1, day, day.AddDays(1)));
+            Assert.Single(await guildReads.MemberTrends(day));
+
             Assert.True(await guilds.LeaveGuild(1, Noon.AddSeconds(1), 1, 2, null));
             Assert.Equal(2, await retention.DeleteGuildEvents(Noon.AddSeconds(2), 10));
 

@@ -1,0 +1,376 @@
+@page
+@model BotStatusModel
+@using System.Globalization
+@using MinerBot.Dashboard.Status
+@*
+    Read-only, from the tables the bot writes, so it works while the bot is down. The status box refreshes itself through
+    refresh.js, and the page works without it. The events' filter is a GET form, so a filtered page is an address that can
+    be kept; its selects and box send nothing the page would refuse. Every event's detail is shown to the Owner and the
+    Admins alike, each message the bot sent the owner included, up to the 300 characters a detail keeps, so no detail
+    may hold what only the Owner sees, such as a visitor's address. No table here holds a link, so each one's wrapper
+    takes the keyboard's focus itself, as a group named by its heading, and a keyboard can scroll one too wide for a
+    phone: Safari, unlike Chrome and Firefox, doesn't make a scrolling box focusable on its own.
+*@
+@{
+    ViewData["Title"] = "Bot status";
+
+    // The jobs' and the events' tables each hold a time, a result and a detail side by side
+    ViewData["Wide"] = true;
+    var now = Model.Box.Now;
+    var status = Model.Box.Status;
+    var filters = Model.Filters;
+}
+@section Scripts {
+    <script src="~/js/refresh.js" asp-append-version="true" defer></script>
+}
+<h1>Bot status</h1>
+<p>MinerBot as it records itself in its own database. Times are in UTC.</p>
+
+<section aria-labelledby="status">
+    <h2 id="status">Status</h2>
+    <div data-refresh="@StatusBoxes.Address" data-fragment="@StatusBoxes.Fragment">
+        <partial name="_StatusBox" model="Model.Box" />
+    </div>
+    <p class="muted" role="status" data-refresh-stopped="Not updating: reload the page."></p>
+</section>
+
+<section aria-labelledby="version">
+    <h2 id="version">Version and starts</h2>
+    <dl class="details">
+        <dt>Version</dt>
+        <dd>
+            @if (status == null)
+            {
+                <text>Not recorded</text>
+            }
+            else if (status.version is not { } version)
+            {
+                <text>Not recorded: the image wasn't built from a commit.</text>
+            }
+            else if (BotStates.CommitLink(version) is { } commit)
+            {
+                <a href="@commit" class="address">@BotStates.ShortCommit(version)</a> <span class="muted">(<span class="address">@version</span>)</span>
+            }
+            else
+            {
+                <span class="address">@version</span>
+            }
+        </dd>
+        <dt>This run started</dt>
+        <dd>@if (status == null) {<text>Not recorded</text>} else {<text>@TimeWords.Utc(status.started_at), @TimeWords.Ago(status.started_at, now)</text>}</dd>
+        <dt>Starts</dt>
+        <dd>@TimeWords.Count(Model.StartsWeek, "start") in the last 7 days, @TimeWords.Count(Model.StartsMonth, "start") in the last 30</dd>
+        <dt>Ends without a clean stop</dt>
+        <dd>@Model.UncleanWeek.ToString("N0", CultureInfo.InvariantCulture) in the last 7 days, @Model.UncleanMonth.ToString("N0", CultureInfo.InvariantCulture) in the last 30</dd>
+    </dl>
+    <p class="muted">The dashboard can't see Docker, so these come from the bot's own records: a start for each time it started, and an end without a clean stop for each run that crashed, was killed or lost its server, found when it next started.</p>
+</section>
+
+<section aria-labelledby="uptime">
+    <h2 id="uptime">Uptime</h2>
+    <p>How much of each period the bot ran connected to Discord, and logged on to Steam beside it. A minute the bot wasn't running counts as down, from the first minute it recorded on; before that there's no record.</p>
+    <div class="table-wrap" tabindex="0" role="group" aria-labelledby="uptime">
+        <table>
+            <thead>
+                <tr>
+                    <th scope="col">Period</th>
+                    <th scope="col">Discord</th>
+                    <th scope="col">Steam</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var period in Model.Periods)
+                {
+                    <tr>
+                        <th scope="row">@period.Label</th>
+                        <td>
+                            @UptimeDays.Percent(period.DiscordMinutes, period.Minutes)
+                            @if (period.HasRecord)
+                            {
+                                <span class="muted">(@TimeWords.Count(period.Minutes - period.DiscordMinutes, "minute") down)</span>
+                            }
+                        </td>
+                        <td>
+                            @UptimeDays.Percent(period.SteamMinutes, period.Minutes)
+                            @if (period.HasRecord)
+                            {
+                                <span class="muted">(@TimeWords.Count(period.Minutes - period.SteamMinutes, "minute") down)</span>
+                            }
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+
+    <h3>The last 90 days</h3>
+    <p class="muted">One cell for each UTC day, the oldest first and today last, by Discord's uptime, and the lower the uptime, the shorter the cell: <span class="strip-swatch strip-top"></span> @UptimeDays.BandLabel("top"), <span class="strip-swatch strip-good"></span> @UptimeDays.BandLabel("good"), <span class="strip-swatch strip-fair"></span> @UptimeDays.BandLabel("fair"), <span class="strip-swatch strip-poor"></span> @UptimeDays.BandLabel("poor") and <span class="strip-swatch strip-none"></span> @UptimeDays.BandLabel("none"). Point at a day for its numbers, or open the table below.</p>
+    @* Hidden from screen readers, which get the table instead, since a cell's title reaches neither them nor a keyboard *@
+    <ol class="strip" aria-hidden="true">
+        @foreach (var day in Model.Days)
+        {
+            <li class="strip-@UptimeDays.Band(day)" title="@UptimeDays.Tooltip(day)"></li>
+        }
+    </ol>
+    <details>
+        <summary id="uptime-days">Each day's uptime, as a table</summary>
+        <div class="table-wrap" tabindex="0" role="group" aria-labelledby="uptime-days">
+            <table>
+                <thead>
+                    <tr>
+                        <th scope="col">Day</th>
+                        <th scope="col">Discord</th>
+                        <th scope="col">Steam</th>
+                        <th scope="col">Minutes</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var day in Model.Days.Reverse())
+                    {
+                        <tr>
+                            <th scope="row" class="audit-when">@TimeWords.Day(day.Day)</th>
+                            @if (day.HasRecord)
+                            {
+                                <td>@UptimeDays.Percent(day.DiscordMinutes, day.Minutes) <span class="muted">(@UptimeDays.BandLabel(UptimeDays.Band(day)))</span></td>
+                                <td>@UptimeDays.Percent(day.SteamMinutes, day.Minutes)</td>
+                                <td>@day.Minutes.ToString("N0", CultureInfo.InvariantCulture)</td>
+                            }
+                            else
+                            {
+                                <td colspan="3">No record</td>
+                            }
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </details>
+</section>
+
+<section aria-labelledby="jobs">
+    <h2 id="jobs">Jobs</h2>
+    @if (Model.Jobs.Count == 0)
+    {
+        <p>No jobs are recorded yet: the bot records them as it starts.</p>
+    }
+    else
+    {
+        <p>Schedules are in US Eastern time, as the bot runs them.</p>
+        <div class="table-wrap" tabindex="0" role="group" aria-labelledby="jobs">
+            <table>
+                <thead>
+                    <tr>
+                        <th scope="col">Job</th>
+                        <th scope="col">Schedule</th>
+                        <th scope="col">Last run</th>
+                        <th scope="col">Next run</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var row in Model.Jobs)
+                    {
+                        var job = row.Job;
+                        <tr>
+                            <th scope="row">
+                                <p class="cell-line">@JobWords.Name(job.job)</p>
+                                <p class="cell-line muted address">@job.job</p>
+                            </th>
+                            <td>
+                                @if (JobWords.Schedule(job.schedule) is { } words)
+                                {
+                                    <p class="cell-line">@words</p>
+                                }
+                                <p class="cell-line muted"><code>@job.schedule</code></p>
+                            </td>
+                            <td>
+                                @if (job.last_started_at is { } started)
+                                {
+                                    <p class="cell-line">
+                                        <span class="marker @(JobWords.IsProblem(job.last_result) ? "marker-block" : "marker-quiet")">@JobWords.Result(job.last_result)</span>
+                                        @TimeWords.Utc(started)@if (job.last_duration_ms is { } took) {<text>, took @TimeWords.Duration(took)</text>}
+                                    </p>
+                                    @if (!string.IsNullOrEmpty(job.last_detail))
+                                    {
+                                        <p class="cell-line muted">@job.last_detail</p>
+                                    }
+                                }
+                                else
+                                {
+                                    <text>No run yet</text>
+                                }
+                            </td>
+                            <td>
+                                @if (job.next_run_at is { } next)
+                                {
+                                    <text>@TimeWords.Utc(next), @TimeWords.Until(next, now)</text>
+                                }
+                                else
+                                {
+                                    <text>Not recorded</text>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+        @for (var index = 0; index < Model.Jobs.Count; index++)
+        {
+            var row = Model.Jobs[index];
+            var runs = "runs-" + (index + 1).ToString(CultureInfo.InvariantCulture);
+            <details>
+                <summary id="@runs">The last runs of @JobWords.Name(row.Job.job) (@row.Runs.Count.ToString("N0", CultureInfo.InvariantCulture))</summary>
+                @if (row.Runs.Count == 0)
+                {
+                    <p>No run is recorded.</p>
+                }
+                else
+                {
+                    <div class="table-wrap" tabindex="0" role="group" aria-labelledby="@runs">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th scope="col">Started</th>
+                                    <th scope="col">Result</th>
+                                    <th scope="col">Took</th>
+                                    <th scope="col">Detail</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var run in row.Runs)
+                                {
+                                    <tr>
+                                        <td class="audit-when">@TimeWords.Utc(run.started_at)</td>
+                                        <td>@JobWords.Result(run.result)</td>
+                                        <td>@(run.duration_ms is { } took ? TimeWords.Duration(took) : run.ended_at == null ? "Still running" : "Not recorded")</td>
+                                        <td>@run.detail</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                }
+            </details>
+        }
+    }
+</section>
+
+<section aria-labelledby="events">
+    <h2 id="events">Events</h2>
+    <form method="get" action="/admin/bot#events" class="filters" role="search" aria-label="Filter the events">
+        <div class="fields">
+            <div class="field">
+                <label for="level">Level</label>
+                <select id="level" name="level">
+                    <option value="">Any level</option>
+                    @foreach (var word in BotStatusModel.Levels)
+                    {
+                        @if (word.Kind == filters.Level)
+                        {
+                            <option value="@word.Kind" selected>@word.Label</option>
+                        }
+                        else
+                        {
+                            <option value="@word.Kind">@word.Label</option>
+                        }
+                    }
+                </select>
+            </div>
+            <div class="field field-action">
+                <label for="kind">What</label>
+                <select id="kind" name="kind">
+                    <option value="">Anything</option>
+                    @foreach (var word in BotStatusModel.Kinds)
+                    {
+                        @if (word.Kind == filters.Kind)
+                        {
+                            <option value="@word.Kind" selected>@word.Label</option>
+                        }
+                        else
+                        {
+                            <option value="@word.Kind">@word.Label</option>
+                        }
+                    }
+                </select>
+            </div>
+        </div>
+        <div class="field-check">
+            @if (filters.Routine)
+            {
+                <input type="checkbox" id="routine" name="routine" value="@BotStatusModel.RoutineShown" checked aria-describedby="routine-hint" />
+            }
+            else
+            {
+                <input type="checkbox" id="routine" name="routine" value="@BotStatusModel.RoutineShown" aria-describedby="routine-hint" />
+            }
+            <label for="routine">Show routine reconnects</label>
+            <p id="routine-hint" class="muted">Discord asks the bot to reconnect now and then, and it does so at once. The disconnects Discord asks for are left out unless this is ticked, though the Connected to Discord row after each one still shows.</p>
+        </div>
+        <div class="search-row">
+            <button type="submit" class="button">Filter</button>
+            @if (filters.Any)
+            {
+                <a href="/admin/bot#events">Clear the filters</a>
+            }
+        </div>
+    </form>
+
+    @if (Model.Events.Count == 0)
+    {
+        @if (Model.PageNumber > 1)
+        {
+            <p>There's nothing on page @Model.PageNumber. <a href="@Model.Link()">Go to the first page</a>.</p>
+        }
+        else if (filters.Narrows)
+        {
+            <p>No event matches these filters.</p>
+        }
+        else
+        {
+            <p>No events are recorded.</p>
+        }
+    }
+    else
+    {
+        <p>@Model.Summary</p>
+        <div class="table-wrap" tabindex="0" role="group" aria-labelledby="events">
+            <table>
+                <thead>
+                    <tr>
+                        <th scope="col">When</th>
+                        <th scope="col">Level</th>
+                        <th scope="col">What</th>
+                        <th scope="col">Detail</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var row in Model.Events)
+                    {
+                        var routine = EventWords.IsRoutine(row.kind, row.detail);
+                        <tr>
+                            <td class="audit-when">@TimeWords.Utc(row.at)</td>
+                            <td class="@(routine ? "muted" : null)">@EventWords.LevelLabel(row.level, row.kind, row.detail)</td>
+                            <td>@EventWords.Label(row.kind, row.detail)</td>
+                            <td>@row.detail</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+
+    @if (Model.PageCount > 1 && Model.PageNumber <= Model.PageCount)
+    {
+        <nav aria-label="Pages of events" class="pager">
+            @if (Model.PageNumber > 1)
+            {
+                <a href="@Model.Link(page: Model.PageNumber - 1)">Previous page</a>
+            }
+            <span>Page @Model.PageNumber of @Model.PageCount</span>
+            @if (Model.PageNumber < Model.PageCount)
+            {
+                <a href="@Model.Link(page: Model.PageNumber + 1)">Next page</a>
+            }
+        </nav>
+    }
+</section>

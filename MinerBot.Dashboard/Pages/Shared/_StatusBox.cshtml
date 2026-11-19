@@ -1,0 +1,83 @@
+@model StatusBox
+@using System.Globalization
+@using MinerBot.Dashboard.Status
+@*
+    The status box, which the Overview and the Bot status page show, and which the Overview's Status handler sends again
+    for refresh.js. No heading, since it sits in the page's own section. Discord's and Steam's states are as the bot last
+    recorded them, which is only current while it's online. Never the token itself: only the day it ends. Each line's
+    sentences are joined here, since Razor writes nothing between two text blocks.
+*@
+@{
+    var status = Model.Status;
+    var now = Model.Now;
+    var stateMarker = Model.State switch
+    {
+        BotState.Online => "marker-ok",
+        BotState.Offline => "marker-block",
+        _ => "marker-warn"
+    };
+    var asRecorded = Model.State == BotState.Online ? "" : " (as MinerBot last recorded it)";
+
+    var checkedIn = status == null ? "Never checked in."
+        : Model.State == BotState.Stopped && status.stopped_at is { } stopped ? $"Stopped {TimeWords.Ago(stopped, now)}, at {TimeWords.Utc(stopped)}."
+        : $"Last checked in {TimeWords.Ago(status.heartbeat_at, now)}, at {TimeWords.Utc(status.heartbeat_at)}.";
+
+    var discord = new List<string>();
+    var steam = new List<string>();
+    int? daysLeft = null;
+
+    if (status != null)
+    {
+        discord.Add(BotStates.DiscordLabel(status.discord_state) + (status.discord_since is { } discordSince ? $" since {TimeWords.Utc(discordSince)}, {TimeWords.Ago(discordSince, now)}" : "") + asRecorded + ".");
+
+        if (status.discord_latency_ms is { } latency)
+            discord.Add($"Latency {latency.ToString(CultureInfo.InvariantCulture)} ms.");
+
+        if (status.discord_guilds is { } servers)
+            discord.Add($"In {TimeWords.Count(servers, "server")}.");
+
+        steam.Add(BotStates.SteamLabel(status.steam_state) + (status.steam_since is { } steamSince ? $" since {TimeWords.Utc(steamSince)}, {TimeWords.Ago(steamSince, now)}" : "") + asRecorded + ".");
+
+        if (!string.IsNullOrEmpty(status.steam_last_result))
+            steam.Add($"Steam's last answer: {status.steam_last_result}.");
+
+        daysLeft = BotStates.TokenDaysLeft(status, now);
+
+        if (daysLeft == null)
+            steam.Add("No end date is recorded for the sign-in token.");
+        else if (daysLeft > BotStates.TokenWarningDays)
+            steam.Add($"The sign-in token ends on {TimeWords.Day(status.steam_token_expires!.Value)}, in {TimeWords.Count(daysLeft.Value, "day")}.");
+    }
+
+    // A token near its end, or past it, in the warning's colour
+    var tokenSoon = daysLeft is { } days && days <= BotStates.TokenWarningDays
+        ? days < 0 ? $"The sign-in token ended on {TimeWords.Day(status!.steam_token_expires!.Value)}."
+        : $"The sign-in token ends on {TimeWords.Day(status!.steam_token_expires!.Value)}, {(days == 0 ? "today" : "in " + TimeWords.Count(days, "day"))}."
+        : null;
+}
+<dl class="details status-box">
+    <dt>MinerBot</dt>
+    <dd>
+        <span class="marker @stateMarker">@BotStates.Label(Model.State)</span> @checkedIn
+        <span class="muted">@BotStates.Meaning(Model.State, status)</span>
+    </dd>
+    @if (status != null)
+    {
+        <dt>Discord</dt>
+        <dd>@string.Join(" ", discord)</dd>
+        <dt>Steam</dt>
+        <dd>@string.Join(" ", steam) @if (tokenSoon != null) {<span class="warn-text">@tokenSoon</span>}</dd>
+    }
+    <dt>Website database</dt>
+    <dd>
+        @if (Model.WebsiteAnswers)
+        {
+            <span class="marker marker-ok">Answering</span>
+        }
+        else
+        {
+            <span class="marker marker-block">Not answering</span> <span class="muted">The dashboard couldn't use it just now: its own check of the connection failed or got no answer within 3 seconds.</span>
+        }
+    </dd>
+</dl>
+<p class="muted">As of @TimeWords.Utc(now).</p>

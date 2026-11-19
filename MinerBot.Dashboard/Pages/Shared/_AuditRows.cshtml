@@ -3,12 +3,19 @@
 @using MinerBot.Dashboard.Armor
 @using MinerBot.Dashboard.Audit
 @*
-    Audit rows as a table, for the audit page and a blacklist entry's history. Names, JSON values and details go through
-    RevealedText, which encodes them inside a bdi, and every link is one AuditRows made from a number it parsed. The
-    address column is there only when the page shows addresses, which only the Owner's audit page does; anyone else's
-    rows hold none.
+    Audit rows as a table, for the audit page, a blacklist entry's history, the Overview's latest changes and each server's
+    page. Names, JSON values and details go through RevealedText, which encodes them inside a bdi, and every link is one
+    AuditRows made from a number it parsed. The address column is there only when the page shows addresses, which the
+    audit page, the Overview and a server's page do for the Owner alone; anyone else's rows, and a blacklist entry's
+    history, hold none. When no row holds a link, as when the latest changes are all sign-ins refused before Discord said
+    who it was, the table takes the keyboard's focus itself, as a group named by the heading whose ID its page gives, as
+    the Overview does, so a keyboard can scroll it on a phone: Safari, unlike Chrome and Firefox, doesn't make a scrolling
+    box focusable on its own.
 *@
-<div class="table-wrap">
+@{
+    var takesFocus = Model.LabelledBy != null && !Model.Rows.Any(AuditRows.HasLink);
+}
+<div class="table-wrap" tabindex="@(takesFocus ? "0" : null)" role="@(takesFocus ? "group" : null)" aria-labelledby="@(takesFocus ? Model.LabelledBy : null)">
     <table class="audit-table">
         <thead>
             <tr>
