@@ -1,5 +1,7 @@
-﻿using Discord;
+﻿using DataAccessLibrary;
+using Discord;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Primitives;
 using MinerBot_2._0.Builders;
 using Steam.Models;
 using Steam.Models.SteamCommunity;
@@ -13,6 +15,7 @@ namespace MinerBot_2._0.Services
     {
         private readonly IGetData GetData;
         private readonly IMemoryCache _cache;
+        private readonly CacheReset _reset;
         private static readonly TimeSpan LatestWorkshopItemsCacheTime = TimeSpan.FromSeconds(60);
         private const int MaxMapDescriptionLength = 650; // Leaves room for most lists of five maps in one message
         public string WorkshopItemDetailsURI { get; } = "https://steamcommunity.com/workshop/filedetails/?id=";
@@ -20,10 +23,11 @@ namespace MinerBot_2._0.Services
         // Steam failing can only be waited out. The page buttons say it in a private message, and the commands in an embed.
         public const string SteamUnreachableText = "Steam can't be reached right now. Please try again later.";
 
-        public SteamAPIService(IGetData data, IMemoryCache cache)
+        public SteamAPIService(IGetData data, IMemoryCache cache, CacheReset reset)
         {
             GetData = data;
             _cache = cache;
+            _reset = reset;
         }
 
         public void Initialize()
@@ -162,11 +166,14 @@ namespace MinerBot_2._0.Services
             if (items != null)
                 return items;
 
+            // Before the read, so a clear that comes during it keeps this list out
+            var reset = _reset.Token;
+
             items = await GetData.GetLatestWorkshopItems(totalMaps);
 
             // GetData returns an empty list when Steam fails, so the next request should try again
             if (items.Count > 0)
-                _cache.Set(key, items, LatestWorkshopItemsCacheTime);
+                _cache.Set(key, items, new MemoryCacheEntryOptions { AbsoluteExpirationRelativeToNow = LatestWorkshopItemsCacheTime }.AddExpirationToken(new CancellationChangeToken(reset)));
 
             return items;
         }
@@ -204,7 +211,8 @@ namespace MinerBot_2._0.Services
             _ => "__**New & Updated Maps!**__"
         };
 
-        // Discord limits the length of all the embeds of a message together, so a long list goes out as several messages
+        // Discord limits the length of all the embeds of a message together, and their number, so a long list goes out as
+        // several messages. A run posts more than ten maps only after a pause.
         public static List<Embed[]> GroupEmbedsByLength(IEnumerable<Embed> embeds)
         {
             List<Embed[]> groups = new();
@@ -213,7 +221,7 @@ namespace MinerBot_2._0.Services
 
             foreach (var embed in embeds)
             {
-                if (groupLength + embed.Length > EmbedBuilder.MaxEmbedLength)
+                if (group.Count == DiscordConfig.MaxEmbedsPerMessage || groupLength + embed.Length > EmbedBuilder.MaxEmbedLength)
                 {
                     groups.Add(group.ToArray());
                     group.Clear();

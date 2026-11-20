@@ -1,4 +1,5 @@
 using DataAccessLibrary.Audit;
+using MinerBot.Shared.Requests;
 
 namespace MinerBot.Dashboard.Audit
 {
@@ -30,6 +31,10 @@ namespace MinerBot.Dashboard.Audit
         public const string ArmorTarget = "armor";
         public const string BlacklistTarget = "blacklist";
 
+        // A request to the bot, by its ID in bot_commands. Each kind of request is an action of its own, with the kind's
+        // own word from MinerBot.Shared's request list, so the filter can tell a restart from a cache clear.
+        public const string RequestTarget = "request";
+
         public static readonly IReadOnlyList<AuditWord> Actions =
         [
             new(SignIn, "Signed in"),
@@ -41,15 +46,37 @@ namespace MinerBot.Dashboard.Audit
             new(ArmorPending, "Moved armor back to pending"),
             new(BlacklistAdd, "Added to the blacklist"),
             new(BlacklistEdit, "Changed a blacklist entry"),
-            new(BlacklistRemove, "Removed from the blacklist")
+            new(BlacklistRemove, "Removed from the blacklist"),
+            .. RequestKinds.All.Select(kind => new AuditWord(kind.Word, RequestLabel(kind)))
         ];
 
         public static readonly IReadOnlyList<AuditWord> Targets =
         [
             new(ArmorTarget, "Armor"),
             new(BlacklistTarget, "Blacklist entry"),
-            new(SessionTarget, "Session")
+            new(SessionTarget, "Session"),
+            new(RequestTarget, "Bot request")
         ];
+
+        // What the audit log calls a request: who asked the bot for what
+        static string RequestLabel(RequestKind kind) => kind.Word switch
+        {
+            RequestKinds.CachesClear => "Asked the bot to clear its caches",
+            RequestKinds.JobNotifications => "Asked the bot to run the notification job",
+            RequestKinds.JobColors => "Asked the bot to run the colour job",
+            RequestKinds.SteamRenew => "Asked the bot to renew the Steam token",
+            RequestKinds.PostsPause => "Asked the bot to pause posts",
+            RequestKinds.PostsResume => "Asked the bot to resume posts",
+            RequestKinds.StatusSet => "Asked the bot to set its status text",
+            RequestKinds.SteamReconnect => "Asked the bot to reconnect Steam",
+            RequestKinds.GuildTestMessage => "Asked the bot to send a test message",
+            RequestKinds.GuildRefresh => "Asked the bot to refresh a server's channels",
+            RequestKinds.SteamLookup => "Asked the bot to look up a Steam profile link",
+            RequestKinds.GuildLeave => "Asked the bot to leave a server",
+            RequestKinds.BotRestart => "Asked the bot to restart",
+            RequestKinds.OwnerSigninAlert => "Asked the bot to tell the owner about a sign-in",
+            _ => "Asked the bot: " + kind.Label
+        };
 
         // Null for a word that isn't on the list, so a filter never passes on one it doesn't know
         public static AuditWord? Action(string? word) => Actions.FirstOrDefault(action => action.Word == word);

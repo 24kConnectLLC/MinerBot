@@ -7,6 +7,7 @@ using DataAccessLibrary.Dashboard;
 using DataAccessLibrary.Discord;
 using DataAccessLibrary.Guilds;
 using DataAccessLibrary.Migrations;
+using DataAccessLibrary.Requests;
 using DataAccessLibrary.Status;
 using DotNet.Testcontainers.Builders;
 using Microsoft.Extensions.Caching.Memory;
@@ -47,6 +48,10 @@ namespace DataAccessLibrary.Tests.Database
         public const string BotChannelTable = BotDatabase + ".guild_channels";
         public const string GuildEventTable = BotDatabase + ".guild_events";
         public const string GuildDailyTable = BotDatabase + ".guild_daily";
+
+        // The dashboard's requests to the bot, and the bot's settings that only they change
+        public const string RequestTable = BotDatabase + ".bot_commands";
+        public const string SettingsTable = BotDatabase + ".bot_settings";
 
         // CI sets this, so there the database tests fail instead of skipping
         internal const string RequiredSetting = "MINERBOT_DB_TESTS";
@@ -120,7 +125,7 @@ namespace DataAccessLibrary.Tests.Database
             throw new InvalidOperationException("The test database couldn't start", startFailure);
         }
 
-        public ArmorData Armor(IMemoryCache cache) => new(Factory, cache);
+        public ArmorData Armor(IMemoryCache cache) => new(Factory, cache, new CacheReset());
         public ArmorSubmissionData Submissions() => new(Factory);
         public ArmorReviewData Reviews() => new(Factory, Names);
         public AuditLogData Audit() => new(Factory, Names);
@@ -130,11 +135,15 @@ namespace DataAccessLibrary.Tests.Database
         public BotGuildData BotGuilds() => new(Factory, Names);
         public BlacklistData Blacklist() => new(Factory);
         public GuildData Guilds() => new(Factory);
+        public BotRequestData Requests() => new(Factory, Names);
 
         // The dashboard's reads of what the bot writes, and of the website's settings
         public BotStatusReads StatusReads() => new(Factory, Names);
         public BotGuildReads GuildReads() => new(Factory, Names);
         public GuildSettingsReads GuildSettings() => new(Factory);
+
+        // The dashboard's side of its requests to the bot
+        public BotRequestQueue RequestQueue() => new(Factory, Names);
 
         // Each test starts from empty tables. TRUNCATE also starts AUTO_INCREMENT again, which DELETE doesn't, so an ID
         // that a test wrote past a 32-bit int can't reach the next test's new rows.

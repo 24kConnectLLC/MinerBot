@@ -430,10 +430,11 @@ namespace SteamWebAPIAccess
 
             AlertIfOfflineTooLong();
 
-            // A connection that never came up doesn't count, or an outage during a QR session would retry nonstop
-            var quickly = retryQuickly || (qrSession != null && hasConnected);
+            // A connection that never came up doesn't count, or an outage during a QR session would retry nonstop. A reconnect
+            // the dashboard asked for sets the flag from another thread.
+            var quickly = Volatile.Read(ref retryQuickly) || (qrSession != null && hasConnected);
 
-            retryQuickly = false;
+            Volatile.Write(ref retryQuickly, false);
             hasConnected = false;
 
             var delay = quickly ? QuickReconnectDelay : NextReconnectDelay();
@@ -649,7 +650,7 @@ namespace SteamWebAPIAccess
             }
         }
 
-        public async Task RenewTokenAsync()
+        public async Task<TokenRenewal> RenewTokenAsync()
         {
             string? refreshToken;
 
@@ -665,12 +666,15 @@ namespace SteamWebAPIAccess
                 else
                     AlertIfOfflineTooLong();
 
-                return;
+                return new TokenRenewal(TokenRenewalOutcome.NotSignedIn);
             }
 
             // A token that Steam replaces now would be lost, so the file has to work first
             if (!TrySaveTokens())
-                return;
+                return new TokenRenewal(TokenRenewalOutcome.NotSaved, ExpiryOf(refreshToken));
+
+            var outcome = TokenRenewalOutcome.Kept;
+            string? failure = null;
 
             try
             {
@@ -683,6 +687,7 @@ namespace SteamWebAPIAccess
                     {
                         var renewedUntil = SaveTokens(tokens);
                         RecordSteamEvent(SteamEvents.TokenRenewed, Detail($"expires on {renewedUntil:yyyy-MM-dd}"));
+                        outcome = TokenRenewalOutcome.Renewed;
                     }
                 }
             }
@@ -690,6 +695,8 @@ namespace SteamWebAPIAccess
             {
                 // Steam's reason may have nothing to do with logging on, so the token stays until a logon rejects it
                 Console.WriteLine($"Unable to renew the Steam token: {e.Message}");
+                outcome = TokenRenewalOutcome.Failed;
+                failure = e.GetType().Name;
             }
 
             var token = _RefreshToken ?? refreshToken;
@@ -701,6 +708,29 @@ namespace SteamWebAPIAccess
 
                 Alert($"MinerBot's Steam token expires on {expiry:yyyy-MM-dd} and Steam hasn't renewed it. To replace it, rename {AuthFullPath}, restart the bot and sign in.");
             }
+
+            return new TokenRenewal(outcome, ExpiryOf(token), failure);
+        }
+
+        static DateOnly? ExpiryOf(string token) => SteamSignInPolicy.ReadTokenExpiry(token) is { } end ? DateOnly.FromDateTime(end.UtcDateTime) : null;
+
+        // For a dashboard request: drops a connection that's logged on, so the pump connects again and logs on with the
+        // saved token after 2 seconds rather than 30, by its own rules, never IGetData.Reconnect, whose connect would race the
+        // pump's. Never while a sign-in is under way, which a new connection would start over, and never while Steam isn't
+        // logged on, when the pump is already trying. Safe from any thread: SteamKit's Disconnect is.
+        public SteamReconnect RequestReconnect()
+        {
+            if (Volatile.Read(ref qrSession) != null)
+                return SteamReconnect.SigningIn;
+
+            if (Status.State != SteamConnection.LoggedOn)
+                return SteamReconnect.NotLoggedOn;
+
+            // Read by the pump when the disconnect reaches it
+            Volatile.Write(ref retryQuickly, true);
+            Disconnect();
+
+            return SteamReconnect.Started;
         }
 
         void NeedsSignIn(string reason)

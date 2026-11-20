@@ -22,7 +22,7 @@ namespace MinerBot.Tests
 
         ArmorData Armor(ISQLConnectionFactory database, TimeSpan? limit = null)
         {
-            var armor = new ArmorData(database, cache);
+            var armor = new ArmorData(database, cache, new CacheReset());
             armor.CallLimit = limit ?? armor.CallLimit;
             return armor;
         }

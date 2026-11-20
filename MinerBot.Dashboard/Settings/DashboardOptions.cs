@@ -16,6 +16,10 @@ namespace MinerBot.Dashboard.Settings
         // The secret nginx adds to every request it passes on
         public string ProxyKey { get; set; } = "";
 
+        // The key the dashboard signs its requests to the bot with, the same as bot.env's REQUEST_SIGNING_KEY: 64
+        // hexadecimal digits in small letters, which setup-dashboard.sh makes. Empty turns requests to the bot off.
+        public string RequestSigningKey { get; set; } = "";
+
         // Numeric Discord user IDs separated by commas, semicolons or white space. Text, because environment variables are.
         public string Owners { get; set; } = "";
         public string Admins { get; set; } = "";

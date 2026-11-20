@@ -1,4 +1,5 @@
 using System.Text;
+using DataAccessLibrary;
 using Discord;
 using Microsoft.Extensions.Caching.Memory;
 using MinerBot_2._0;
@@ -11,7 +12,7 @@ namespace MinerBot.Tests
     {
         const int DescriptionLimit = 650;
 
-        readonly SteamAPIService service = new(new FakeGetData(_ => { }), new MemoryCache(new MemoryCacheOptions()));
+        readonly SteamAPIService service = new(new FakeGetData(_ => { }), new MemoryCache(new MemoryCacheOptions()), new CacheReset());
 
         Task<Embed> FormatWithDescription(string? description)
         {
@@ -317,6 +318,13 @@ namespace MinerBot.Tests
         public void EveryGroupStaysWithinTheLimit()
         {
             Assert.Equal([2, 2, 1], GroupSizes(4000, 1500, 1500, 3000, 3000));
+        }
+
+        // Discord takes ten embeds in a message at most, however short they are
+        [Fact]
+        public void NoGroupHoldsMoreThanTenEmbeds()
+        {
+            Assert.Equal([10, 10, 1], GroupSizes(Enumerable.Repeat(100, 21).ToArray()));
         }
 
         [Fact]

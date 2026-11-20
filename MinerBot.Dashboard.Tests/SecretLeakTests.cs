@@ -131,6 +131,7 @@ namespace MinerBot.Dashboard.Tests
             {
                 factory.ClientSecret,
                 factory.ProxyKey,
+                factory.RequestSigningKey,
                 site.Password,
                 site.UserID,
                 bot.Password,

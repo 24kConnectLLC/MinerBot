@@ -6,6 +6,8 @@ using SteamWebAPIAccess;
 using SteamWebAPIAccess.Models;
 using DataAccessLibrary.Armor.Models;
 using DataAccessLibrary.Discord.Models;
+using MinerBot_2._0.Requests;
+using System.Globalization;
 
 namespace MinerBot_2._0.Jobs
 {
@@ -16,6 +18,7 @@ namespace MinerBot_2._0.Jobs
         private readonly ArmorService _ArmorService;
         private readonly DiscordService _DiscordService;
         private readonly NotificationState _state;
+        private readonly PostsPause _pause;
         private readonly TimeProvider _clock;
 
         private readonly DiscordSocketClient _discord;
@@ -29,12 +32,15 @@ namespace MinerBot_2._0.Jobs
             _SteamAPIService = services.GetRequiredService<SteamAPIService>();
             _DiscordService = services.GetRequiredService<DiscordService>();
             _state = services.GetRequiredService<NotificationState>();
+            _pause = services.GetRequiredService<PostsPause>();
             _clock = services.GetRequiredService<TimeProvider>();
             _services = services;
         }
 
+        // A run that posted as usual has no detail, one that held its posts says why, and one that didn't find again maps that
+        // waited says how many, which the Bot page shows
         [Job("*/5 * * * *")] // Every 5 Minutes
-        public async Task NotifyAllGuilds()
+        public async Task<string?> NotifyAllGuilds()
         {
             // One time for the whole run, so the map cooldown is checked and recorded with the same one
             var now = _clock.GetUtcNow();
@@ -53,7 +59,20 @@ namespace MinerBot_2._0.Jobs
                 if (newArmor is { Count: > 0 } || newMaps is { Count: > 0 } || newLobbies is { Count: > 0 })
                     Console.WriteLine("Couldn't send the notifications yet, because Discord hasn't sent the bot's servers");
 
-                return;
+                return null;
+            }
+
+            // Paused from the dashboard, or not known yet: the new items wait, uncounted, for the first run that posts.
+            // Nothing is committed, so nothing is marked seen and no run counts against an item, and the first good read
+            // still takes its baseline. The maps found are kept either way, so the first run that posts reads deep enough
+            // for them.
+            if (_pause.Holds(out var known))
+            {
+                if (known)
+                    return Held(newArmor, newMaps, newLobbies);
+
+                _state.Maps.Hold(newMaps);
+                return "posts wait until the bot has read whether they're paused";
             }
 
             int armorDelivered = 0, mapsDelivered = 0, lobbiesDelivered = 0;
@@ -74,11 +93,39 @@ namespace MinerBot_2._0.Jobs
             bool mapsOn = AnyServerHasItOn(guild => guild.map_channel_id);
 
             _state.Armor.Commit(newArmor, AnyServerHasItOn(guild => guild.armor_channel_id) ? armorDelivered : newArmor?.Count ?? 0);
-            _state.Maps.Commit(newMaps, mapsOn ? mapsDelivered : newMaps?.Count ?? 0, postedAt: mapsOn ? now : null);
+            var mapsNotFound = _state.Maps.Commit(newMaps, mapsOn ? mapsDelivered : newMaps?.Count ?? 0, postedAt: mapsOn ? now : null);
             _state.Lobbies.Commit(newLobbies, AnyServerHasItOn(guild => guild.lobby_channel_id) ? lobbiesDelivered : newLobbies?.Count ?? 0);
+
+            // Maps that waited and that this run's read didn't find again are never posted, which the log and the Bot page say
+            if (mapsNotFound > 0)
+            {
+                var detail = MapsNotFound(mapsNotFound);
+                Console.WriteLine(detail);
+                return detail;
+            }
+
+            return null;
 
             bool AnyServerHasItOn(Func<Guild, ulong> channelId) => guilds.Any(guild => channelId(guild) != Guild.ChannelOff);
         }
+
+        static string MapsNotFound(int count) => count == 1
+            ? "1 map that waited wasn't in Steam's latest list any more, so it wasn't posted: it was hidden meanwhile, or more maps were updated while posts waited than the read reaches"
+            : string.Create(CultureInfo.InvariantCulture,
+                $"{count} maps that waited weren't in Steam's latest list any more, so they weren't posted: they were hidden meanwhile, or more maps were updated while posts waited than the read reaches");
+
+        // What a paused run found, which waits for the first run after the resume. The approved armor and the open lobbies are
+        // read whole, but the maps only from the top of Steam's list, so the ones found are kept to read deep enough for them.
+        string Held(List<ArmorStyle>? armor, List<MapPost>? maps, List<LobbyInfo>? lobbies)
+        {
+            _state.Maps.Hold(maps);
+
+            return string.Create(CultureInfo.InvariantCulture,
+                $"posts are paused, so this run posted nothing (found {Count(armor?.Count, "new armor style")}, {Count(maps?.Count, "new or updated map")} and {Count(lobbies?.Count, "new lobby", "new lobbies")})");
+        }
+
+        static string Count(int? count, string one, string? many = null) =>
+            string.Create(CultureInfo.InvariantCulture, $"{count ?? 0} {(count == 1 ? one : many ?? one + "s")}");
 
         // A null list means that the source couldn't be read, so these three leave it for the next run.
         // The NotifyNew methods return how many of the items reached the channel.
@@ -134,7 +181,7 @@ namespace MinerBot_2._0.Jobs
         {
             try
             {
-                var mapList = await _SteamAPIService.GetLatestWorkshopItems();
+                var mapList = await _SteamAPIService.GetLatestWorkshopItems(_state.Maps.ReadCount);
 
                 // GetData returns an empty list when Steam fails
                 if (mapList.Count == 0)
@@ -220,31 +267,25 @@ namespace MinerBot_2._0.Jobs
             }
         }
 
-        // The row's channel, only when it's a channel of the server the row names that Discord.Net counts as a text channel:
-        // a text or announcement channel, or, as before, a voice, stage or thread channel, whose classes derive from its text
-        // channel. From the cache: a row can't send a post to another server's channel, and no channel is looked up over
-        // Discord's API. A server the bot isn't in, one Discord reports unavailable, in an outage, or one it hasn't sent yet
-        // gets no post either. Each of these is a post that couldn't be sent, with a line in the log: as for a post that
-        // failed, its items are tried again at the next run only when no server got them.
+        // The row's channel, by DiscordService.PostChannel's rule: a channel of the server the row names that Discord.Net
+        // counts as a text channel, from the cache, so a row can't send a post to another server's channel, and no channel is
+        // looked up over Discord's API. A server the bot isn't in, one Discord reports unavailable, in an outage, or one it
+        // hasn't sent yet gets no post either. Each of these is a post that couldn't be sent, with a line in the log: as for a
+        // post that failed, its items are tried again at the next run only when no server got them.
         private SocketTextChannel? ChannelOf(string kind, ulong guildId, ulong channelId)
         {
-            var guild = _discord.GetGuild(guildId);
-            string problem;
-
-            if (guild == null)
-                problem = "the bot isn't in that server";
-            // While the gateway itself is down, every server shows as unavailable, and a post can still go through Discord's API
-            else if (!guild.IsConnected && _discord.ConnectionState == ConnectionState.Connected)
-                problem = "Discord reports that server unavailable";
-            // Discord.Net has nothing of it but its ID, from a READY or an outage, so none of its channels
-            else if (guild.Name == null)
-                problem = "Discord hasn't sent that server yet";
-            else if (guild.GetTextChannel(channelId) is { } channel)
+            if (DiscordService.PostChannel(_discord, guildId, channelId, out var problem) is { } channel)
                 return channel;
-            else
-                problem = "that channel isn't in that server";
 
-            Console.WriteLine($"Couldn't send the {kind} notification to channel {channelId} of guild {guildId}, because {problem}");
+            var because = problem switch
+            {
+                PostProblem.NotInServer => "the bot isn't in that server",
+                PostProblem.ServerUnavailable => "Discord reports that server unavailable",
+                PostProblem.ServerNotSent => "Discord hasn't sent that server yet",
+                _ => "that channel isn't in that server"
+            };
+
+            Console.WriteLine($"Couldn't send the {kind} notification to channel {channelId} of guild {guildId}, because {because}");
             return null;
         }
 

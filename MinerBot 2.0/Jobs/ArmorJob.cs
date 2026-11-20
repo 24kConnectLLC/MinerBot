@@ -2,6 +2,7 @@
 using MinerBot_2._0.Attributes;
 using MinerBot_2._0.Services;
 using MinerBot_2._0.Extensions;
+using System.Globalization;
 
 namespace MinerBot_2._0.Jobs
 {
@@ -16,16 +17,22 @@ namespace MinerBot_2._0.Jobs
             _ArmorService = services.GetRequiredService<ArmorService>();
         }
 
+        // Its detail says how many it added, which the owner's message after a dashboard request shows
         [Job("0 * * * *")] // Every Hour
-        public async Task AddColorArrays()
+        public async Task<string> AddColorArrays()
         {
+            var added = 0;
+
             foreach (var armor in await _ArmorService.GetArmorList())
             {
                 if (armor.ColorArray == null)
                 {
                     await AddColorArray(armor);
+                    added++;
                 }
             }
+
+            return string.Create(CultureInfo.InvariantCulture, $"added colour codes to {added} armor {(added == 1 ? "style" : "styles")}");
         }
 
         //[Job("* * * * *")] // Every Hour

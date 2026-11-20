@@ -1,5 +1,6 @@
 using DataAccessLibrary.Status;
 using DataAccessLibrary.Tests.Database;
+using MinerBot.Shared.Requests;
 
 namespace DataAccessLibrary.Tests
 {
@@ -17,7 +18,8 @@ namespace DataAccessLibrary.Tests
         {
             var db = fixture.Require();
             await db.ClearAsync(MariaDbFixture.AuditTable, MariaDbFixture.SessionTable, MariaDbFixture.EventTable, MariaDbFixture.JobRunTable,
-                MariaDbFixture.SampleTable, MariaDbFixture.DailyTable, MariaDbFixture.GuildEventTable, MariaDbFixture.BotGuildTable, MariaDbFixture.GuildDailyTable);
+                MariaDbFixture.SampleTable, MariaDbFixture.DailyTable, MariaDbFixture.GuildEventTable, MariaDbFixture.BotGuildTable, MariaDbFixture.GuildDailyTable,
+                MariaDbFixture.RequestTable, MariaDbFixture.SettingsTable);
             return db;
         }
 
@@ -127,6 +129,58 @@ namespace DataAccessLibrary.Tests
 
             Assert.Equal(1, await db.Retention().DeleteJobRuns(Cutoff, Chunk));
             Assert.Equal([Cutoff, Cutoff.AddMilliseconds(1)], await TimesAsync("started_at", MariaDbFixture.JobRunTable));
+        }
+
+        // The dashboard's requests to the bot, by when the dashboard made them, whatever became of them. One made at
+        // 0000-00-00, which MariaDB's default mode lets the dashboard's login write and MySql.Data can't read, goes first.
+        // The bot's settings stay, however old.
+        [Fact]
+        public async Task RequestsGoAfter90Days()
+        {
+            var db = await StartAsync();
+
+            foreach (var (key, at, state) in new[] { ("a", KeepFrom.AddMilliseconds(-1), RequestStates.Done), ("b", KeepFrom, (string?)null), ("c", KeepFrom.AddMilliseconds(1), RequestStates.Refused) })
+                await fixture.RootExecuteAsync($@"INSERT INTO {MariaDbFixture.RequestTable} (request_key, kind, actor_id, actor_name, actor_role, created_at, expires_at,
+                                                  signature, state)
+                                                  VALUES (REPEAT(@key, 32), 'posts.pause', 1, 'Test Owner', 'owner', @at, @at, REPEAT('s', 32), @state)", new { key, at, state });
+
+            await fixture.RootExecuteAsync($@"INSERT INTO {MariaDbFixture.RequestTable} (request_key, kind, actor_id, actor_name, actor_role, created_at, expires_at,
+                                              signature)
+                                              VALUES (REPEAT('d', 32), 'posts.pause', 1, 'Test Owner', 'owner', '0000-00-00 00:00:00.000', @at, REPEAT('s', 32))",
+                new { at = KeepFrom.AddDays(1) });
+            await db.Requests().SavePause(true, "Testing", KeepFrom.AddYears(-1), 1, 1, KeepFrom.AddYears(-1));
+
+            Assert.Equal(2, await db.Retention().DeleteRequests(KeepFrom, Chunk));
+            Assert.Equal([KeepFrom, KeepFrom.AddMilliseconds(1)], await TimesAsync("created_at", MariaDbFixture.RequestTable));
+            Assert.Equal(0, await db.Retention().DeleteRequests(KeepFrom, Chunk));
+            Assert.Equal(1, (await fixture.RootQueryAsync<long>($"SELECT COUNT(*) FROM {MariaDbFixture.SettingsTable}")).Single());
+        }
+
+        // A request dated years ahead, which the dashboard's login can write without the key and the bot refuses, goes by
+        // when the bot ended it, which only the bot's clock writes, so a flood of such rows doesn't stay for good. One
+        // that hasn't ended stays.
+        [Fact]
+        public async Task RequestsDatedAheadGoByWhenTheBotEndedThem()
+        {
+            var db = await StartAsync();
+            var ahead = new DateTime(2099, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            var requests = new (string Key, string? State, DateTime? Ended)[]
+            {
+                ("a", RequestStates.Refused, KeepFrom.AddMilliseconds(-1)),
+                ("b", RequestStates.Refused, KeepFrom),
+                ("c", null, null)
+            };
+
+            foreach (var (key, state, ended) in requests)
+                await fixture.RootExecuteAsync($@"INSERT INTO {MariaDbFixture.RequestTable} (request_key, kind, actor_id, actor_name, actor_role, created_at, expires_at,
+                                                  signature, state, ended_at)
+                                                  VALUES (REPEAT(@key, 32), 'posts.pause', 1, 'Test Owner', 'owner', @ahead, @expires, REPEAT('s', 32), @state, @ended)",
+                    new { key, ahead, expires = ahead.AddMinutes(1), state, ended });
+
+            Assert.Equal(1, await db.Retention().DeleteRequests(KeepFrom, Chunk));
+            Assert.Equal([new string('b', 32), new string('c', 32)],
+                await fixture.RootQueryAsync<string>($"SELECT request_key FROM {MariaDbFixture.RequestTable} ORDER BY request_key"));
+            Assert.Equal(0, await db.Retention().DeleteRequests(KeepFrom, Chunk));
         }
 
         // Unused for the time given, or ended that long ago

@@ -17,6 +17,11 @@
     <ProjectReference Include="..\MinerBot.Shared\MinerBot.Shared.csproj" />
   </ItemGroup>
 
+  <!-- RequestSigning's own code, which RequestSigningTests reads as text to check how it compares signatures -->
+  <ItemGroup>
+    <None Include="..\MinerBot.Shared\Requests\RequestSigning.cs" Link="shared-source\RequestSigning.cs" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />
     <PackageReference Include="xunit.runner.visualstudio" Version="4.0.1">

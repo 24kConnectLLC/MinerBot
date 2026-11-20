@@ -81,7 +81,8 @@ namespace DataAccessLibrary.Tests
         {
             ["0001_core"] = "71cf66af93eaa830b8ceebda61d5341971cbc4c82fbf37107149334574454aed",
             ["0002_bot_status"] = "57cde1d9086d53d5d69c3009c3741e8ef126b3842ce57057b4830b54b199e597",
-            ["0003_guilds"] = "25b0b8bd493209061734510450bd598124afd5dedc21571e0a58df0c97b6a285"
+            ["0003_guilds"] = "25b0b8bd493209061734510450bd598124afd5dedc21571e0a58df0c97b6a285",
+            ["0004_bot_requests"] = "ac9003787d6b2ffded792ad9832af4c90ae0494ccd922e25c32e5a945f674a62"
         };
 
         [Fact]
@@ -202,6 +203,35 @@ namespace DataAccessLibrary.Tests
                 Assert.DoesNotContain("DEFAULT", statement.Replace("DEFAULT CHARSET", ""));
                 Assert.DoesNotContain("FOREIGN KEY", statement);
             });
+        }
+
+        // The dashboard's requests to the bot and the bot's settings, by the same rules. No column has a default, because the
+        // dashboard's login may name only a request's own columns, so every one the bot fills in must start NULL.
+        [Fact]
+        public void FourthMigrationCreatesTheRequestTables()
+        {
+            var fourth = MigrationScript.Embedded()[3];
+
+            Assert.Equal("0004_bot_requests", fourth.Name);
+            Assert.Equal(["bot_commands", "bot_settings"], fourth.Statements.Select(TableName));
+            Assert.All(fourth.Statements, statement =>
+            {
+                Assert.EndsWith("ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_520_ci", statement);
+                Assert.DoesNotContain("TIMESTAMP", statement);
+                Assert.DoesNotContain("CHAR(36)", statement);
+                Assert.DoesNotContain("NOW(", statement);
+                Assert.DoesNotContain("CURDATE", statement);
+                Assert.DoesNotContain("CURRENT_", statement);
+                Assert.DoesNotContain("DEFAULT", statement.Replace("DEFAULT CHARSET", ""));
+                Assert.DoesNotContain("FOREIGN KEY", statement);
+            });
+
+            // The id is MariaDB's, and the bot's columns can be left out of the dashboard's INSERT
+            var requests = fourth.Statements[0];
+            Assert.Contains("id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,", requests);
+
+            foreach (var column in new[] { "state", "run_id", "claimed_at", "ended_at", "result", "result_number", "dm_state" })
+                Assert.Matches($@"\n  {column} [A-Z]+(\(\d+\))?( UNSIGNED)? NULL,", requests);
         }
 
         static string TableName(string statement) => Regex.Match(statement, @"^CREATE TABLE IF NOT EXISTS (\w+)").Groups[1].Value;

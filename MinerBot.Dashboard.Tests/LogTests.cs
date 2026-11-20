@@ -56,6 +56,7 @@ namespace MinerBot.Dashboard.Tests
                 // The revoke's Authorization: Basic value, which holds the secret without spelling it out
                 Convert.ToBase64String(Encoding.UTF8.GetBytes(DashboardFactory.ClientId + ":" + factory.ClientSecret)),
                 factory.ProxyKey,
+                factory.RequestSigningKey,
                 formToken,
                 owner.Cookie(DashboardAuth.AntiforgeryCookie)!
             };

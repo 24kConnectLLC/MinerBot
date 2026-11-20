@@ -4,12 +4,13 @@ using MinerBot.Dashboard.Auth;
 using MinerBot.Dashboard.Blacklist;
 using MinerBot.Dashboard.Health;
 using MinerBot.Dashboard.Hosting;
+using MinerBot.Dashboard.Requests;
 using MinerBot.Dashboard.Security;
 using MinerBot.Dashboard.Settings;
 using MinerBot.Dashboard.Status;
 
-// The deploy's migration step and the container's health check need none of the web settings, and must never try to
-// take the port or socket the running dashboard holds
+// The deploy's migration step, the container's health check and request.sh's request need none of the web settings, and
+// must never try to take the port or socket the running dashboard holds
 if (DashboardCommands.Find(args) is { } command)
     return await DashboardCommands.RunAsync(command, args);
 
@@ -44,12 +45,14 @@ builder.Services.AddDataAccessServices(builder.Configuration)
                 .AddBlacklistAccess()
                 .AddBotStatusReads()
                 .AddBotGuildReads()
-                .AddGuildSettingsReads();
+                .AddGuildSettingsReads()
+                .AddBotRequestQueue();
 
 builder.Services.AddDashboardSignIn();
 builder.Services.AddArmorReview();
 builder.Services.AddBlacklistChanges();
 builder.Services.AddStatusPages();
+builder.Services.AddBotRequests();
 
 // No fallback policy: it would also apply to addresses that match no page and turn every 404 into a sign-in. Deny by
 // default is the endpoint test's job instead.

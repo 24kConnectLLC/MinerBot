@@ -36,6 +36,9 @@ namespace MinerBot_2._0
                     catch (Exception e)
                     {
                         _logger.LogCritical(e, "The scheduled jobs couldn't start, so nothing runs on a schedule until a restart");
+
+                        // So a request from the dashboard for a job is refused, rather than left waiting for a start that won't come
+                        jobHandler.StartFailed = true;
                     }
 
                     await steamAPI.RunCallbacksAsync(stoppingToken);

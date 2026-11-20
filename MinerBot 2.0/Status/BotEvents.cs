@@ -36,6 +36,20 @@ namespace MinerBot_2._0.Status
         public const string AlertSent = "alert.sent";
         public const string AlertFailed = "alert.failed";
 
+        // A request from the dashboard refused for its form, its signature, its kind, its role, its times or its details:
+        // the first of each reason in a minute, then one for the rest of that minute with how many there were
+        public const string RequestRejected = "request.rejected";
+
+        // Once a run, when the request-signing key can't be used, so the bot acts on no request
+        public const string RequestsOff = "requests.off";
+
+        // A request the bot took was running when the bot stopped, so it may or may not have happened
+        public const string RequestInterrupted = "request.interrupted";
+
+        // The notification job's posts paused or resumed by a request, and at a start that finds them paused
+        public const string PostsPaused = "posts.paused";
+        public const string PostsResumed = "posts.resumed";
+
         static readonly Dictionary<string, string> Levels = new()
         {
             [BotStarted] = EventLevel.Info,
@@ -49,6 +63,11 @@ namespace MinerBot_2._0.Status
             [JobCutOff] = EventLevel.Warning,
             [AlertSent] = EventLevel.Info,
             [AlertFailed] = EventLevel.Error,
+            [RequestRejected] = EventLevel.Error,
+            [RequestsOff] = EventLevel.Warning,
+            [RequestInterrupted] = EventLevel.Warning,
+            [PostsPaused] = EventLevel.Warning,
+            [PostsResumed] = EventLevel.Info,
             [SteamEvents.LoggedOn] = EventLevel.Info,
             [SteamEvents.Offline] = EventLevel.Warning,
             [SteamEvents.LoggedOff] = EventLevel.Warning,

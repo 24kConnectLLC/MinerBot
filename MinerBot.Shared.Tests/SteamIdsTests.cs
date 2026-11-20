@@ -179,6 +179,25 @@ namespace MinerBot.Shared.Tests
             Invalid(link);
         }
 
+        // The link pattern ignores case, and a pattern that ignores case takes the Kelvin sign for a k, so the name is checked
+        // one character at a time too, as the bot's own rule and the request list's are, and the dashboard never offers one
+        [Fact]
+        public void VanityLinkWithAKelvinSignIsInvalid()
+        {
+            var kelvin = char.ConvertFromUtf32(0x212A);
+
+            Assert.Contains("A to Z", Invalid($"https://steamcommunity.com/id/{kelvin}elvin"));
+            Invalid($"steamcommunity.com/id/some{kelvin}name");
+            Assert.False(SteamIds.IsCustomLinkName($"{kelvin}elvin"));
+
+            Assert.Equal("Kelvin", SteamIds.Parse("https://steamcommunity.com/id/Kelvin").VanityName);
+            Assert.True(SteamIds.IsCustomLinkName("AZaz09_-"));
+            Assert.True(SteamIds.IsCustomLinkName(new string('a', SteamIds.CustomLinkNameLimit)));
+            Assert.False(SteamIds.IsCustomLinkName(new string('a', SteamIds.CustomLinkNameLimit + 1)));
+            Assert.False(SteamIds.IsCustomLinkName(""));
+            Assert.False(SteamIds.IsCustomLinkName(null));
+        }
+
         [Fact]
         public void AccountNumbersAreWrittenBackOut()
         {

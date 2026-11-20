@@ -5,6 +5,7 @@ using MinerBot.Dashboard.Armor;
 using MinerBot.Dashboard.Audit;
 using MinerBot.Dashboard.Blacklist;
 using MinerBot.Dashboard.Tests.Support;
+using MinerBot.Shared.Requests;
 
 namespace MinerBot.Dashboard.Tests
 {
@@ -27,10 +28,13 @@ namespace MinerBot.Dashboard.Tests
 
             // Written out, because rows already written use them and the filter matches them exactly
             Assert.Equal(["armor.approve", "armor.pending", "armor.reject", "armor.takedown", "auth.refused", "auth.signin", "auth.signout",
-                "blacklist.add", "blacklist.edit", "blacklist.remove"], Listed.Order(StringComparer.Ordinal));
+                "blacklist.add", "blacklist.edit", "blacklist.remove", "bot.restart", "caches.clear", "guild.leave", "guild.refresh", "guild.test_message",
+                "job.colors", "job.notifications", "owner.signin_alert", "posts.pause", "posts.resume", "status.set", "steam.lookup", "steam.reconnect",
+                "steam.renew"], Listed.Order(StringComparer.Ordinal));
         }
 
-        // Every word the code can write: each constant, and each action of the armor and blacklist pages
+        // Every word the code can write: each constant, each action of the armor and blacklist pages, and each kind of request
+        // to the bot, whose words MinerBot.Shared's list holds
         [Fact]
         public void EveryWordTheCodeWritesIsOnTheList()
         {
@@ -40,10 +44,39 @@ namespace MinerBot.Dashboard.Tests
                 .Where(value => value.Contains('.'))
                 .ToList();
 
-            Assert.Equal(Listed.Count, constants.Count);
+            Assert.Equal(Listed.Count, constants.Count + RequestKinds.All.Count);
             Assert.All(constants, word => Assert.Contains(word, Listed));
             Assert.All(Enum.GetValues<ArmorAction>(), action => Assert.Contains(action.AuditAction(), Listed));
             Assert.All(Enum.GetValues<BlacklistAction>(), action => Assert.Contains(action.AuditAction(), Listed));
+            Assert.All(RequestKinds.All, kind => Assert.Contains(kind.Word, Listed));
+        }
+
+        // Each kind of request to the bot is an action of its own, so the filter tells a restart from a cache clear, each with
+        // a label written out here, and a row about one is about the request, by its ID
+        [Fact]
+        public void EveryRequestKindIsAnActionOfItsOwn()
+        {
+            Assert.Equal(
+            [
+                "Asked the bot to clear its caches",
+                "Asked the bot to run the notification job",
+                "Asked the bot to run the colour job",
+                "Asked the bot to renew the Steam token",
+                "Asked the bot to pause posts",
+                "Asked the bot to resume posts",
+                "Asked the bot to set its status text",
+                "Asked the bot to reconnect Steam",
+                "Asked the bot to send a test message",
+                "Asked the bot to refresh a server's channels",
+                "Asked the bot to look up a Steam profile link",
+                "Asked the bot to leave a server",
+                "Asked the bot to restart",
+                "Asked the bot to tell the owner about a sign-in"
+            ], RequestKinds.All.Select(kind => AuditWords.ActionLabel(kind.Word)));
+
+            Assert.Equal("request", AuditWords.RequestTarget);
+            Assert.Equal("Bot request", AuditWords.TargetLabel(AuditWords.RequestTarget));
+            Assert.Equal(new AuditTarget("Bot request 41", null), AuditRows.Target(AuditWords.RequestTarget, "41"));
         }
 
         // No other file of the dashboard writes an action word as a bare string, which the list could miss. The test's

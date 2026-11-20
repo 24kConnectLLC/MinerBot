@@ -3,8 +3,8 @@
 # has a limit of 30 seconds or less.
 # Usage:
 #   ./status.sh               the containers, images, recent deploys, a running action, backups, the certificate,
-#                             nginx, the dashboard's socket and proxy key, the public home page, the disk and the move's
-#                             leftovers
+#                             nginx, the dashboard's socket and proxy key, the public home page, the request-signing key
+#                             in both env files and both containers, the disk and the move's leftovers
 #   ./status.sh --check       the nightly check from /etc/cron.d/minerbot: one line per problem and exit 1, so cron mails
 #                             it; nothing and exit 0 when all is well
 #   ./status.sh --mail-test   sends one message to root, to prove that cron's mail about failures reaches you
@@ -124,6 +124,7 @@ show_images() {   # show_images bot|dashboard
 
 show() {
     local service newest hours ends days out n avail commit user group old why answer key_ok
+    local -a keys
     echo "MinerBot on this server, $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo
     echo "Containers"
@@ -201,6 +202,24 @@ show() {
             000) echo "Public home page: no answer within 10 seconds (https://$public_host/)" ;;
             *) echo "Public home page: $answer (https://$public_host/)" ;;
         esac
+        # The key the dashboard signs its requests to the bot with, in both files and each container that exists, only
+        # compared; a missing container shows in the containers above. Its lines are taken whole first: each look at a
+        # container may take up to 30 seconds, longer than a read waits.
+        keys=()
+        out=$(request_key_problems) || out=
+        while IFS= read -r -t 5 why; do
+            if [ -n "$why" ]; then
+                keys+=("$why")
+            fi
+        done <<< "$out"
+        if [ ${#keys[@]} -eq 0 ]; then
+            echo "Request key: the same in bot.env, dashboard.env and each container that exists"
+        else
+            echo "Request key: ${keys[0]}"
+            if [ ${#keys[@]} -gt 1 ]; then
+                printf '  %s\n' "${keys[@]:1}"
+            fi
+        fi
     fi
 
     avail=$(free_kib /) || avail=0
@@ -319,6 +338,15 @@ check() {
                 fi
             fi
         fi
+        # The request-signing key: missing or malformed in either file, the files apart, or a container on another key
+        # than its file holds, which the bot refuses the dashboard's requests for. Only compared, never printed. Its lines
+        # are taken whole first: each look at a container may take up to 30 seconds, longer than a read waits.
+        out=$(request_key_problems) || out=
+        while IFS= read -r -t 5 line; do
+            if [ -n "$line" ]; then
+                problems+=("$line")
+            fi
+        done <<< "$out"
     fi
 
     if [ ! -f "$cloudflare_list" ]; then

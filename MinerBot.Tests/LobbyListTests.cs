@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using DataAccessLibrary;
 using Discord;
 using Microsoft.Extensions.Caching.Memory;
 using MinerBot_2._0.Services;
@@ -15,7 +16,7 @@ namespace MinerBot.Tests
 
         public LobbyListLimitTests()
         {
-            service = new SteamAPIService(steam, new MemoryCache(new MemoryCacheOptions()));
+            service = new SteamAPIService(steam, new MemoryCache(new MemoryCacheOptions()), new CacheReset());
         }
 
         // Rows of the same size as real ones, the host name is the only part that varies

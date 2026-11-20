@@ -90,6 +90,10 @@ namespace MinerBot.Tests
         static readonly TimeSpan WaitLimit = TimeSpan.FromSeconds(15);
         static readonly TimeSpan ShortLimit = TimeSpan.FromMilliseconds(100);
 
+        // .NET's timers keep time on the system's coarse clock, whose tick is up to 15.6 ms on Windows and 4 ms on Linux, so a
+        // wait can end up to one tick before a Stopwatch started just before it reads its whole length
+        static readonly TimeSpan TimerTick = TimeSpan.FromMilliseconds(20);
+
         readonly JobRecord record = new();
         readonly RecordingLogger<JobHandler> logger = new();
         readonly ServiceProvider services;
@@ -366,6 +370,154 @@ namespace MinerBot.Tests
                 Assert.Equal(DateTimeKind.Utc, job.next_run_at!.Value.Kind);
                 Assert.Null(job.last_started_at);
             });
+        }
+
+        // Run now, for a dashboard request
+
+        // It starts at once, beside the schedule, which it leaves alone
+        [Fact]
+        public async Task RunNowStartsAtOnce()
+        {
+            var job = Due(nameof(TestJobs.Works))[0];
+            var nextRun = DateTimeOffset.Now.AddHours(1);
+            job.NextRun = nextRun;
+
+            var run = await handler.RunNowAsync(job, 42, WaitLimit, TestContext.Current.CancellationToken);
+
+            Assert.Equal(RunNowState.Ok, run.State);
+            Assert.Equal(1, record.StartsOf(nameof(TestJobs.Works)));
+            Assert.Equal(nextRun, job.NextRun);
+        }
+
+        // Two requests for one job at once, the first held inside the lock between its check and its start: the second
+        // waits for the lock, then finds the first running, so the job starts once. Two runs of the notification job would
+        // share its state, and could post the same thing twice.
+        [Fact]
+        public async Task AJobAlreadyRunningIsNotStartedAgain()
+        {
+            var clock = new GateClock();
+            await using var gatedServices = new ServiceCollection().AddSingleton(record).AddSingleton<TimeProvider>(clock).BuildServiceProvider();
+            var gated = new JobHandler(logger, gatedServices);
+            var job = Due(nameof(TestJobs.WaitsForRelease))[0];
+            var stop = TestContext.Current.CancellationToken;
+
+            try
+            {
+                var first = Task.Run(() => gated.RunNowAsync(job, 1, ShortLimit, stop), stop);
+                await clock.Entered.WaitAsync(WaitLimit, stop);
+
+                var second = Task.Run(() => gated.RunNowAsync(job, 2, ShortLimit, stop), stop);
+
+                // Long enough for the second to start a run of its own, if nothing stopped it
+                await Task.Delay(200, stop);
+                clock.Release();
+
+                var runs = await Task.WhenAll(first, second).WaitAsync(WaitLimit, stop);
+
+                Assert.Equal(1, record.StartsOf(nameof(TestJobs.WaitsForRelease)));
+                Assert.Equal([RunNowState.AlreadyRunning, RunNowState.StillRunning], runs.Select(run => run.State).Order());
+            }
+            finally
+            {
+                clock.Release();
+                record.Release.TrySetResult();
+            }
+
+            // Once it has ended, it can run again
+            await job.Running!.WaitAsync(WaitLimit, stop);
+            Assert.Equal(RunNowState.Ok, (await gated.RunNowAsync(job, 3, WaitLimit, stop)).State);
+        }
+
+        // A scheduled run that comes due during a requested run is skipped, and says why
+        [Fact]
+        public async Task AScheduledRunDuringARequestedRunIsSkipped()
+        {
+            var jobs = Due(nameof(TestJobs.WaitsForRelease));
+
+            try
+            {
+                Assert.Equal(RunNowState.StillRunning, (await recorded.RunNowAsync(jobs[0], 42, ShortLimit, TestContext.Current.CancellationToken)).State);
+
+                await RunPassAsync(jobs, recorded);
+
+                var skipped = Assert.Single(recorder.PeekJobRuns(10));
+                Assert.Equal((JobResult.Skipped, (string?)"the run asked for from the dashboard still runs"), (skipped.result, skipped.detail));
+                Assert.Equal(1, record.StartsOf(nameof(TestJobs.WaitsForRelease)));
+                Assert.True(logger.Logged(LogLevel.Warning, "TestJobs.WaitsForRelease is still running from a run asked for from the dashboard, so this run is skipped"));
+            }
+            finally
+            {
+                record.Release.TrySetResult();
+            }
+        }
+
+        // The request stops waiting at its limit, as near as the timers tell it, and JobHandler records the run's end whenever
+        // it comes
+        [Fact]
+        public async Task ARunPast60SecondsIsStillRunning()
+        {
+            var job = Due(nameof(TestJobs.WaitsForRelease))[0];
+
+            var run = await recorded.RunNowAsync(job, 42, ShortLimit, TestContext.Current.CancellationToken);
+
+            Assert.Equal(RunNowState.StillRunning, run.State);
+            Assert.True(run.Took >= ShortLimit - TimerTick, $"The request stopped waiting after {run.Took}");
+            Assert.Empty(recorder.PeekJobRuns(10));
+
+            record.Release.SetResult();
+            await WaitUntilAsync(() => recorder.PeekJobRuns(10).Count == 1, "The run's end was never recorded");
+
+            Assert.Equal((JobResult.Ok, (string?)"asked for on request 42"), (recorder.PeekJobRuns(10)[0].result, recorder.PeekJobRuns(10)[0].detail));
+        }
+
+        // Recorded as any run, its detail naming the request, and its own detail after it
+        [Fact]
+        public async Task RunNowIsRecordedWithItsRequest()
+        {
+            var jobs = Due(nameof(TestJobs.CountsRows), nameof(TestJobs.Works), nameof(TestJobs.FailsInItsOwnWords));
+
+            var runs = new List<RunNowResult>();
+
+            foreach (var job in jobs)
+                runs.Add(await recorded.RunNowAsync(job, 42, WaitLimit, TestContext.Current.CancellationToken));
+
+            Assert.Equal(
+            [
+                (RunNowState.Ok, "deleted 3 rows"),
+                (RunNowState.Ok, null),
+                (RunNowState.Failed, (string?)"deleted 1 event; failed: sessions (TimeoutException)")
+            ], runs.Select(run => (run.State, run.Detail)));
+            Assert.Equal(
+            [
+                (JobResult.Ok, "asked for on request 42: deleted 3 rows"),
+                (JobResult.Ok, "asked for on request 42"),
+                (JobResult.Failed, (string?)"asked for on request 42: deleted 1 event; failed: sessions (TimeoutException)")
+            ], recorder.PeekJobRuns(10).Select(run => (run.result, run.detail)));
+            Assert.Equal(["TestJobs.FailsInItsOwnWords failed: deleted 1 event; failed: sessions (TimeoutException)"],
+                recorder.PeekEvents(10).Where(row => row.kind == BotEvents.JobFailed).Select(row => row.detail));
+        }
+
+        // A clock whose first read waits until the test lets it go, holding the thread inside JobHandler's start
+        sealed class GateClock : TimeProvider
+        {
+            readonly TaskCompletionSource entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            readonly ManualResetEventSlim gate = new();
+            int reads;
+
+            public Task Entered => entered.Task;
+
+            public void Release() => gate.Set();
+
+            public override DateTimeOffset GetUtcNow()
+            {
+                if (Interlocked.Increment(ref reads) == 1)
+                {
+                    entered.TrySetResult();
+                    gate.Wait(WaitLimit);
+                }
+
+                return DateTimeOffset.UtcNow;
+            }
         }
 
         // Checks every job of the bot, so one that runs more often than the limit allows can't be added unnoticed

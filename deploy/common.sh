@@ -250,30 +250,35 @@ env_value() {   # env_value <file> <name>
 }
 
 # Sets NAME=value in an env file and keeps every other line where it is. The new file is written beside the old one, 600,
-# and renamed over it in one step. The value must pass env_safe.
+# read back, and renamed over it in one step only when it holds every line. The value must pass env_safe. Each step is
+# checked, so it returns 1 with the file as it was and no copy left beside it, also where set -e is off, as in a
+# before_stop, which die runs as before_stop || true: there a write that fails, as on a full disk, would otherwise rename
+# an empty or cut-off copy over the file.
 write_env() {   # write_env <file> <name> <value>
-    local file=$1 name=$2 value=$3 tmp line found=no
+    local file=$1 name=$2 value=$3 tmp line found=no text='' back=''
     env_safe "$value" || die "The value for $name breaks the safe-character rule ($env_rule), so $file wasn't changed."
-    tmp=$(mktemp "$(dirname "$file")/.$(basename "$file").XXXXXX")
-    {
-        if [ -f "$file" ]; then
-            while IFS= read -r -t 5 line || [ -n "$line" ]; do
-                if [[ $line == "$name="* ]]; then
-                    if [ "$found" = no ]; then
-                        printf '%s=%s\n' "$name" "$value"
-                    fi
-                    found=yes
-                else
-                    printf '%s\n' "$line"
+    if [ -f "$file" ]; then
+        while IFS= read -r -t 5 line || [ -n "$line" ]; do
+            if [[ $line == "$name="* ]]; then
+                if [ "$found" = no ]; then
+                    text+="$name=$value"$'\n'
                 fi
-            done < "$file"
-        fi
-        if [ "$found" = no ]; then
-            printf '%s=%s\n' "$name" "$value"
-        fi
-    } > "$tmp"
-    chmod 600 "$tmp"
-    mv -f "$tmp" "$file"
+                found=yes
+            else
+                text+="$line"$'\n'
+            fi
+        done < "$file" || return 1
+    fi
+    if [ "$found" = no ]; then
+        text+="$name=$value"$'\n'
+    fi
+    tmp=$(mktemp "$(dirname "$file")/.$(basename "$file").XXXXXX") || return 1
+    if printf '%s' "$text" > "$tmp" && chmod 600 "$tmp" && { IFS= read -r -t 5 -d '' back < "$tmp" || true; } \
+        && [ "$back" = "$text" ] && mv -f "$tmp" "$file"; then
+        return 0
+    fi
+    rm -f "$tmp"
+    return 1
 }
 
 # ---- Detached runs
@@ -551,6 +556,52 @@ dashboard_key() {
         key=$(env_value "$home/dashboard.env" Dashboard__ProxyKey 2> /dev/null) || key=
     fi
     printf '%s\n' "$key"
+}
+
+# The value of one setting in a container's environment, as Docker made the container, for comparing only: it's never
+# printed or put in a command line. Prints nothing for a setting the container doesn't have, and returns 1 when there's
+# no such container or Docker doesn't answer.
+container_env_value() {   # container_env_value <container> <name>
+    local vars line
+    vars=$(run_for 30 docker container inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$1" 2> /dev/null) || return 1
+    while IFS= read -r -t 5 line; do
+        if [[ $line == "$2="* ]]; then
+            printf '%s\n' "${line#"$2"=}"
+            return 0
+        fi
+    done <<< "$vars"
+}
+
+# What's wrong with the request-signing key, which the dashboard signs its requests to the bot with and the bot checks
+# them with: one line for each problem, saying what to run, or nothing when bot.env's REQUEST_SIGNING_KEY and
+# dashboard.env's Dashboard__RequestSigningKey are the same 64 hexadecimal digits in small letters, and each container
+# that exists runs with its file's. Each app reads its file only when its container is created. The keys are only
+# compared, never printed.
+request_key_problems() {
+    local key='^[0-9a-f]{64}$' bot dashboard running state
+    bot=$(env_value "$home/bot.env" REQUEST_SIGNING_KEY 2> /dev/null) || bot=
+    dashboard=$(env_value "$home/dashboard.env" Dashboard__RequestSigningKey 2> /dev/null) || dashboard=
+    if ! [[ $bot =~ $key ]]; then
+        echo "bot.env has no request-signing key, or one that isn't 64 hexadecimal digits in small letters, so the bot takes no requests from the dashboard. Run ./setup-dashboard.sh --no-questions, which gives bot.env dashboard.env's key, or both files a new one when neither has a good one, and recreates each app that runs with another key."
+    fi
+    if ! [[ $dashboard =~ $key ]]; then
+        echo "dashboard.env has no request-signing key, or one that isn't 64 hexadecimal digits in small letters, so the dashboard sends the bot no requests. Run ./setup-dashboard.sh --no-questions, which gives dashboard.env bot.env's key, or both files a new one when neither has a good one, and recreates each app that runs with another key."
+    fi
+    if [[ $bot =~ $key ]] && [[ $dashboard =~ $key ]] && [ "$bot" != "$dashboard" ]; then
+        echo "bot.env and dashboard.env hold different request-signing keys, so the bot refuses the dashboard's requests. Run ./setup-dashboard.sh --no-questions, which makes them agree on bot.env's and recreates each app that runs with another key."
+    fi
+    if running=$(container_env_value "$bot_container" REQUEST_SIGNING_KEY) && [ "$running" != "$bot" ]; then
+        # Setup recreates only a bot that runs, and leaves a stopped one stopped
+        state=$(run_for 30 docker container inspect -f '{{.State.Running}}' "$bot_container" 2> /dev/null) || state=
+        if [ "$state" = false ]; then
+            echo "The bot's container is stopped, and was made with another request-signing key than bot.env holds, so started as it is, it would refuse the dashboard's requests. Start it with docker compose up -d --no-build --no-deps --force-recreate bot, which makes it again with bot.env's key."
+        else
+            echo "The bot runs with another request-signing key than bot.env holds, so it refuses the dashboard's requests. Run ./setup-dashboard.sh --no-questions, which recreates it."
+        fi
+    fi
+    if running=$(container_env_value "$dashboard_container" Dashboard__RequestSigningKey) && [ "$running" != "$dashboard" ]; then
+        echo "The dashboard runs with another request-signing key than dashboard.env holds, so the bot refuses its requests. Run ./setup-dashboard.sh --no-questions, which recreates it."
+    fi
 }
 
 # The home page's HTTP status through the dashboard's socket, asked as nginx asks for it: the public name, https, and the
@@ -1058,6 +1109,7 @@ deploy_file_table() {
         "fill-secrets.sh $home/fill-secrets.sh 700" \
         "backup.sh $home/backup.sh 700" \
         "status.sh $home/status.sh 700" \
+        "request.sh $home/request.sh 700" \
         "README.txt $home/README.txt 600" \
         "minerbot.cron /etc/cron.d/minerbot 644" \
         "minerbot-dashboard.tmpfiles $tmpfiles_conf 644"
@@ -1070,11 +1122,11 @@ check_deploy_files() {   # check_deploy_files <folder> <commit>
     local stage=$1 name out
     local -a problems=()
     for name in compose.yml common.sh dashboard-rights.sql rights-list.sql minerbot-dashboard.conf deploy.sh rollback.sh \
-        setup-dashboard.sh fill-secrets.sh backup.sh status.sh bootstrap.sh README.txt minerbot.cron \
+        setup-dashboard.sh fill-secrets.sh backup.sh status.sh request.sh bootstrap.sh README.txt minerbot.cron \
         minerbot-dashboard.tmpfiles; do
         [ -f "$stage/$name" ] || problems+=("deploy/$name is missing.")
     done
-    for name in common.sh deploy.sh rollback.sh setup-dashboard.sh fill-secrets.sh backup.sh status.sh bootstrap.sh; do
+    for name in common.sh deploy.sh rollback.sh setup-dashboard.sh fill-secrets.sh backup.sh status.sh request.sh bootstrap.sh; do
         [ -f "$stage/$name" ] || continue
         if ! out=$(bash -n "$stage/$name" 2>&1); then
             problems+=("deploy/$name fails bash -n: ${out//$'\n'/ }")

@@ -173,7 +173,10 @@ STEAM_QRCODE_AUTH=true
 STEAMUSER_REMEMBERME=true
 STEAMAPP_ID=274900
 ALERT_USER_ID={Discord user ID that gets the bot's alerts (optional, the application's owner by default)}
+REQUEST_SIGNING_KEY={64 hexadecimal digits in small letters, the dashboard's Dashboard__RequestSigningKey (optional)}
 ```
+
+`REQUEST_SIGNING_KEY` is the key the bot checks the dashboard's requests against ([Requests to the bot](#-requests-to-the-bot)). On the server, `setup-dashboard.sh` makes it and writes it here and into the dashboard's settings. Without it, or with one in another form, the bot takes no requests: it records `requests.off` once, refuses each request with why, and runs as ever otherwise.
 
 ✅ Recommended: Commit a **safe template** called `.env.example`.
 
@@ -233,7 +236,33 @@ With `BotConnection` set, the bot records what it does in MinerBot's own databas
 
 The copy of the servers follows Discord within seconds: the bot notes each server where something changed, a channel, a role, its own roles or the server itself, and every 5 seconds writes the ones that did, so a new channel shows up in `guild_channels` within 15 seconds. It looks at every server again each time it connects to Discord with a new session, when it also marks as left the servers it was removed from while it was offline, and every 15 minutes, in case an event never came. A server in an outage is marked unavailable, never left. Without the members intent, Discord's member count is only right when Discord sends the server, so at 04:21 US Eastern each day the bot asks Discord's API for each server's count, one server at a time.
 
-What the bot records waits in memory until it's written, up to 6 hours of uptime samples, 1,000 events and 500 job runs, so a database that's down costs only the recording: the bot logs one warning for its status and history, and one for its servers when they can't be written either, tries again every 30 seconds to 5 minutes, and records the outage once it's back. The servers are noted rather than queued, so they're written again whole once it's back. A daily clean-up at 04:30 US Eastern keeps the audit log for 2 years with visitors' addresses cleared after 90 days, the events, the joins and leaves of servers, the job runs and the minute samples for 90 days with each day's totals kept, and dashboard sessions until 7 days after they end. The servers' rows, left ones too, and their daily member counts are kept.
+What the bot records waits in memory until it's written, up to 6 hours of uptime samples, 1,000 events and 500 job runs, so a database that's down costs only the recording: the bot logs one warning for its status and history, and one for its servers when they can't be written either, tries again every 30 seconds to 5 minutes, and records the outage once it's back. The one exception is a database that's down when the bot starts: until the bot has read whether its posts are paused ([Requests to the bot](#-requests-to-the-bot)), its armor, map and lobby posts wait too, which the request worker's warning says. The servers are noted rather than queued, so they're written again whole once it's back. A daily clean-up at 04:30 US Eastern keeps the audit log for 2 years with visitors' addresses cleared after 90 days, the events, the joins and leaves of servers, the job runs, the requests to the bot and the minute samples for 90 days with each day's totals kept, and dashboard sessions until 7 days after they end. The servers' rows, left ones too, and their daily member counts are kept.
+
+---
+
+## 📨 Requests to the bot
+
+The dashboard never talks to the bot. It leaves a request in MinerBot's own database, in `bot_commands`, and the bot, which looks every 3 seconds, takes it within seconds and writes how it ended on the same row, in its own words. The dashboard's controls page, which sends them, comes in a later pull request; until then the server's `deploy/request.sh` sends one ([deploy/README.md](deploy/README.md)).
+
+Each request is signed with a key only the two apps hold, `REQUEST_SIGNING_KEY` in the bot's settings and `Dashboard__RequestSigningKey` in the dashboard's, over every field the bot acts on, so a row written or changed without the key is refused. Before the bot acts, it checks the request against one fixed list in `MinerBot.Shared`: the kind, who may ask for it, its details, that it hasn't expired, and the limit, which it counts from the table, so a restart resets nothing. It takes each request at most once, one at a time in the order they came, and only while it's up on Discord, but for a restart, which is the cure for a bot stuck off it. After each Owner-level request it acts on, it sends the owner a direct message saying who asked and what happened. The dashboard's login can add a request, naming only the columns the dashboard fills in, and read them back; only the bot's own login writes how one ended. Every request has an audit row, written with it.
+
+| Request | What the bot does | Who may ask | At most | Waits |
+|---|---|---|---|---|
+| `caches.clear` | Clears its cached armor names and latest maps | Owner, Admin | 30 an hour | 2 minutes |
+| `job.notifications` | Runs the notification job now | Owner, Admin | once a minute | 2 minutes |
+| `job.colors` | Runs the colour job now | Owner | once a minute | 2 minutes |
+| `steam.renew` | Renews the Steam token, which the daily Steam-token job also does | Owner | once every 10 minutes | 2 minutes |
+| `posts.pause`, `posts.resume` | Pauses or resumes its armor, map and lobby posts. While paused, what it finds waits and is posted at the resume; `/admin announce`, the welcome message, test messages and direct messages aren't paused | Owner | 10 an hour, together | 10 minutes |
+| `status.set` | Sets the status text every server shows, 128 characters at most, with no link, mention, line break or hidden character, or back to the default, "Playing Murder Miners on my PC" | Owner | 6 an hour | 2 minutes |
+| `steam.reconnect` | Disconnects from Steam and logs on again | Owner | once every 5 minutes | 2 minutes |
+| `guild.test_message` | Posts a fixed, silent test embed in a text or announcement channel of one server | Owner, Admin, the server's own admins | 3 every 10 minutes, for each server | 2 minutes |
+| `guild.refresh` | Rewrites its copy of one server and its channels from Discord.Net's cache | Owner, Admin, the server's own admins | once a minute, for each server | 2 minutes |
+| `steam.lookup` | Looks up a custom Steam profile link's account number | Owner, Admin | 60 an hour | 2 minutes |
+| `guild.leave` | Leaves a server, which deletes that server's channel settings, as a removal does | Owner | 5 an hour | 2 minutes |
+| `bot.restart` | Restarts the bot: exits with code 3, and Docker starts it again. Never in the first 5 minutes after a start, nor during a notification run | Owner | once every 10 minutes | 2 minutes |
+| `owner.signin_alert` | Sends the owner a direct message about a dashboard sign-in, with no address | Owner, Admin | 20 an hour | 10 minutes |
+
+A request the bot hasn't taken by its time expires, and one it takes ends within a minute at most. The pause and the status text are kept in `bot_settings`, which only the bot writes, so a restart keeps both: while the bot hasn't read whether posts are paused, as just after a start, and for as long as MinerBot's database doesn't answer then, its posts wait. What a paused run found is kept only in memory, though, so a restart during a pause loses it, as a restart loses any post not yet sent. A map that waited is posted only if the first run that posts still finds it within the three pages of Steam's latest list a read takes, so a long pause through a busy spell of map updates can lose the oldest, as can a long start while MinerBot's database doesn't answer: that run's detail on the Bot page says how many.
 
 ---
 
@@ -253,6 +282,7 @@ The dashboard reads environment variables and checks them all as it starts. A mi
 |---|---|
 | `Dashboard__PublicOrigin` | `https://bot.murderminershub.com`, the address people open. Discord's sign-in comes back to `/signin-discord` there. |
 | `Dashboard__ProxyKey` | `{Proxy Key}`: 64 random hex characters that nginx adds to every request as `X-MinerBot-Proxy-Key`. Without it, the dashboard answers 404. Only letters, digits, `-` and `_` are allowed, because nginx's configuration reads other characters as variables or escapes. |
+| `Dashboard__RequestSigningKey` | Optional: `{Request Key}`, the key the dashboard signs its requests to the bot with ([Requests to the bot](#-requests-to-the-bot)), the same as the bot's `REQUEST_SIGNING_KEY`: 64 hexadecimal digits in small letters, which `setup-dashboard.sh` makes. Empty turns requests to the bot off; any other form stops the dashboard at its start. |
 | `Dashboard__Owners` | `{Owner's Discord User ID}` |
 | `Dashboard__Admins` | `{Admins' Discord User IDs, separated by commas}` (optional) |
 | `Dashboard__KeysFolder` | `{Keys Folder}`, where the sign-in keys are kept so a restart signs nobody out. The image sets `/app/keys`. |
@@ -303,11 +333,12 @@ The tests cover sign-in with a fake Discord instead.
 
 ### Commands
 
-The same program runs the deploy's three jobs, without starting the web app:
+The same program runs the deploy's jobs, and request.sh's, without starting the web app:
 
 - `dotnet MinerBot.Dashboard.dll migrate` brings MinerBot's own database up to date, using only `ConnectionStrings__BotConnection`, and exits 0 or 1.
 - `dotnet MinerBot.Dashboard.dll healthcheck` asks the running dashboard's `/health/live` where it listens, on its socket when `Dashboard__UnixSocket` is set, and exits 0 or 1. The image uses it as its health check, because it has no curl.
 - `dotnet MinerBot.Dashboard.dll check-settings` checks the settings the way a start would, then exits: 0 with "The dashboard's settings are fine.", or 1 with one line for each problem, naming the setting but never its value. Nothing listens and nothing connects. The deploy runs it on the new image after the build and any migrations, before the rights and the swap. Setup runs it on the `dashboard.env` it's about to write, after it undoes a cut-off nginx change if one is left, and before it changes the database login, the rights, nginx's files or `dashboard.env`.
+- `dotnet MinerBot.Dashboard.dll request <kind> [--guild <server ID>] [--channel <channel ID>]` sends the bot one request ([Requests to the bot](#-requests-to-the-bot)), through the same code the dashboard's pages use, as the first of `Dashboard__Owners`, named "request.sh on the server", then waits for the bot's answer and prints it; after a restart, it waits for the bot to be back on Discord. It reads its settings, `ConnectionStrings__BotConnection`, `Dashboard__RequestSigningKey` and `Dashboard__Owners`, and the request's text, `MINERBOT_REQUEST_TEXT`, from the environment only, never its command line, and prints no key or connection string. Exit code 0 done, 1 refused, failed, expired, unknown or no answer, 2 a bad argument or setting. `request --list` lists the kinds. The server's `deploy/request.sh` runs it.
 
 ### In Docker
 
@@ -375,7 +406,7 @@ Contributions are welcome!
 - `MinerBot 2.0`: the bot.
 - `DataAccessLibrary`: all of the SQL, for the website's tables and for MinerBot's own database, with the migrations that create MinerBot's tables.
 - `SteamWebAPIAccess`: Steam sign-in, lobbies and the Steam Web API.
-- `MinerBot.Shared`: rules and formats that the bot and the dashboard share, such as the armor approval rules, SteamID formats and Discord's limits. It references nothing outside .NET.
+- `MinerBot.Shared`: rules and formats that the bot and the dashboard share, such as the armor approval rules, SteamID formats, Discord's limits, and the list of requests to the bot with its signing code. It references nothing outside .NET.
 - `MinerBot.Dashboard`: the web dashboard. It references `DataAccessLibrary` and `MinerBot.Shared`, and nothing of the bot's or of Steam's.
 - `MinerBot.Tests`, `SteamWebAPIAccess.Tests`, `DataAccessLibrary.Tests`, `MinerBot.Shared.Tests` and `MinerBot.Dashboard.Tests`: the tests.
 - `docs/schema/wordpress-tables.sql`: the structure of the three website tables MinerBot uses.

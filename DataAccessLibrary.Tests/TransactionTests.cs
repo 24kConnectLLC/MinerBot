@@ -8,10 +8,12 @@ using DataAccessLibrary.Dashboard;
 using DataAccessLibrary.Dashboard.Models;
 using DataAccessLibrary.Guilds;
 using DataAccessLibrary.Guilds.Models;
+using DataAccessLibrary.Requests;
 using DataAccessLibrary.Status;
 using DataAccessLibrary.Status.Models;
 using DataAccessLibrary.Tests.Database;
 using MinerBot.Shared.Armor;
+using MinerBot.Shared.Requests;
 using MySql.Data.MySqlClient;
 
 namespace DataAccessLibrary.Tests
@@ -195,7 +197,7 @@ namespace DataAccessLibrary.Tests
             // in changes with the folder the tests run from
             await db.ClearAsync(MariaDbFixture.SessionTable, MariaDbFixture.StatusTable, MariaDbFixture.EventTable, MariaDbFixture.JobRunTable,
                 MariaDbFixture.JobStatusTable, MariaDbFixture.SampleTable, MariaDbFixture.DailyTable, MariaDbFixture.BotGuildTable, MariaDbFixture.BotChannelTable,
-                MariaDbFixture.GuildEventTable, MariaDbFixture.GuildDailyTable);
+                MariaDbFixture.GuildEventTable, MariaDbFixture.GuildDailyTable, MariaDbFixture.RequestTable, MariaDbFixture.SettingsTable);
             const string alternative = "minerbot-alt`db";
             const string quoted = "`minerbot-alt``db`";
 
@@ -302,13 +304,45 @@ namespace DataAccessLibrary.Tests
             Assert.True(await guilds.LeaveGuild(1, Noon.AddSeconds(1), 1, 2, null));
             Assert.Equal(2, await retention.DeleteGuildEvents(Noon.AddSeconds(2), 10));
 
-            foreach (var table in new[] { "bot_status", "job_status", "uptime_daily", "guilds", "guild_daily" })
+            // The requests to the bot: the dashboard's insert with its audit row and its reads, the bot's answer, its settings,
+            // and the clean-up
+            var queue = new BotRequestQueue(factory, names);
+            var requests = new BotRequestData(factory, names);
+            var refresh = RequestFields.New(RequestFields.NewKey(), RequestKinds.Find(RequestKinds.GuildRefresh)!, 1000000000000000001, "Test Admin",
+                RequestRoles.Admin, 1, null, null, Noon);
+
+            var requestId = await queue.RunInTransaction(async transaction =>
+            {
+                var added = await queue.AddRequest(refresh, new byte[RequestSigning.SignatureLength], transaction);
+                await audit.AddAudit(Audit(), transaction);
+                return added;
+            });
+
+            Assert.Equal([requestId], await requests.ListOpenIds(1, 20, restartOnly: false));
+            Assert.NotNull(await requests.GetRequest(requestId));
+            Assert.NotNull(await queue.GetRequest(requestId));
+            Assert.Equal(requestId, (await queue.GetRequestByKey(refresh.RequestKey))?.id);
+            Assert.True(await requests.Claim(requestId, 1, Noon.AddSeconds(1)));
+            Assert.Equal(1, (await requests.CountClaims([RequestKinds.GuildRefresh], Noon, 1)).count);
+            Assert.True(await requests.Finish(requestId, 1, RequestStates.Done, "Done", null, Noon.AddSeconds(2)));
+            Assert.True(await requests.SetDm(requestId, RequestDmStates.Sent));
+            Assert.False(await requests.Decide(requestId, 1, RequestStates.Refused, "Refused", Noon.AddSeconds(3)));
+            Assert.Empty(await requests.SweepOtherRuns(2, Noon.AddSeconds(3), "Unknown", Noon.AddSeconds(3)));
+            Assert.Empty(await requests.ListUntoldRestarts(2, Noon));
+            await requests.SavePause(true, "Testing", Noon, 1, requestId, Noon);
+            await requests.SaveStatus("Testing", Noon, 1, requestId, Noon);
+            Assert.True((await requests.GetSettings())?.posts_paused);
+            Assert.Equal("Testing", (await queue.GetSettings())?.status_text);
+            Assert.Equal(1, await retention.DeleteRequests(Noon.AddSeconds(1), 10));
+
+            foreach (var table in new[] { "bot_status", "job_status", "uptime_daily", "guilds", "guild_daily", "bot_settings" })
                 Assert.Equal(1, await CountAsync($"{quoted}.{table}"));
 
             // Nothing reached the real database's tables
             foreach (var table in new[] { MariaDbFixture.AuditTable, MariaDbFixture.ReviewTable, MariaDbFixture.SessionTable, MariaDbFixture.StatusTable,
                 MariaDbFixture.EventTable, MariaDbFixture.JobRunTable, MariaDbFixture.JobStatusTable, MariaDbFixture.SampleTable, MariaDbFixture.DailyTable,
-                MariaDbFixture.BotGuildTable, MariaDbFixture.BotChannelTable, MariaDbFixture.GuildEventTable, MariaDbFixture.GuildDailyTable })
+                MariaDbFixture.BotGuildTable, MariaDbFixture.BotChannelTable, MariaDbFixture.GuildEventTable, MariaDbFixture.GuildDailyTable,
+                MariaDbFixture.RequestTable, MariaDbFixture.SettingsTable })
                 Assert.Equal(0, await CountAsync(table));
         }
 

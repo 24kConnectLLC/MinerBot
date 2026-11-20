@@ -8,9 +8,11 @@ using DataAccessLibrary.Dashboard;
 using DataAccessLibrary.Dashboard.Models;
 using DataAccessLibrary.Guilds;
 using DataAccessLibrary.Guilds.Models;
+using DataAccessLibrary.Requests;
 using DataAccessLibrary.Status;
 using DataAccessLibrary.Status.Models;
 using MinerBot.Shared.Armor;
+using MinerBot.Shared.Requests;
 
 namespace DataAccessLibrary.Tests
 {
@@ -411,6 +413,8 @@ namespace DataAccessLibrary.Tests
             await RefusedAsync(() => retention.TotalUptimeDays(DateTime.SpecifyKind(day, DateTimeKind.Local), day));
             await RefusedAsync(() => retention.DeleteGuildEvents(DateTime.Now, 1));
             await RefusedAsync(() => retention.DeleteGuildEvents(day, RetentionData.ChunkLimit + 1));
+            await RefusedAsync(() => retention.DeleteRequests(DateTime.Now, 1));
+            await RefusedAsync(() => retention.DeleteRequests(day, 0));
         }
 
         static BotGuild Server() => new() { guild_id = 1, name = "Test Server", available = true };
@@ -493,6 +497,135 @@ namespace DataAccessLibrary.Tests
             await Assert.ThrowsAsync<InvalidOperationException>(() => missing.MarkUnavailable(Enumerable.Range(1, BotGuildData.BatchLimit).Select(id => (ulong)id).ToList(), DateTime.UtcNow));
             await Assert.ThrowsAsync<InvalidOperationException>(() => missing.SaveMemberCount(1, 10, day, DateTime.UtcNow));
             await Assert.ThrowsAsync<InvalidOperationException>(() => missing.ListGuildsIn());
+            Assert.Equal(0, database.Created);
+        }
+
+        static readonly DateTime Made = new(2026, 11, 20, 15, 4, 5, 123, DateTimeKind.Utc);
+
+        // A request the bot would take as it stands, with a signature of the right length
+        static RequestFields Request(string kind = RequestKinds.CachesClear, string role = RequestRoles.Admin, ulong? guildId = null, ulong? channelId = null,
+            string? argument = null) =>
+            RequestFields.New("00112233445566778899aabbccddeeff", RequestKinds.Find(kind)!, 1000000000000000001, "Test Admin", role, guildId, channelId, argument, Made);
+
+        static readonly byte[] Signature = new byte[RequestSigning.SignatureLength];
+
+        // A transaction with no connection: a refusal must come before its first statement
+        static DataTransaction NoTransaction() => new(null!, null!, 1, CancellationToken.None);
+
+        // A request the bot would refuse is refused before any SQL, so the audit row it travels with doesn't go in either:
+        // one in another form, of a kind not on the list, from a role its kind doesn't allow, made to last longer than its
+        // kind may, with details its kind doesn't take, or without a whole signature
+        [Theory]
+        [InlineData("a key in capitals")]
+        [InlineData("a name with a line break")]
+        [InlineData("a time past the millisecond")]
+        [InlineData("a local time")]
+        [InlineData("a kind not on the list")]
+        [InlineData("a role the kind doesn't allow")]
+        [InlineData("lasting longer than its kind")]
+        [InlineData("a server it doesn't take")]
+        [InlineData("no server where it needs one")]
+        [InlineData("a status text with a link")]
+        [InlineData("a custom link with a Kelvin sign")]
+        [InlineData("a signature of another length")]
+        [InlineData("no signature")]
+        public async Task RequestTheBotWouldRefuseIsNotAdded(string problem)
+        {
+            var fields = Request();
+            var signature = Signature;
+
+            switch (problem)
+            {
+                case "a key in capitals": fields = fields with { RequestKey = "00112233445566778899AABBCCDDEEFF" }; break;
+                case "a name with a line break": fields = fields with { ActorName = "Test\nAdmin" }; break;
+                case "a time past the millisecond": fields = fields with { CreatedAt = Made.AddTicks(1) }; break;
+                case "a local time": fields = fields with { ExpiresAt = DateTime.SpecifyKind(fields.ExpiresAt, DateTimeKind.Local) }; break;
+                case "a kind not on the list": fields = fields with { Kind = "caches.empty" }; break;
+                case "a role the kind doesn't allow": fields = fields with { ActorRole = RequestRoles.ServerAdmin }; break;
+                case "lasting longer than its kind": fields = fields with { ExpiresAt = fields.ExpiresAt.AddMilliseconds(1) }; break;
+                case "a server it doesn't take": fields = fields with { GuildId = 1 }; break;
+                case "no server where it needs one": fields = Request(RequestKinds.GuildRefresh); break;
+                case "a status text with a link": fields = Request(RequestKinds.StatusSet, RequestRoles.Owner, argument: "https://x"); break;
+                case "a custom link with a Kelvin sign": fields = Request(RequestKinds.SteamLookup, argument: char.ConvertFromUtf32(0x212A) + "elvin"); break;
+                case "a signature of another length": signature = new byte[RequestSigning.SignatureLength - 1]; break;
+                case "no signature": signature = null!; break;
+                default: throw new ArgumentOutOfRangeException(nameof(problem), problem, "The test has no such case");
+            }
+
+            await RefusedAsync(() => new BotRequestQueue(database, NoDatabase.Names).AddRequest(fields, signature, NoTransaction()));
+        }
+
+        // Each limit is the column's or the kind's, so a request just inside them gets as far as its SQL, which names the
+        // database
+        [Fact]
+        public async Task RequestAtTheLimitsGetsAsFarAsItsSql()
+        {
+            var missing = new BotRequestQueue(database, new DatabaseNames(new Dictionary<DBConnectionName, string>()));
+            var fields = Request(RequestKinds.PostsPause, RequestRoles.Owner, argument: new string('r', 199) + char.ConvertFromUtf32(0x1F600)) with
+            {
+                ActorName = new string('n', 99) + char.ConvertFromUtf32(0x1F3AE)
+            };
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() => missing.AddRequest(fields, Signature, NoTransaction()));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => missing.AddRequest(Request(RequestKinds.GuildTestMessage, RequestRoles.ServerAdmin, 1, 2), Signature,
+                NoTransaction()));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => missing.AddRequest(Request(RequestKinds.StatusSet, RequestRoles.Owner), Signature, NoTransaction()));
+            Assert.Equal(0, database.Created);
+        }
+
+        // The bot's own writes of a request's end and its settings: only the states each may write, a result that says
+        // something, times in UTC, and a reason and a status text that fit their columns. A mistake in the bot, refused
+        // before any SQL.
+        [Fact]
+        public async Task RequestWritesThatCantBeSavedAreRefused()
+        {
+            var requests = new BotRequestData(database, NoDatabase.Names);
+            var now = DateTime.UtcNow;
+
+            await RefusedAsync(() => requests.Decide(1, 1, RequestStates.Done, "Done", now));
+            await RefusedAsync(() => requests.Decide(1, 1, RequestStates.Running, "Running", now));
+            await RefusedAsync(() => requests.Decide(1, 1, "Refused", "Refused", now));
+            await RefusedAsync(() => requests.Decide(1, 1, RequestStates.Refused, "", now));
+            await RefusedAsync(() => requests.Decide(1, 1, RequestStates.Refused, "Refused", DateTime.Now));
+            await RefusedAsync(() => requests.Claim(1, 1, DateTime.Now));
+            await RefusedAsync(() => requests.Finish(1, 1, RequestStates.Refused, "Refused", null, now));
+            await RefusedAsync(() => requests.Finish(1, 1, RequestStates.Expired, "Expired", null, now));
+            await RefusedAsync(() => requests.Finish(1, 1, RequestStates.Running, "Running", null, now));
+            await RefusedAsync(() => requests.Finish(1, 1, RequestStates.Done, null!, null, now));
+            await RefusedAsync(() => requests.Finish(1, 1, RequestStates.Done, "Done", null, DateTime.Now));
+            await RefusedAsync(() => requests.SetDm(1, "delivered"));
+            await RefusedAsync(() => requests.SetDm(1, "Sent"));
+            await RefusedAsync(() => requests.SweepOtherRuns(1, DateTime.Now, "Unknown", now));
+            await RefusedAsync(() => requests.SweepOtherRuns(1, now, "Unknown", DateTime.Now));
+            await RefusedAsync(() => requests.SweepOtherRuns(1, now, "", now));
+            await RefusedAsync(() => requests.SavePause(true, null, now, 1, 1, now));
+            await RefusedAsync(() => requests.SavePause(true, "", now, 1, 1, now));
+            await RefusedAsync(() => requests.SavePause(true, new string('r', 201), now, 1, 1, now));
+            await RefusedAsync(() => requests.SavePause(false, "Testing", now, 1, 1, now));
+            await RefusedAsync(() => requests.SavePause(true, "Testing", DateTime.Now, 1, 1, now));
+            await RefusedAsync(() => requests.SavePause(true, "Testing", now, 1, 1, DateTime.Now));
+            await RefusedAsync(() => requests.SaveStatus("", now, 1, 1, now));
+            await RefusedAsync(() => requests.SaveStatus(new string('s', 129), now, 1, 1, now));
+            await RefusedAsync(() => requests.SaveStatus("Testing", DateTime.Now, 1, 1, now));
+            await RefusedAsync(() => requests.SaveStatus("Testing", now, 1, 1, DateTime.Now));
+        }
+
+        // Each limit is the column's, so values just inside them get as far as their SQL, and a result past its column is cut
+        [Fact]
+        public async Task RequestWritesAtTheLimitsPass()
+        {
+            var missing = new BotRequestData(database, new DatabaseNames(new Dictionary<DBConnectionName, string>()));
+            var now = DateTime.UtcNow;
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() => missing.Decide(1, 1, RequestStates.Expired, new string('r', 400), now));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => missing.Claim(1, 1, now));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => missing.Finish(1, 1, RequestStates.Unknown, new string('r', 400), ulong.MaxValue, now));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => missing.SetDm(1, RequestDmStates.Failed));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => missing.SweepOtherRuns(1, now, new string('r', 400), now));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => missing.SavePause(true, new string('r', 199) + char.ConvertFromUtf32(0x1F600), now, 1, 1, now));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => missing.SavePause(false, null, now, 1, 1, now));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => missing.SaveStatus(new string('s', 127) + char.ConvertFromUtf32(0x1F600), now, 1, 1, now));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => missing.SaveStatus(null, now, 1, 1, now));
             Assert.Equal(0, database.Created);
         }
     }

@@ -43,5 +43,15 @@ namespace DataAccessLibrary
 
             return await _connection.QueryFirstOrDefaultAsync<T>(new CommandDefinition(_limits + sql, parameters, _transaction, cancellationToken: _abandoned)).ConfigureAwait(false);
         }
+
+        // Every row a read finds, as QueryFirst finds the first. With FOR UPDATE it keeps them all locked until the
+        // transaction ends, so a change that follows applies to exactly those rows.
+        internal async Task<IReadOnlyList<T>> Query<T>(string sql, object? parameters)
+        {
+            _abandoned.ThrowIfCancellationRequested();
+
+            var rows = await _connection.QueryAsync<T>(new CommandDefinition(_limits + sql, parameters, _transaction, cancellationToken: _abandoned)).ConfigureAwait(false);
+            return rows.ToList();
+        }
     }
 }

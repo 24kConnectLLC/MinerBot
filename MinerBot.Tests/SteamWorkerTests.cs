@@ -62,6 +62,9 @@ namespace MinerBot.Tests
             await worker.StopAsync(CancellationToken.None);
 
             Assert.True(logger.Logged(LogLevel.Critical, "The scheduled jobs couldn't start"));
+
+            // So a dashboard request for a job is refused, rather than left waiting for a start that won't come
+            Assert.True(host.Services.GetRequiredService<JobHandler>().StartFailed);
         }
 
         // Docker's on-failure restart policy goes by the exit code, and the host leaves it at 0.

@@ -82,3 +82,13 @@ GRANT SELECT ON `{{BOT_DB}}`.`guild_daily` TO {{GRANTEES}};
 -- dashboards' own files have, which deploy.sh compares statement by statement. Only the website and the bot's /admin
 -- set_channels change them.
 GRANT SELECT ON `{{SITE_DB}}`.`ihvph_discord_servers` TO {{GRANTEES}};
+
+-- The dashboard's requests to the bot. It adds a signed request and reads requests back, with how the bot answered, but
+-- its INSERT names only the columns the dashboard fills in, so a request's state, run, times, result and DM state start
+-- NULL and only the bot's own login writes them. Without UPDATE or DELETE it can never change or delete a row, which
+-- REPLACE and ON DUPLICATE KEY UPDATE would need too.
+GRANT SELECT ON `{{BOT_DB}}`.`bot_commands` TO {{GRANTEES}};
+GRANT INSERT (`request_key`, `kind`, `actor_id`, `actor_name`, `actor_role`, `guild_id`, `channel_id`, `argument`, `created_at`, `expires_at`, `signature`) ON `{{BOT_DB}}`.`bot_commands` TO {{GRANTEES}};
+
+-- The bot's pause flag and status text, which only signed requests change
+GRANT SELECT ON `{{BOT_DB}}`.`bot_settings` TO {{GRANTEES}};

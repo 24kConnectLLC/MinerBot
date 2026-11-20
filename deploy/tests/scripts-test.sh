@@ -224,6 +224,9 @@ client_id=100000000000000009
 secret1=Mbtest-Client-Secret_0123456789abcdef
 owners=100000000000000001,100000000000000002
 key1=$(printf 'mbtest proxy key one' | sha256sum | cut -c1-64)
+# The request-signing key the states from setup on hold in both env files, and another one
+req1=$(printf 'mbtest request key one' | sha256sum | cut -c1-64)
+req2=$(printf 'mbtest request key two' | sha256sum | cut -c1-64)
 pw1=MbtestDbPassword0123456789abcdefghijklmn
 aud=$(printf 'mbtest access audience' | sha256sum | cut -c1-64)
 cpanel_secret=MBTEST-CPANEL-SECRET-0123
@@ -511,13 +514,15 @@ harvest_secrets() {   # the secrets of the case's state, for case 19
         if [ -f "$home/dashboard.env" ]; then
             sed -n 's/^Dashboard__ProxyKey=//p; s/^Discord__ClientSecret=//p; s/.*;Pwd=\([^;]*\);.*/\1/p' "$home/dashboard.env"
         fi
-        for f in "$home/dashboard.env.previous" "$home/dashboard.env.next"; do
-            if [ -f "$f" ]; then sed -n 's/^Dashboard__ProxyKey=//p; s/.*;Pwd=\([^;]*\);.*/\1/p' "$f"; fi
+        for f in "$home/dashboard.env" "$home/dashboard.env.previous" "$home/dashboard.env.next"; do
+            if [ -f "$f" ]; then sed -n 's/^Dashboard__ProxyKey=//p; s/^Dashboard__RequestSigningKey=//p; s/.*;Pwd=\([^;]*\);.*/\1/p' "$f"; fi
         done
         if [ -f /etc/nginx/minerbot/proxy-key.conf ]; then sed -n 's/.*"\([0-9a-f]\{64\}\)".*/\1/p' /etc/nginx/minerbot/proxy-key.conf; fi
         if [ -f /fake/db/password ]; then cat /fake/db/password; fi
         if [ -f /fake/db/bot-password ]; then cat /fake/db/bot-password; fi
-        if [ -f "$home/bot.env" ]; then sed -n 's/^BOTTOKEN=//p; s/^STEAMWEB_PUB_KEY=//p' "$home/bot.env"; fi
+        for f in "$home/bot.env" "$home/bot.env.previous" "$home/bot.env.next"; do
+            if [ -f "$f" ]; then sed -n 's/^BOTTOKEN=//p; s/^STEAMWEB_PUB_KEY=//p; s/^REQUEST_SIGNING_KEY=//p' "$f"; fi
+        done
     } >> /fake/secrets.txt 2> /dev/null
 }
 
@@ -576,7 +581,7 @@ file_table() {   # where each deploy file is installed, and its mode
         "minerbot-dashboard.conf $home/minerbot-dashboard.conf 600" "deploy.sh $home/deploy.sh 700" \
         "rollback.sh $home/rollback.sh 700" "setup-dashboard.sh $home/setup-dashboard.sh 700" \
         "fill-secrets.sh $home/fill-secrets.sh 700" "backup.sh $home/backup.sh 700" "status.sh $home/status.sh 700" \
-        "README.txt $home/README.txt 600" "minerbot.cron /etc/cron.d/minerbot 644" \
+        "request.sh $home/request.sh 700" "README.txt $home/README.txt 600" "minerbot.cron /etc/cron.d/minerbot 644" \
         "minerbot-dashboard.tmpfiles /etc/tmpfiles.d/minerbot-dashboard.conf 644"
 }
 
@@ -604,7 +609,7 @@ render_readme_here() {   # README.txt as install_deploy_files renders it, from t
     chmod 600 "$home/README.txt"
 }
 
-write_dashboard_env() {   # write_dashboard_env <proxy key> <password> <admins>: the file as setup writes it
+write_dashboard_env() {   # write_dashboard_env <proxy key> <password> <admins> [<request key>]: the file as setup writes it
     local header1 header2
     header1=$(sed -n 's/^env_header_1="\(.*\)"$/\1/p' /repo/deploy/setup-dashboard.sh)
     header2=$(sed -n 's/^env_header_2="\(.*\)"$/\1/p' /repo/deploy/setup-dashboard.sh)
@@ -616,6 +621,7 @@ write_dashboard_env() {   # write_dashboard_env <proxy key> <password> <admins>:
             "CloudflareAccess__TeamDomain=" "CloudflareAccess__Audience="
         printf 'ConnectionStrings__DefaultConnection=Server=127.0.0.1;Port=3306;Database=website_db;Uid=minerbot-dashboard;Pwd=%s;SslMode=Disabled;Connection Timeout=15;CharSet=utf8mb4;Maximum Pool Size=6;\n' "$2"
         printf 'ConnectionStrings__BotConnection=Server=127.0.0.1;Port=3306;Database=minerbot_db;Uid=minerbot-dashboard;Pwd=%s;SslMode=Disabled;Connection Timeout=15;CharSet=utf8mb4;Maximum Pool Size=6;\n' "$2"
+        printf 'Dashboard__RequestSigningKey=%s\n' "${4-$req1}"
     } > "$home/dashboard.env"
     chmod 600 "$home/dashboard.env"
 }
@@ -726,7 +732,7 @@ prepare() {
     make_repo
     make_certs
     make_nginx
-    printf '%s\n' "$bot_pw" "$bot_token" "$steam_key" "$secret1" "$key1" "$pw1" "$cpanel_secret" "$private_secret" \
+    printf '%s\n' "$bot_pw" "$bot_token" "$steam_key" "$secret1" "$key1" "$req1" "$req2" "$pw1" "$cpanel_secret" "$private_secret" \
         "$(sed -n 2p /work/certs/good-key.pem)" "$(sed -n 2p /work/certs/good2-key.pem)" > /fake/secrets.txt
 
     echo "Making the server's states: today's, after the move, built, set up and deployed."
@@ -914,6 +920,8 @@ world_setup() {   # after the first setup: the login, dashboard.env and nginx's 
     cp /etc/nginx/minerbot/proxy-key.conf /fake/nginx/loaded-proxy-key.conf
     touch /fake/db/login-localhost /fake/db/login-127.0.0.1 /fake/db/dashboard-applied
     echo "$pw1" > /fake/db/password
+    # The request-signing key, which setup writes to bot.env first, then dashboard.env
+    printf 'REQUEST_SIGNING_KEY=%s\n' "$req1" >> "$home/bot.env"
     write_dashboard_env "$key1" "$pw1" ""
     render_readme_here
     printf '2026-11-05T08:10:00Z\tsetup\tdashboard\t-\tok\tlogin created, nginx files, dashboard.env\n' >> "$home/logs/history.log"
@@ -2076,8 +2084,8 @@ case_38() {
 }
 
 case_39() {
-    begin 39 "die: a script's before_stop runs once, first, even when it stops itself; a detached run's die writes its failed history line and RESULT failed"
-    local said_file=/tmp/mbtest-die.out
+    begin 39 "die: a script's before_stop runs once, first, even when it stops itself; a detached run's die writes its failed history line and RESULT failed; write_env where set -e is off, as die runs a before_stop, returns 1 and leaves the file as it was, with no copy beside it, when its copy can't be written, and a write that works keeps the other lines"
+    local said_file=/tmp/mbtest-die.out env_dir=/tmp/mbtest-env before key_a key_b
     rm -rf /tmp/mbtest-die-home
     # shellcheck disable=SC2016 # the commands are for the bash below
     bash -c 'source /repo/deploy/common.sh; home=/tmp/mbtest-die-home
@@ -2096,6 +2104,29 @@ case_39() {
     tail -n 1 /tmp/mbtest-die-home/logs/history.log 2> /dev/null | grep -qP "\tdeploy\tbot\t0123456789ab\tfailed\tstopped while doing a made-up step$" \
         || problem "a detached die wrote no failed history line" "$(cat /tmp/mbtest-die-home/logs/history.log 2>&1)"
     rm -rf /tmp/mbtest-die-home
+
+    # write_env with set -e off, when no write can make a file grow, as on a full disk: ulimit -f 0, with SIGXFSZ ignored
+    # so a write fails with EFBIG. Unchecked, its printf failed and an empty copy was renamed over the file.
+    key_a=$(printf 'mbtest write_env key a' | sha256sum | cut -c1-64)
+    key_b=$(printf 'mbtest write_env key b' | sha256sum | cut -c1-64)
+    rm -rf "$env_dir"
+    mkdir -p "$env_dir"
+    printf 'BOTTOKEN=made-up\nREQUEST_SIGNING_KEY=%s\nOTHER=kept\n' "$key_a" > "$env_dir/bot.env"
+    before=$(sha256sum < "$env_dir/bot.env")
+    # shellcheck disable=SC2016
+    bash -c 'source /repo/deploy/common.sh; trap "" XFSZ
+        (ulimit -f 0; write_env "$1/bot.env" REQUEST_SIGNING_KEY "$2" || exit "$?")
+        echo "write_env returned $?"' - "$env_dir" "$key_b" > "$said_file" 2>&1
+    grep -qx 'write_env returned 1' "$said_file" && [ "$(sha256sum < "$env_dir/bot.env")" = "$before" ] \
+        && [ "$(ls -A "$env_dir")" = bot.env ] \
+        || problem "write_env with set -e off didn't return 1 with the file as it was, and no copy beside it, when its copy couldn't be written" \
+            "$(cat "$said_file"; ls -lA "$env_dir")"
+    # shellcheck disable=SC2016
+    bash -c 'source /repo/deploy/common.sh; write_env "$1/bot.env" REQUEST_SIGNING_KEY "$2"' - "$env_dir" "$key_b" > "$said_file" 2>&1
+    [ "$(cat "$env_dir/bot.env")" = "$(printf 'BOTTOKEN=made-up\nREQUEST_SIGNING_KEY=%s\nOTHER=kept' "$key_b")" ] \
+        && [ "$(stat -c %a "$env_dir/bot.env")" = 600 ] && [ "$(ls -A "$env_dir")" = bot.env ] \
+        || problem "write_env didn't set the value with every other line kept, mode 600" "$(cat "$said_file"; ls -lA "$env_dir")"
+    rm -rf "$env_dir"
     verdict
 }
 
@@ -3256,9 +3287,43 @@ case_50() {
     verdict
 }
 
+# For the runs that need it: a BASH_ENV file, which every bash of a run reads first, where printf '%s' <text> into a
+# file whose path matches one of the patterns in MBTEST_FULL writes the start of the text and fails, as on a full disk.
+# With MBTEST_FULL_FROM=<n>, the writes before the n-th such write land, as when the disk fills up during the run.
+# write_env writes its copy of an env file that way, and nothing else in the scripts does. Its own names start with
+# mbtest_, so a printf -v of the scripts never sets one of them instead of its own.
+full_disk_seam() {
+    echo 0 > /tmp/mbtest-full-count
+    cat > /tmp/mbtest-full.sh << 'EOF'
+printf() {
+    local -
+    local mbtest_pid=$BASHPID mbtest_target mbtest_pattern mbtest_n=0
+    if [ "${1-}" = '%s' ] && [ $# -eq 2 ] && [ -n "${MBTEST_FULL:-}" ]; then
+        set -f
+        mbtest_target=$(readlink "/proc/$mbtest_pid/fd/1" 2> /dev/null) || mbtest_target=
+        for mbtest_pattern in $MBTEST_FULL; do
+            # shellcheck disable=SC2053 # a pattern
+            if [[ $mbtest_target == $mbtest_pattern ]]; then
+                if [ -n "${MBTEST_FULL_FROM:-}" ]; then
+                    read -r mbtest_n 2> /dev/null < /tmp/mbtest-full-count || mbtest_n=0
+                    mbtest_n=$((mbtest_n + 1))
+                    echo "$mbtest_n" > /tmp/mbtest-full-count
+                    [ "$mbtest_n" -ge "$MBTEST_FULL_FROM" ] || break
+                fi
+                builtin printf '%s' "${2:0:20}"
+                echo "bash: printf: write error: No space left on device (scripts-test's BASH_ENV)" >&2
+                return 1
+            fi
+        done
+    fi
+    builtin printf "$@"
+}
+EOF
+}
+
 case_51() {
-    begin 51 "--rotate-db-password runs that stop: a rights failure stops them before the password changes, so MariaDB, dashboard.env and the dashboard keep the old one; a stop after the change gives dashboard.env the new password and recreates the dashboard; a stop after nginx reloaded with a new proxy key moves the whole candidate"
-    local env_before fake pw key running
+    begin 51 "--rotate-db-password runs that stop: a rights failure stops them before the password changes, so MariaDB, dashboard.env and the dashboard keep the old one; a stop after the change gives dashboard.env the new password and recreates the dashboard; a stop after nginx reloaded with a new proxy key moves the whole candidate, whose new request-signing key bot.env holds too; when bot.env can't take the new key, it stays as it was, and the candidate moves with bot.env's own; when dashboard.env can't take the new password, as on a full disk, also when the disk fills up between its two connection strings, setup says so, leaves dashboard.env as it was and doesn't start the dashboard on the old one, also when nginx refused the new files"
+    local env_before fake pw key req running
     for fake in FAKE_REHEARSAL=fail FAKE_APPLY=fail FAKE_RIGHTS_EXTRA=1; do
         restore deployed
         env_before=$(sha256sum < "$home/dashboard.env")
@@ -3290,17 +3355,111 @@ case_51() {
     # dashboard.env.previous makes that move fail
     restore deployed
     mkdir -p "$home/dashboard.env.previous/dashboard.env"
-    in_home key-reloaded 120 ./setup-dashboard.sh --no-questions --yes --rotate-proxy-key
+    in_home key-reloaded 120 ./setup-dashboard.sh --no-questions --yes --rotate-proxy-key --rotate-request-key
     expect_exit 1 "the key rotation that stopped after nginx's reload"
     expect_said "nginx runs the new files already, so dashboard.env got its new settings too." "the key rotation that stopped after nginx's reload"
     key=$(sed -n 's/^Dashboard__ProxyKey=//p' "$home/dashboard.env")
     [ -n "$key" ] && [ "$key" != "$key1" ] \
         && [ "$(cat /etc/nginx/minerbot/proxy-key.conf)" = "proxy_set_header X-MinerBot-Proxy-Key \"$key\";" ] \
         || problem "dashboard.env's proxy key isn't the one nginx sends now"
+    req=$(key_of bot)
+    [[ $req =~ ^[0-9a-f]{64}$ ]] && [ "$req" != "$req1" ] && [ "$(key_of dashboard)" = "$req" ] \
+        || problem "after the stop, bot.env and dashboard.env don't hold the same new request-signing key"
     run_calls | args_of | grep -qE ' compose .* up -d --no-build --no-deps --force-recreate dashboard$' \
         || problem "the dashboard wasn't recreated with the new proxy key"
     read -r _ running _ < /fake/docker/ctr/minerbot-dashboard
     [ "$running" = true ] || problem "the dashboard doesn't run after the key rotation that stopped"
+
+    # The same stop where bot.env can't take the new request-signing key, which is then what stops step 8: every mv onto
+    # bot.env fails, from a function in the BASH_ENV file that each bash of the run reads first. bot.env stays as it was,
+    # with no copy beside it, and the candidate moves with bot.env's own key instead, so the two files still agree.
+    restore deployed
+    env_before=$(sha256sum < "$home/bot.env")
+    cat > /tmp/mbtest-mv-botenv.sh <<EOF
+mv() {
+    if [ "\${!#}" = "$home/bot.env" ]; then
+        echo "mv: cannot move '\$2' to '\${!#}': Read-only file system (scripts-test's BASH_ENV)" >&2
+        return 1
+    fi
+    command mv "\$@"
+}
+EOF
+    in_home botenv-refused 120 env BASH_ENV=/tmp/mbtest-mv-botenv.sh ./setup-dashboard.sh --no-questions --yes --rotate-proxy-key --rotate-request-key
+    expect_exit 1 "the key rotation whose bot.env can't take the new key"
+    expect_said "setup-dashboard.sh stopped while writing bot.env's request-signing key" "the key rotation whose bot.env can't take the new key"
+    expect_said "bot.env couldn't take the new request-signing key (above), so dashboard.env keeps the one bot.env holds. Run ./setup-dashboard.sh --no-questions --rotate-request-key once the cause is fixed." \
+        "the key rotation whose bot.env can't take the new key"
+    expect_said "nginx runs the new files already, so dashboard.env got its new settings too." "the key rotation whose bot.env can't take the new key"
+    ! said "bot.env got the request-signing key first" || problem "setup said bot.env got the new request-signing key, though bot.env couldn't take it"
+    [ "$(sha256sum < "$home/bot.env")" = "$env_before" ] && ! compgen -G "$home/.bot.env.*" > /dev/null \
+        || problem "bot.env changed, or a copy of it was left beside it, though it couldn't take the new key" "$(ls -lA "$home")"
+    [ "$(key_of bot)" = "$req1" ] && [ "$(key_of dashboard)" = "$req1" ] \
+        || problem "after the stop where bot.env couldn't take the new key, dashboard.env doesn't hold bot.env's own"
+    key=$(sed -n 's/^Dashboard__ProxyKey=//p' "$home/dashboard.env")
+    [ -n "$key" ] && [ "$key" != "$key1" ] \
+        && [ "$(cat /etc/nginx/minerbot/proxy-key.conf)" = "proxy_set_header X-MinerBot-Proxy-Key \"$key\";" ] \
+        || problem "after the stop where bot.env couldn't take the new key, dashboard.env's proxy key isn't the one nginx sends now"
+    read -r _ running _ < /fake/docker/ctr/minerbot-dashboard
+    [ "$running" = true ] || problem "the dashboard doesn't run after the stop where bot.env couldn't take the new key"
+
+    # The stop after the password changed, where dashboard.env can't take the new one, as on a full disk: setup says so,
+    # leaves dashboard.env as it was with no copy beside it, and doesn't recreate the dashboard on a password MariaDB no
+    # longer takes. Then the same where the disk fills up between the two connection strings' writes: the first lands in
+    # setup's copy, so dashboard.env never holds the new password in one and the old in the other.
+    for fake in MBTEST_FULL_FROM= MBTEST_FULL_FROM=2; do
+        restore deployed
+        full_disk_seam
+        env_before=$(sha256sum < "$home/dashboard.env")
+        in_home "password-full${fake#*=}" 120 env FAKE_DB_DENY=website_db BASH_ENV=/tmp/mbtest-full.sh "$fake" \
+            MBTEST_FULL="$home/.dashboard.env.?????? $home/..dashboard.env.??????.??????" ./setup-dashboard.sh --no-questions --yes --rotate-db-password
+        expect_exit 1 "the stop after the password changed, where dashboard.env can't take it ($fake)"
+        expect_said "The dashboard's database password changed in this run, but dashboard.env couldn't take the new one (above), so the dashboard can't open its databases. Once the cause is fixed, run ./setup-dashboard.sh --no-questions, which gives dashboard.env a password that works and recreates the dashboard with it." \
+            "the stop after the password changed, where dashboard.env can't take it ($fake)"
+        ! said "so dashboard.env got the new one and nothing else" || problem "setup said dashboard.env got the new password, though it couldn't take it ($fake)"
+        ! said "stays stopped" || problem "setup said the dashboard stays stopped, though this run didn't stop it ($fake)"
+        [ "$(sha256sum < "$home/dashboard.env")" = "$env_before" ] && ! compgen -G "$home/.dashboard.env.*" > /dev/null \
+            && ! compgen -G "$home/..dashboard.env.*" > /dev/null \
+            || problem "dashboard.env changed, or a copy of it was left beside it, though it couldn't take the new password ($fake)" \
+                "$(ls -lA "$home"; grep -c "^ConnectionStrings__[A-Za-z]*=.*;Pwd=$pw1;" "$home/dashboard.env")"
+        ! run_calls | args_of | grep -qE ' compose .* up ' || problem "the dashboard was recreated on the password MariaDB no longer takes ($fake)"
+    done
+
+    # nginx refuses the new files of a run that changed the password and the proxy key: dashboard.env gets the new password
+    # and nothing else, and the dashboard, stopped for the proxy key, is recreated with it. Where dashboard.env can't take
+    # the password, setup says so before its own stop line, and leaves the dashboard stopped rather than start it on the
+    # password MariaDB no longer takes.
+    restore deployed
+    nginx_files > /fake/nginx/accepted
+    in_home refused-password 120 env FAKE_NGINX_T=accepted ./setup-dashboard.sh --no-questions --yes --rotate-db-password --rotate-proxy-key
+    expect_exit 1 "the refused rotation that changed the password"
+    expect_said "The dashboard's database password changed in this run, so dashboard.env got the new one and nothing else." \
+        "the refused rotation that changed the password"
+    expect_said "nginx refused the new files, so nginx and the dashboard's other settings are as they were." "the refused rotation that changed the password"
+    pw=$(cat /fake/db/password 2> /dev/null)
+    [ -n "$pw" ] && [ "$pw" != "$pw1" ] && [ "$(grep -c "^ConnectionStrings__[A-Za-z]*=.*;Pwd=$pw;" "$home/dashboard.env")" = 2 ] \
+        && [ "$(sed -n 's/^Dashboard__ProxyKey=//p' "$home/dashboard.env")" = "$key1" ] \
+        || problem "after the refused rotation, dashboard.env doesn't hold MariaDB's new password with the proxy key nginx sends"
+    read -r _ running _ < /fake/docker/ctr/minerbot-dashboard
+    [ "$running" = true ] || problem "the dashboard doesn't run after the refused rotation that changed the password"
+    restore deployed
+    nginx_files > /fake/nginx/accepted
+    full_disk_seam
+    env_before=$(sha256sum < "$home/dashboard.env")
+    in_home refused-password-full 120 env FAKE_NGINX_T=accepted BASH_ENV=/tmp/mbtest-full.sh \
+        MBTEST_FULL="$home/.dashboard.env.?????? $home/..dashboard.env.??????.??????" ./setup-dashboard.sh --no-questions --yes --rotate-db-password --rotate-proxy-key
+    expect_exit 1 "the refused rotation where dashboard.env can't take the new password"
+    expect_said "The dashboard's database password changed in this run, but dashboard.env couldn't take the new one (above), so the dashboard can't open its databases, and the dashboard this run stopped stays stopped: visitors see nginx's restarting page." \
+        "the refused rotation where dashboard.env can't take the new password"
+    expect_said "nginx refused the new files, so nginx and the dashboard's other settings are as they were." \
+        "the refused rotation where dashboard.env can't take the new password"
+    read -r _ running _ < /fake/docker/ctr/minerbot-dashboard
+    [ "$running" = false ] || problem "the dashboard runs after the refused rotation where dashboard.env can't take the new password, though setup said it stays stopped"
+    ! said "stopped while changing nginx's files" \
+        || problem "the refused rotation where dashboard.env can't take the new password ended with the stop line of a failure setup didn't expect"
+    [ "$(sha256sum < "$home/dashboard.env")" = "$env_before" ] && ! compgen -G "$home/.dashboard.env.*" > /dev/null \
+        && ! compgen -G "$home/..dashboard.env.*" > /dev/null \
+        || problem "dashboard.env changed, or a copy of it was left beside it, though it couldn't take the new password" "$(ls -lA "$home")"
+    ! run_calls | args_of | grep -qE ' compose .* up ' || problem "the dashboard was started on the password MariaDB no longer takes"
     verdict
 }
 
@@ -4046,6 +4205,558 @@ case_92() {
     verdict
 }
 
+# ---- The request-signing key and request.sh: cases 76 to 79 (setup), 47 (status.sh) and 70 to 73 (request.sh)
+
+containers_made_now() {   # the bot's and the dashboard's containers as made from their env files as they are now
+    mkdir -p /fake/docker/env
+    grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$home/bot.env" > /fake/docker/env/minerbot-bot
+    grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$home/dashboard.env" > /fake/docker/env/minerbot-dashboard
+}
+
+bot_stopped_by_hand() {   # the bot's container as docker compose stop bot leaves it
+    local image running restarts started health pid cid hash
+    read -r image running restarts started health pid cid hash < /fake/docker/ctr/minerbot-bot
+    printf '%s false %s %s %s 0 %s %s\n' "$image" "$restarts" "$started" "$health" "$cid" "$hash" > /fake/docker/ctr/minerbot-bot
+}
+
+key_of() {   # key_of bot|dashboard|bot-container|dashboard-container: the request-signing key there, to compare only
+    case $1 in
+        bot) sed -n 's/^REQUEST_SIGNING_KEY=//p' "$home/bot.env" ;;
+        dashboard) sed -n 's/^Dashboard__RequestSigningKey=//p' "$home/dashboard.env" ;;
+        bot-container) sed -n 's/^REQUEST_SIGNING_KEY=//p' /fake/docker/env/minerbot-bot 2> /dev/null ;;
+        dashboard-container) sed -n 's/^Dashboard__RequestSigningKey=//p' /fake/docker/env/minerbot-dashboard 2> /dev/null ;;
+    esac
+}
+
+no_key_shown() {   # no_key_shown <what> <key>...: none of the keys is in the last run's output, this case's outputs or the logs
+    local what=$1 key
+    shift
+    for key in "$@"; do
+        [ -n "$key" ] || continue
+        ! grep -rqF -- "$key" "$out" "$home/logs" || problem "$what: a request-signing key is in an output or a log"
+        ! run_calls | grep -qF -- "$key" || problem "$what: a request-signing key is in a call"
+    done
+}
+
+case_76() {
+    begin 76 "setup makes one request-signing key when there's none, as PR 9's first deploy leaves the server: bot.env gets it, 600, with every other line as it was, and dashboard.env too; the summary says so, and that the bot is recreated; the dashboard is recreated, then the bot, which was made before the key, both onto it; the key is shown nowhere; a second run changes nothing and logs ok no change"
+    local key lines
+    restore deployed
+    sed -i '/^REQUEST_SIGNING_KEY=/d' "$home/bot.env"
+    sed -i '/^Dashboard__RequestSigningKey=/d' "$home/dashboard.env"
+    containers_made_now
+    cp -p "$home/bot.env" /tmp/mbtest-bot.env.before
+    in_home first 180 ./setup-dashboard.sh --no-questions --yes
+    expect_exit 0 "setup with no request-signing key"
+    key=$(key_of bot)
+    [[ $key =~ ^[0-9a-f]{64}$ ]] && [ "$key" != "$req1" ] || problem "bot.env has no new request-signing key of 64 hexadecimal digits in small letters"
+    [ "$(key_of dashboard)" = "$key" ] || problem "dashboard.env's request-signing key isn't bot.env's"
+    [ "$(stat -c %a "$home/bot.env")" = 600 ] || problem "bot.env isn't 600"
+    [ "$(grep -v '^REQUEST_SIGNING_KEY=' "$home/bot.env")" = "$(cat /tmp/mbtest-bot.env.before)" ] \
+        || problem "bot.env's other lines changed or moved"
+    expect_said "make a new request-signing key, which is never shown, and write it to bot.env, then dashboard.env" "the summary"
+    expect_said "recreate the bot to load the request-signing key: it's offline for about 30 seconds" "the summary"
+    expect_said "A new request-signing key was made. It's never shown." "setup with no request-signing key"
+    in_order "the dashboard recreated, then the bot" ' compose .* up -d --no-build --no-deps --force-recreate dashboard$' \
+        ' compose .* up -d --no-build --no-deps --force-recreate bot$'
+    [ "$(key_of dashboard-container)" = "$key" ] && [ "$(key_of bot-container)" = "$key" ] \
+        || problem "the two containers don't both run with the new key"
+    tail -n 1 "$home/logs/history.log" | grep -qP '\tsetup\tdashboard\t-\tok\tbot\.env.s request key, dashboard\.env, dashboard recreated, bot recreated(\t|$)' \
+        || problem "history.log's line doesn't name what changed" "$(tail -n 1 "$home/logs/history.log")"
+    no_key_shown "the first key" "$key"
+    lines=$(wc -l < "$home/logs/history.log")
+    in_home again 120 ./setup-dashboard.sh --no-questions --yes
+    expect_exit 0 "setup run again"
+    ! run_calls | args_of | grep -qE ' compose .* (up|stop) ' || problem "setup run again touched a container"
+    [ "$(key_of bot)" = "$key" ] && [ "$(key_of dashboard)" = "$key" ] || problem "setup run again changed the key"
+    [ "$(($(wc -l < "$home/logs/history.log") - lines))" = 1 ] && tail -n 1 "$home/logs/history.log" | grep -qP '\tsetup\tdashboard\t-\tok\tno change(\t|$)' \
+        || problem "setup run again didn't log exactly one 'ok no change' line" "$(tail -n 3 "$home/logs/history.log")"
+    verdict
+}
+
+case_77() {
+    begin 77 "--rotate-request-key: a new key in both env files and both containers, the old one gone from them, the dashboard recreated and then the bot, and the key never shown; a run after it keeps the new key and touches no container; a rotation the dashboard isn't ready with puts the earlier dashboard.env back with the new key, which bot.env holds, or, when the earlier settings can't take it or a new proxy key rules them out, keeps the new ones and says so; each time the run stops before the bot's recreate, and its stop line says the bot refuses the dashboard's requests until setup recreates it"
+    local key proxy
+    restore deployed
+    containers_made_now
+    in_home rotate 180 ./setup-dashboard.sh --no-questions --yes --rotate-request-key
+    expect_exit 0 "--rotate-request-key"
+    key=$(key_of bot)
+    [[ $key =~ ^[0-9a-f]{64}$ ]] && [ "$key" != "$req1" ] || problem "bot.env has no new request-signing key"
+    [ "$(key_of dashboard)" = "$key" ] || problem "dashboard.env doesn't have the new key"
+    [ "$(key_of bot-container)" = "$key" ] && [ "$(key_of dashboard-container)" = "$key" ] || problem "the containers don't run with the new key"
+    ! grep -qF -- "$req1" "$home/bot.env" "$home/dashboard.env" || problem "the old key is still in an env file"
+    in_order "the dashboard recreated, then the bot" ' compose .* up -d --no-build --no-deps --force-recreate dashboard$' \
+        ' compose .* up -d --no-build --no-deps --force-recreate bot$'
+    no_key_shown "the rotation" "$key"
+    in_home after 120 ./setup-dashboard.sh --no-questions --yes
+    expect_exit 0 "setup after the rotation"
+    [ "$(key_of bot)" = "$key" ] && [ "$(key_of dashboard)" = "$key" ] || problem "the run after the rotation changed the key"
+    ! run_calls | args_of | grep -qE ' compose .* (up|stop) ' || problem "the run after the rotation touched a container"
+
+    # A rotation the dashboard isn't ready with: the earlier dashboard.env goes back with the new key, which bot.env
+    # holds already, so the two files still agree. The bot keeps the old key, since the run stops before its recreate,
+    # and the stop line says so.
+    restore deployed
+    containers_made_now
+    cp -p "$home/dashboard.env" /tmp/mbtest-dashboard.env
+    in_home unready 120 env FAKE_UNREADY="dashboard@${c1:0:12}" ./setup-dashboard.sh --no-questions --yes --rotate-request-key
+    expect_exit 1 "a rotation the dashboard isn't ready with"
+    expect_said "The dashboard wasn't ready with the new settings, so the earlier ones go back." "a rotation the dashboard isn't ready with"
+    expect_said "the database or the server. The bot still runs with another request-signing key than bot.env holds, so it refuses the dashboard's requests until ./setup-dashboard.sh --no-questions recreates it. Its log: docker logs --tail 50 minerbot-dashboard" \
+        "a rotation the dashboard isn't ready with"
+    [ "$(key_of bot-container)" = "$req1" ] || problem "after a rotation the dashboard wasn't ready with, the bot's container doesn't run with the old key"
+    key=$(key_of bot)
+    [[ $key =~ ^[0-9a-f]{64}$ ]] && [ "$key" != "$req1" ] && [ "$(key_of dashboard)" = "$key" ] \
+        || problem "after a rotation the dashboard wasn't ready with, dashboard.env doesn't hold bot.env's new key"
+    [ "$(grep -v '^Dashboard__RequestSigningKey=' "$home/dashboard.env")" = "$(grep -v '^Dashboard__RequestSigningKey=' /tmp/mbtest-dashboard.env)" ] \
+        || problem "after a rotation the dashboard wasn't ready with, dashboard.env's other lines aren't the earlier ones"
+    no_key_shown "a rotation the dashboard isn't ready with" "$key"
+
+    # The same with a new proxy key too, which rules the earlier settings out: dashboard.env keeps the new ones, the new
+    # proxy key and the new request-signing key bot.env holds, and the stop line says the bot still runs with the old one
+    restore deployed
+    containers_made_now
+    in_home unready-both 120 env FAKE_UNREADY="dashboard@${c1:0:12}" ./setup-dashboard.sh --no-questions --yes --rotate-proxy-key --rotate-request-key
+    expect_exit 1 "a rotation of both keys the dashboard isn't ready with"
+    expect_said "Fix the cause, then run ./setup-dashboard.sh --no-questions. The bot still runs with another request-signing key than bot.env holds, so it refuses the dashboard's requests until ./setup-dashboard.sh --no-questions recreates it." \
+        "a rotation of both keys the dashboard isn't ready with"
+    [ "$(key_of bot-container)" = "$req1" ] || problem "after a rotation of both keys the dashboard wasn't ready with, the bot's container doesn't run with the old key"
+    key=$(key_of bot)
+    [[ $key =~ ^[0-9a-f]{64}$ ]] && [ "$key" != "$req1" ] && [ "$(key_of dashboard)" = "$key" ] \
+        || problem "after a rotation of both keys the dashboard wasn't ready with, dashboard.env doesn't keep the new request-signing key bot.env holds"
+    proxy=$(sed -n 's/^Dashboard__ProxyKey=//p' "$home/dashboard.env")
+    [[ $proxy =~ ^[0-9a-f]{64}$ ]] && [ "$proxy" != "$key1" ] \
+        || problem "after a rotation of both keys the dashboard wasn't ready with, dashboard.env doesn't keep the new proxy key"
+    no_key_shown "a rotation of both keys the dashboard isn't ready with" "$key"
+
+    # The same, where the earlier settings can't take the new key, as on a full disk: dashboard.env keeps the new settings,
+    # whose key bot.env holds too, never the earlier ones with the old key, setup says so, and no copy is left beside it
+    restore deployed
+    containers_made_now
+    full_disk_seam
+    in_home unready-full 120 env FAKE_UNREADY="dashboard@${c1:0:12}" BASH_ENV=/tmp/mbtest-full.sh \
+        MBTEST_FULL="$home/..dashboard.env.??????.?????? $home/.dashboard.env.??????" ./setup-dashboard.sh --no-questions --yes --rotate-request-key
+    expect_exit 1 "a rotation the dashboard isn't ready with, where the earlier settings can't take the new key"
+    expect_said "The dashboard wasn't ready with the new settings (above), and the earlier ones couldn't go back into dashboard.env (above), so the dashboard and dashboard.env keep the new ones." \
+        "a rotation the dashboard isn't ready with, where the earlier settings can't take the new key"
+    expect_said "run ./setup-dashboard.sh again. The bot still runs with another request-signing key than bot.env holds, so it refuses the dashboard's requests until ./setup-dashboard.sh --no-questions recreates it." \
+        "a rotation the dashboard isn't ready with, where the earlier settings can't take the new key"
+    key=$(key_of bot)
+    [[ $key =~ ^[0-9a-f]{64}$ ]] && [ "$key" != "$req1" ] && [ "$(key_of dashboard)" = "$key" ] \
+        || problem "where the earlier settings couldn't take the new key, dashboard.env doesn't hold bot.env's new key"
+    ! compgen -G "$home/.dashboard.env.*" > /dev/null && ! compgen -G "$home/..dashboard.env.*" > /dev/null \
+        || problem "a copy of dashboard.env was left beside it" "$(ls -lA "$home")"
+    no_key_shown "a rotation where the earlier settings can't take the new key" "$key"
+    verdict
+}
+
+case_78() {
+    begin 78 "a run cut off right after it wrote bot.env's new request-signing key: dashboard.env and both containers keep the old key, and the next run gives dashboard.env bot.env's key, says why, and recreates both onto it"
+    local key
+    restore deployed
+    containers_made_now
+    in_home cut 120 env MINERBOT_TEST_CUT_AFTER=8-botenv ./setup-dashboard.sh --no-questions --yes --rotate-request-key
+    expect_exit 1 "the rotation cut off after bot.env"
+    expect_said "Cut off after step 8-botenv (MINERBOT_TEST_CUT_AFTER)." "the rotation cut off after bot.env" "$(last_log setup)"
+    key=$(key_of bot)
+    [[ $key =~ ^[0-9a-f]{64}$ ]] && [ "$key" != "$req1" ] || problem "the cut-off run didn't leave bot.env with a new key"
+    [ "$(key_of dashboard)" = "$req1" ] || problem "dashboard.env moved before the cut, so bot.env wasn't written first"
+    [ "$(key_of bot-container)" = "$req1" ] && [ "$(key_of dashboard-container)" = "$req1" ] \
+        || problem "a container was recreated before the cut"
+    in_home next 180 ./setup-dashboard.sh --no-questions --yes
+    expect_exit 0 "the run after the cut"
+    expect_said "give dashboard.env the request-signing key bot.env holds, which setup writes first: a run that stopped between the two writes left them apart" \
+        "the summary after the cut"
+    expect_said "dashboard.env takes the request-signing key bot.env holds, which setup writes first: a run that stopped between the two writes left them apart." \
+        "the run after the cut"
+    [ "$(key_of bot)" = "$key" ] && [ "$(key_of dashboard)" = "$key" ] || problem "the run after the cut didn't keep bot.env's key in both files"
+    [ "$(key_of bot-container)" = "$key" ] && [ "$(key_of dashboard-container)" = "$key" ] \
+        || problem "the run after the cut didn't recreate both containers onto bot.env's key"
+    no_key_shown "the run after the cut" "$key"
+    verdict
+}
+
+case_79() {
+    begin 79 "a bot that runs with another request-signing key than bot.env holds is recreated, and nothing else changes; a malformed key in one file takes the other's good one; malformed in both makes a new one; a stopped bot on another key is left stopped, as the summary says; a bot that isn't ready after its recreate counts as recreated, and the problem line gives the recreate, since the next run finds nothing to do; without bot.env setup stops before it changes anything; no key, good or bad, is ever shown"
+    local env_before bot_before nginx_before bad key running
+    bad=$(printf '%s' "$req2" | tr a-f A-F)
+    restore deployed
+    containers_made_now
+    sed -i "s/^REQUEST_SIGNING_KEY=.*/REQUEST_SIGNING_KEY=$req2/" /fake/docker/env/minerbot-bot
+    env_before=$(sha256sum < "$home/dashboard.env")
+    bot_before=$(sha256sum < "$home/bot.env")
+    nginx_before=$(fingerprint /etc/nginx)
+    in_home stale 180 ./setup-dashboard.sh --no-questions --yes
+    expect_exit 0 "setup with a bot on another key"
+    expect_said "recreate the bot to load the request-signing key: it's offline for about 30 seconds" "the summary"
+    [ "$(run_calls | args_of | grep -cE ' compose .* up ')" = 1 ] \
+        && run_calls | args_of | grep -qE ' compose .* up -d --no-build --no-deps --force-recreate bot$' \
+        || problem "the bot wasn't the one container recreated" "$(run_calls | args_of | grep ' compose ')"
+    [ "$(key_of bot-container)" = "$req1" ] || problem "the bot doesn't run with bot.env's key"
+    [ "$(sha256sum < "$home/dashboard.env")" = "$env_before" ] && [ "$(sha256sum < "$home/bot.env")" = "$bot_before" ] \
+        || problem "an env file changed"
+    same_state "nginx's files changed" "$nginx_before" "$(fingerprint /etc/nginx)"
+    tail -n 1 "$home/logs/history.log" | grep -qP '\tsetup\tdashboard\t-\tok\tbot recreated(\t|$)' \
+        || problem "history.log's line isn't ok bot recreated" "$(tail -n 1 "$home/logs/history.log")"
+    no_key_shown "the bot on another key" "$req1" "$req2"
+
+    # A malformed key in dashboard.env, a good one in bot.env: dashboard.env takes bot.env's
+    restore deployed
+    containers_made_now
+    sed -i "s/^Dashboard__RequestSigningKey=.*/Dashboard__RequestSigningKey=$bad/" "$home/dashboard.env"
+    in_home bad-dashboard 180 ./setup-dashboard.sh --no-questions --yes
+    expect_exit 0 "setup with a malformed key in dashboard.env"
+    [ "$(key_of dashboard)" = "$req1" ] && [ "$(key_of bot)" = "$req1" ] || problem "dashboard.env didn't take bot.env's key"
+    no_key_shown "a malformed key in dashboard.env" "$req1" "$bad"
+
+    # Malformed in bot.env, good in dashboard.env: bot.env takes dashboard.env's, and the bot is recreated onto it
+    restore deployed
+    containers_made_now
+    sed -i "s/^REQUEST_SIGNING_KEY=.*/REQUEST_SIGNING_KEY=$bad/" "$home/bot.env" /fake/docker/env/minerbot-bot
+    in_home bad-bot 180 ./setup-dashboard.sh --no-questions --yes
+    expect_exit 0 "setup with a malformed key in bot.env"
+    [ "$(key_of bot)" = "$req1" ] && [ "$(key_of dashboard)" = "$req1" ] || problem "bot.env didn't take dashboard.env's key"
+    [ "$(key_of bot-container)" = "$req1" ] || problem "the bot wasn't recreated onto the key"
+    no_key_shown "a malformed key in bot.env" "$req1" "$bad"
+
+    # Malformed in both: a new key in both
+    restore deployed
+    containers_made_now
+    sed -i "s/^REQUEST_SIGNING_KEY=.*/REQUEST_SIGNING_KEY=$bad/" "$home/bot.env"
+    sed -i "s/^Dashboard__RequestSigningKey=.*/Dashboard__RequestSigningKey=${req1:0:32}/" "$home/dashboard.env"
+    in_home bad-both 180 ./setup-dashboard.sh --no-questions --yes
+    expect_exit 0 "setup with a malformed key in both files"
+    expect_said "A new request-signing key was made. It's never shown." "setup with a malformed key in both files"
+    key=$(key_of bot)
+    [[ $key =~ ^[0-9a-f]{64}$ ]] && [ "$key" != "$req1" ] && [ "$(key_of dashboard)" = "$key" ] || problem "the two files didn't get one new key"
+    no_key_shown "a malformed key in both files" "$key" "$bad" "${req1:0:32}"
+
+    # A stopped bot on another key is left stopped, as the summary and the log say: nothing is recreated or started, and it
+    # loads bot.env's key when it's next created
+    restore deployed
+    containers_made_now
+    sed -i "s/^REQUEST_SIGNING_KEY=.*/REQUEST_SIGNING_KEY=$req2/" /fake/docker/env/minerbot-bot
+    bot_stopped_by_hand
+    in_home stopped 120 ./setup-dashboard.sh --no-questions --yes
+    expect_exit 0 "setup with a stopped bot on another key"
+    expect_said "leave the bot's container as it is: it's stopped, and loads the request-signing key when it's next created" \
+        "the summary with a stopped bot on another key"
+    expect_said "The bot's container is stopped, so it wasn't recreated" "setup with a stopped bot on another key"
+    ! run_calls | args_of | grep -qE ' compose .* (up|start|stop) ' \
+        || problem "setup with a stopped bot on another key touched a container" "$(run_calls | args_of | grep ' compose ')"
+    read -r _ running _ < /fake/docker/ctr/minerbot-bot
+    [ "$running" = false ] || problem "setup started the stopped bot"
+    [ "$(key_of bot-container)" = "$req2" ] || problem "the stopped bot's container changed"
+    tail -n 1 "$home/logs/history.log" | grep -qP '\tsetup\tdashboard\t-\tok\tno change(\t|$)' \
+        || problem "history.log's line isn't ok no change" "$(tail -n 1 "$home/logs/history.log")"
+
+    # A bot that isn't ready after its recreate: Compose made it again with bot.env's key, so it counts as recreated, and
+    # since the next run finds nothing to recreate, the problem line gives the recreate itself, not setup
+    restore deployed
+    containers_made_now
+    sed -i "s/^REQUEST_SIGNING_KEY=.*/REQUEST_SIGNING_KEY=$req2/" /fake/docker/env/minerbot-bot
+    in_home unready 120 env FAKE_UNREADY="bot@${c1:0:12}" ./setup-dashboard.sh --no-questions --yes
+    expect_exit 1 "setup with a bot that isn't ready after its recreate"
+    expect_said "Done. What changed: bot recreated." "setup with a bot that isn't ready after its recreate"
+    expect_said "Problem: The bot wasn't ready after its recreate (above), so it may take no requests from the dashboard. Its log: docker logs --tail 50 minerbot-bot. Once the cause is fixed, docker compose up -d --no-build --no-deps --force-recreate bot makes it again with bot.env's request-signing key." \
+        "setup with a bot that isn't ready after its recreate"
+    [ "$(key_of bot-container)" = "$req1" ] || problem "the bot that isn't ready doesn't run with bot.env's key"
+    tail -n 1 "$home/logs/history.log" | grep -qP '\tsetup\tdashboard\t-\tfailed\tbot recreated, with a bot that wasn.t ready(\t|$)' \
+        || problem "history.log's line isn't failed bot recreated, with a bot that wasn't ready" "$(tail -n 1 "$home/logs/history.log")"
+    in_home after-unready 120 ./setup-dashboard.sh --no-questions --yes
+    expect_exit 0 "setup after the bot that wasn't ready"
+    ! run_calls | args_of | grep -qE ' compose .* (up|stop) ' || problem "setup after the bot that wasn't ready touched a container"
+    no_key_shown "a bot that isn't ready after its recreate" "$req1" "$req2"
+
+    # Without bot.env the request key has nowhere to go: setup stops before it changes anything
+    restore deployed
+    containers_made_now
+    rm "$home/bot.env"
+    env_before=$(sha256sum < "$home/dashboard.env")
+    in_home no-bot-env 120 ./setup-dashboard.sh --no-questions --yes
+    expect_exit 1 "setup without bot.env"
+    expect_said "bot.env is missing, so the request key has nowhere to go. Nothing was changed." "setup without bot.env"
+    [ ! -e "$home/bot.env" ] || problem "setup without bot.env made one"
+    [ "$(sha256sum < "$home/dashboard.env")" = "$env_before" ] || problem "setup without bot.env changed dashboard.env"
+    ! run_calls | args_of | grep -qE ' compose .* (up|start|stop) ' || problem "setup without bot.env touched a container"
+    verdict
+}
+
+case_47() {
+    begin 47 "status.sh and the request-signing key: --check is silent while both env files and both containers hold one key, and names each mismatch on a line of its own, saying what to run and never printing a key: none in bot.env, a malformed one in dashboard.env, the two files apart, the bot or the dashboard running another key, and a stopped bot made with another key, which setup leaves stopped, so the line and request.sh give the recreate that loads bot.env's; each line says what setup does for it; the plain look says the same, also while Docker takes longer over a container's environment than a read waits for a line, and with the bot's container gone, its all-clear names only the containers that exist"
+    keyed() {   # keyed <name> <what's wrong> <expected line>: --check with one mismatch prints that line alone, and exit 1
+        in_home "$1" 60 ./status.sh --check
+        expect_exit 1 "--check with $2"
+        [ "$(wc -l < "$last")" = 1 ] || problem "--check with $2 didn't print exactly one line" "$(cat "$last")"
+        expect_said "$3" "--check with $2"
+        ! said "$req1" && ! said "$req2" && ! said "${req1^^}" || problem "--check with $2 printed a key"
+    }
+    restore deployed
+    socket_folder
+    containers_made_now
+    in_home fine 60 ./status.sh --check
+    expect_exit 0 "--check while the keys agree"
+    [ ! -s "$last" ] || problem "--check printed something while the keys agree" "$(excerpt)"
+    in_home look 60 ./status.sh
+    expect_said "Request key: the same in bot.env, dashboard.env and each container that exists" "the plain look"
+
+    sed -i '/^REQUEST_SIGNING_KEY=/d' "$home/bot.env" /fake/docker/env/minerbot-bot
+    keyed no-bot-key "no key in bot.env" "bot.env has no request-signing key, or one that isn't 64 hexadecimal digits in small letters, so the bot takes no requests from the dashboard. Run ./setup-dashboard.sh --no-questions, which gives bot.env dashboard.env's key, or both files a new one when neither has a good one, and recreates each app that runs with another key."
+    in_home look-missing 60 ./status.sh
+    expect_said "Request key: bot.env has no request-signing key" "the plain look with no key in bot.env"
+
+    # The bot's container gone, as after a compose down: there's no key of its to compare, and the line doesn't say there
+    # was, while the containers above say it's missing
+    restore deployed
+    socket_folder
+    containers_made_now
+    rm -f /fake/docker/ctr/minerbot-bot
+    in_home look-no-bot 60 ./status.sh
+    expect_said "Request key: the same in bot.env, dashboard.env and each container that exists" "the plain look with no bot container"
+    expect_said "no container" "the plain look with no bot container"
+    ! said "both containers" || problem "the plain look with no bot container says the key is the same in both containers" "$(excerpt)"
+
+    restore deployed
+    socket_folder
+    containers_made_now
+    sed -i "s/^Dashboard__RequestSigningKey=.*/Dashboard__RequestSigningKey=${req1^^}/" "$home/dashboard.env" /fake/docker/env/minerbot-dashboard
+    keyed bad-dashboard-key "a malformed key in dashboard.env" "dashboard.env has no request-signing key, or one that isn't 64 hexadecimal digits in small letters, so the dashboard sends the bot no requests. Run ./setup-dashboard.sh --no-questions, which gives dashboard.env bot.env's key, or both files a new one when neither has a good one, and recreates each app that runs with another key."
+
+    restore deployed
+    socket_folder
+    containers_made_now
+    sed -i "s/^REQUEST_SIGNING_KEY=.*/REQUEST_SIGNING_KEY=$req2/" "$home/bot.env" /fake/docker/env/minerbot-bot
+    keyed apart "the two files apart" "bot.env and dashboard.env hold different request-signing keys, so the bot refuses the dashboard's requests. Run ./setup-dashboard.sh --no-questions, which makes them agree on bot.env's and recreates each app that runs with another key."
+
+    restore deployed
+    socket_folder
+    containers_made_now
+    sed -i "s/^REQUEST_SIGNING_KEY=.*/REQUEST_SIGNING_KEY=$req2/" /fake/docker/env/minerbot-bot
+    keyed bot-other "the bot on another key" "The bot runs with another request-signing key than bot.env holds, so it refuses the dashboard's requests. Run ./setup-dashboard.sh --no-questions, which recreates it."
+
+    restore deployed
+    socket_folder
+    containers_made_now
+    sed -i "s/^Dashboard__RequestSigningKey=.*/Dashboard__RequestSigningKey=$req2/" /fake/docker/env/minerbot-dashboard
+    keyed dashboard-other "the dashboard on another key" "The dashboard runs with another request-signing key than dashboard.env holds"
+
+    # A stopped bot on another key: setup leaves a stopped bot stopped, so --check and request.sh give what makes it
+    # again with bot.env's key, rather than setup
+    restore deployed
+    socket_folder
+    containers_made_now
+    sed -i "s/^REQUEST_SIGNING_KEY=.*/REQUEST_SIGNING_KEY=$req2/" /fake/docker/env/minerbot-bot
+    sed -i 's/^\(\S* \)true /\1false /' /fake/docker/ctr/minerbot-bot
+    in_home stopped-other 60 ./status.sh --check
+    expect_exit 1 "--check with a stopped bot on another key"
+    expect_said "The bot's container is stopped, and was made with another request-signing key than bot.env holds, so started as it is, it would refuse the dashboard's requests. Start it with docker compose up -d --no-build --no-deps --force-recreate bot, which makes it again with bot.env's key." \
+        "--check with a stopped bot on another key"
+    ! said "which recreates it." || problem "--check sends a stopped bot on another key to setup, which leaves it stopped" "$(cat "$last")"
+    ! said "$req1" && ! said "$req2" || problem "--check with a stopped bot on another key printed a key"
+    in_home stopped-request 60 ./request.sh caches.clear
+    expect_exit 1 "request.sh with a stopped bot on another key"
+    expect_said "The bot's container is stopped, and was made with another request-signing key than bot.env holds" \
+        "request.sh with a stopped bot on another key"
+
+    # Docker taking 6 seconds over the look at the bot's environment, longer than a read waits for a line: the line that
+    # look gives still counts, in --check and in the plain look
+    restore deployed
+    socket_folder
+    containers_made_now
+    sed -i "s/^REQUEST_SIGNING_KEY=.*/REQUEST_SIGNING_KEY=$req2/" /fake/docker/env/minerbot-bot
+    trap 'if [ -e /usr/local/bin/docker.mbtest-47 ]; then mv -f /usr/local/bin/docker.mbtest-47 /usr/local/bin/docker; fi' EXIT
+    if mv /usr/local/bin/docker /usr/local/bin/docker.mbtest-47; then
+        cat > /usr/local/bin/docker << 'EOF'
+#!/usr/bin/env bash
+if [ "${1:-} ${2:-} ${3:-} ${4:-} ${5:-}" = "container inspect -f {{range .Config.Env}}{{println .}}{{end}} minerbot-bot" ]; then
+    sleep 6
+fi
+exec /usr/local/bin/docker.mbtest-47 "$@"
+EOF
+        chmod 755 /usr/local/bin/docker
+        keyed slow-bot-other "the bot on another key while Docker is slow" "The bot runs with another request-signing key than bot.env holds, so it refuses the dashboard's requests."
+        in_home slow-look 60 ./status.sh
+        mv -f /usr/local/bin/docker.mbtest-47 /usr/local/bin/docker
+        expect_said "Request key: The bot runs with another request-signing key than bot.env holds" "the plain look with the bot on another key while Docker is slow"
+    else
+        problem "the test couldn't set the stand-in docker aside"
+    fi
+    verdict
+}
+
+case_70() {
+    begin 70 "request.sh: the one-off runs the dashboard's image with its settings and the text by name only, never in its arguments, a text that starts with -- included, without the image's health check, under 900 seconds, removed before and after; its lines show; one history line with the request's state; the exit code for each way a request ends, one that never ends included; --list runs without a setting, under a name of its own"
+    local expected fake word code
+    restore deployed
+    in_home pause 120 ./request.sh posts.pause --text "--Live check of PR 9"
+    expect_exit 0 "a pause"
+    expected='^docker \[timeout -k 10 900\] run --rm --pull never --name minerbot-request --network host --no-healthcheck --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777 --cap-drop ALL --security-opt no-new-privileges:true --memory 256m --pids-limit 64 -e ConnectionStrings__BotConnection -e Dashboard__RequestSigningKey -e Dashboard__Owners -e MINERBOT_REQUEST_TEXT minerbot-dashboard:current request posts\.pause$'
+    run_calls | args_of | grep -qE -- "$expected" || problem "the one-off's command isn't the expected one" "$(run_calls | args_of | grep ' run ')"
+    in_order "the one-off removed before and after" '^docker \[timeout -k 10 30\] rm -f -v minerbot-request$' \
+        ' run --rm --pull never --name minerbot-request ' '^docker \[timeout -k 10 30\] rm -f -v minerbot-request$'
+    [ "$(cat /fake/db/request-key.sha256 2> /dev/null)" = "$(printf '%s' "$req1" | sha256sum | cut -c1-64)" ] \
+        || problem "the one-off didn't get dashboard.env's request-signing key"
+    [ "$(cat /fake/db/request-value.sha256 2> /dev/null)" = "$(sed -n 's/^ConnectionStrings__BotConnection=//p' "$home/dashboard.env" | tr -d '\n' | sha256sum | cut -c1-64)" ] \
+        || problem "the one-off didn't get dashboard.env's ConnectionStrings__BotConnection"
+    [ "$(cat /fake/db/request-text 2> /dev/null)" = "--Live check of PR 9" ] || problem "the text didn't come whole, by name"
+    [ "$(cat /fake/db/request-args 2> /dev/null)" = posts.pause ] || problem "the one-off's arguments aren't the kind alone"
+    expect_said "Request 41 (posts.pause) is queued, asked by request.sh on the server (Owner 100000000000000001)." "a pause"
+    expect_said "Done at 15:04:07 UTC: Made up: the bot did it." "a pause"
+    tail -n 1 "$home/logs/history.log" | grep -qP '\trequest\tposts\.pause\t-\tdone\trequest 41$' \
+        || problem "history.log's line isn't request posts.pause done" "$(tail -n 1 "$home/logs/history.log")"
+    ! said "$req1" && ! said "$pw1" || problem "a secret was shown"
+    ! run_calls | grep -qF -e "$req1" -e "Pwd=" -e "$pw1" || problem "a secret is in a call's arguments"
+
+    in_home test-message 120 ./request.sh guild.test_message --guild 100000000000000005 --channel 100000000000000006
+    expect_exit 0 "a test message"
+    [ "$(cat /fake/db/request-args 2> /dev/null)" = "guild.test_message --guild 100000000000000005 --channel 100000000000000006" ] \
+        || problem "the test message's server and channel weren't passed on"
+    [ ! -e /fake/db/request-text ] && ! run_calls | args_of | grep -q -- '-e MINERBOT_REQUEST_TEXT' || problem "a text went in without --text"
+
+    while IFS='|' read -r -t 5 fake word code; do
+        in_home "ends-$fake" 120 env FAKE_REQUEST="$fake" ./request.sh caches.clear
+        expect_exit "$code" "a request that ends $fake"
+        tail -n 1 "$home/logs/history.log" | grep -qP "\\trequest\\tcaches\\.clear\\t-\\t$word(\\t|\$)" \
+            || problem "history.log's line for a request that ends $fake isn't $word" "$(tail -n 1 "$home/logs/history.log")"
+    done <<< $'refused|refused|1\nfailed|failed|1\nexpired|expired|1\nunknown|unknown|1\nno-answer|no answer|1\nnot-sent|not sent|2\nhang|no answer|1'
+    expect_said "The request command didn't end within 900 seconds, so it was stopped." "a request that never ends" "$out/ends-hang.out"
+
+    in_home list 60 ./request.sh --list
+    expect_exit 0 "--list"
+    expect_said "  caches.clear " "--list"
+    run_calls | args_of | grep -qE '^docker \[timeout -k 10 900\] run .* --network none .* minerbot-dashboard:current request --list$' \
+        || problem "--list didn't run the image's list without a network" "$(run_calls | args_of | grep ' run ')"
+    ! run_calls | args_of | grep -qE ' run .* -e ' || problem "--list passed a setting"
+    # Under a name of its own, removed before and after, never a request's: it takes no lock, so a request may wait
+    in_order "--list's one-off removed before and after" '^docker \[timeout -k 10 30\] rm -f -v minerbot-request-list$' \
+        ' run --rm --pull never --name minerbot-request-list --network none --no-healthcheck ' \
+        '^docker \[timeout -k 10 30\] rm -f -v minerbot-request-list$'
+    ! run_calls | args_of | grep -qE 'minerbot-request( |$)' || problem "--list ran or removed a request's one-off" "$(run_calls | args_of | grep -E ' (run|rm) ')"
+    verdict
+}
+
+case_71() {
+    begin 71 "request.sh refuses before it sends anything, each refusal saying what to run and naming no key: no dashboard.env, no key in it, the two files apart, a bot on another key, no dashboard image, the bot not running; it recognises an image from before the request command; and a server or channel that isn't a Discord ID, or given twice, gets its own usage, not the request command's"
+    local lines
+    refused() {   # refused <name> <text> <command...>: exit 1 with the text, no one-off, no history line, no key shown
+        local name=$1 text=$2
+        shift 2
+        lines=$(wc -l < "$home/logs/history.log")
+        in_home "$name" 60 "$@"
+        expect_exit 1 "$name"
+        expect_said "$text" "$name"
+        expect_said "Nothing was sent." "$name"
+        ! run_calls | args_of | grep -q ' run --rm ' || problem "$name: the one-off ran"
+        [ "$(wc -l < "$home/logs/history.log")" = "$lines" ] || problem "$name: a history line was written"
+        ! said "$req1" && ! said "$req2" || problem "$name: a key was shown"
+    }
+    restore deployed
+    rm -f "$home/dashboard.env"
+    refused no-env "dashboard.env is missing, so the dashboard isn't set up and has no request-signing key. Run ./setup-dashboard.sh first." ./request.sh caches.clear
+    restore deployed
+    sed -i '/^Dashboard__RequestSigningKey=/d' "$home/dashboard.env"
+    refused no-key "dashboard.env has no request-signing key" ./request.sh caches.clear
+    restore deployed
+    sed -i "s/^REQUEST_SIGNING_KEY=.*/REQUEST_SIGNING_KEY=$req2/" "$home/bot.env"
+    refused apart "bot.env and dashboard.env hold different request-signing keys" ./request.sh caches.clear
+    restore deployed
+    containers_made_now
+    sed -i "s/^REQUEST_SIGNING_KEY=.*/REQUEST_SIGNING_KEY=$req2/" /fake/docker/env/minerbot-bot
+    refused bot-other "The bot runs with another request-signing key than bot.env holds" ./request.sh caches.clear
+    restore deployed
+    rm -f /fake/docker/tags/minerbot-dashboard@current
+    refused no-image "There's no dashboard image, minerbot-dashboard:current, to send the request with." ./request.sh caches.clear
+    restore deployed
+    sed -i 's/^\(\S* \)true /\1false /' /fake/docker/ctr/minerbot-bot
+    refused bot-stopped "The bot isn't running, so nothing would take the request." ./request.sh caches.clear
+
+    restore deployed
+    in_home old-image 120 env FAKE_REQUEST=old-image ./request.sh caches.clear
+    expect_exit 1 "an image from before the request command"
+    expect_said "The dashboard's image doesn't know the request command: deploy PR 9's dashboard first." "an image from before the request command"
+    tail -n 1 "$home/logs/history.log" | grep -qP '\trequest\tcaches\.clear\t-\tnot sent\t' \
+        || problem "history.log's line for an image from before the request command isn't not sent" "$(tail -n 1 "$home/logs/history.log")"
+    in_home old-list 60 env FAKE_REQUEST=old-image ./request.sh --list
+    expect_exit 1 "--list on an image from before the request command"
+    expect_said "The dashboard's image doesn't know the request command: deploy PR 9's dashboard first." "--list on an older image"
+
+    # A server or channel that isn't a Discord ID, or given twice, is refused by request.sh itself, with its own usage,
+    # before the lock: never the request command's usage, which names the environment it takes the text from
+    restore deployed
+    lines=$(wc -l < "$home/logs/history.log")
+    in_home short-guild 60 ./request.sh guild.refresh --guild 1234
+    expect_exit 1 "a --guild that isn't a Discord ID"
+    expect_said "--guild takes a numeric Discord ID, 17 to 20 digits. Usage: ./request.sh <kind>" "a --guild that isn't a Discord ID"
+    ! said "MINERBOT_REQUEST_TEXT" || problem "a --guild that isn't a Discord ID got the request command's usage" "$(excerpt)"
+    ! run_calls | args_of | grep -q ' run --rm ' || problem "a --guild that isn't a Discord ID ran the one-off"
+    in_home channel-twice 60 ./request.sh guild.test_message --guild 100000000000000005 --channel 100000000000000006 --channel 100000000000000007
+    expect_exit 1 "--channel twice"
+    expect_said "--channel goes once. Usage: ./request.sh <kind>" "--channel twice"
+    ! run_calls | args_of | grep -q ' run --rm ' || problem "--channel twice ran the one-off"
+    [ "$(wc -l < "$home/logs/history.log")" = "$lines" ] || problem "a refused server or channel wrote a history line"
+    verdict
+}
+
+case_72() {
+    begin 72 "request.sh after a restart: the one-off waits inside it for the bot to be back on Discord, under the same 900 seconds, while request.sh holds the lock, so a deploy started meanwhile is refused, and --list meanwhile leaves its one-off alone; a bot that isn't back is exit 1, with done and why in the history line"
+    local bg n mark tries
+    restore deployed
+    mark=$(wc -l < "$calls")
+    (
+        in_home restart 120 env FAKE_REQUEST=restart FAKE_REQUEST_DELAY=8 ./request.sh bot.restart
+        echo "$status" > "$out/restart.status"
+    ) &
+    bg=$!
+    for n in $(seq 1 100); do
+        if [ -e "$home/state/lock" ] && ! flock -n "$home/state/lock" true; then break; fi
+        sleep 0.1
+    done
+    in_home meanwhile 60 ./deploy.sh --only bot
+    expect_exit 1 "a deploy while request.sh waits for the bot"
+    expect_said "Another run holds the lock: request, started" "a deploy while request.sh waits for the bot"
+    # --list meanwhile, which takes no lock, leaves the waiting request's one-off alone: Docker would kill it
+    for tries in $(seq 1 50); do
+        if [ -f /fake/docker/ctr/minerbot-request ]; then break; fi
+        sleep 0.1
+    done
+    in_home list-meanwhile 60 ./request.sh --list
+    expect_exit 0 "--list while request.sh waits for the bot"
+    [ -f /fake/docker/ctr/minerbot-request ] || problem "--list removed the one-off of the request that waits for the bot (after $tries looks for it)"
+    wait "$bg"
+    last=$out/restart.out
+    status=$(cat "$out/restart.status" 2> /dev/null)
+    expect_exit 0 "a restart (after $n looks for the lock)"
+    expect_said "Waiting for the bot to be back on Discord, for up to 6 minutes." "a restart"
+    expect_said "The bot is back on Discord 38 s after the request" "a restart"
+    tail -n +"$((mark + 1))" "$calls" | grep -qE '^docker \[timeout -k 10 900\] run .* request bot\.restart ##env' \
+        || problem "the restart's one-off didn't run under 900 seconds"
+    grep -qP '\trequest\tbot\.restart\t-\tdone\trequest 41$' "$home/logs/history.log" || problem "history.log has no line for the restart, done"
+
+    in_home not-back 120 env FAKE_REQUEST=restart-not-back ./request.sh bot.restart
+    expect_exit 1 "a restart the bot isn't back from"
+    expect_said "The bot isn't back on Discord 6 minutes after the restart." "a restart the bot isn't back from"
+    tail -n 1 "$home/logs/history.log" | grep -qP "\\trequest\\tbot\\.restart\\t-\\tdone\\trequest 41, the bot wasn't back on Discord\$" \
+        || problem "history.log's line for a restart the bot isn't back from doesn't say so" "$(tail -n 1 "$home/logs/history.log")"
+    verdict
+}
+
+case_73() {
+    begin 73 "request.sh refuses while a deploy or setup holds the lock, saying who holds it, and sends nothing; --list needs no lock"
+    restore deployed
+    hold_lock "$home/state/lock"
+    echo "deploy, started 2026-11-06T03:00:00Z, log $home/logs/20261106T030000Z-deploy.log" > "$home/state/lock.info"
+    in_home locked 60 ./request.sh caches.clear
+    expect_exit 1 "request.sh while a deploy holds the lock"
+    expect_said "Another run holds the lock: deploy, started 2026-11-06T03:00:00Z" "request.sh while a deploy holds the lock"
+    expect_said "Nothing was sent." "request.sh while a deploy holds the lock"
+    ! run_calls | args_of | grep -q ' run --rm ' || problem "the one-off ran while the lock was held"
+    in_home list 60 ./request.sh --list
+    expect_exit 0 "--list while the lock is held"
+    let_go
+    verdict
+}
+
 case_17() {
     begin 17 "backup.sh: a failing dump, or one without its last line, leaves no file and one line on stderr; a working one writes a 600 dump and prunes to 14 days, the newest 3 kept; pre-deploy takes only the backup lock; a run killed from outside is mailed by the cron line and reported by the first nightly check after it, as the cron lines' times make it, though not while its line is younger than 2 hours"
     local dumps_before line cmd stamp expected='' backup_at check_at deploy_wait backup_wait age
@@ -4272,6 +4983,8 @@ case_20() {
     begin 20 "static rules: set -Eeuo pipefail and umask 077 in every script, no tracing, every listed command and bash -c under run_for (a check that finds each kind of position in a copy of common.sh, after if, elif, until, exec, time, an assignment, a backtick, a case item, or time, env or xargs with options too, and leaves quoted messages alone), every command the scripts run under run_for checked for by bootstrap.sh before the move, every read with -t, every stty behind on_terminal; across every case, no call without a time limit and no password statement without --skip-print-query-on-error; every script and stand-in recorded as 100755"
     local f found needed paths commands
     local -a probes
+    # Every script in deploy/, request.sh among them, which has no case of its own for these rules
+    [ -f /repo/deploy/request.sh ] || problem "deploy/request.sh isn't there for the rules to cover"
     for f in /repo/deploy/*.sh; do
         if [ "${f##*/}" != common.sh ]; then
             grep -qx 'set -Eeuo pipefail' "$f" || problem "${f##*/} has no line: set -Eeuo pipefail"

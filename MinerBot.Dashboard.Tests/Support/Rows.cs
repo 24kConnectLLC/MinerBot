@@ -34,13 +34,13 @@ namespace MinerBot.Dashboard.Tests.Support
             return db;
         }
 
-        // MinerBot's status and history, its copy of its servers, and the website's channel settings, which the status pages
-        // read, as the bot's own tests list them
+        // MinerBot's status and history, its copy of its servers, its requests and settings, and the website's channel
+        // settings, which the status pages read, as the bot's own tests list them
         public static readonly string[] BotTables =
         [
             MariaDbFixture.StatusTable, MariaDbFixture.EventTable, MariaDbFixture.JobRunTable, MariaDbFixture.JobStatusTable, MariaDbFixture.SampleTable,
             MariaDbFixture.DailyTable, MariaDbFixture.BotGuildTable, MariaDbFixture.BotChannelTable, MariaDbFixture.GuildEventTable,
-            MariaDbFixture.GuildDailyTable, MariaDbFixture.GuildTable
+            MariaDbFixture.GuildDailyTable, MariaDbFixture.GuildTable, MariaDbFixture.RequestTable, MariaDbFixture.SettingsTable
         ];
 
         // As ReadyAsync, and with none of the bot's rows or the website's settings either, for a test that checks what the

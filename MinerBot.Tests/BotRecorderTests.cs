@@ -293,8 +293,18 @@ namespace MinerBot.Tests
             Assert.All(BotEvents.All, kind => Assert.True(EventLevel.IsKnown(BotEvents.LevelOf(kind)), kind));
 
             Assert.Equal(["alert.failed", "alert.sent", "bot.started", "bot.stopping", "bot.unclean_end", "database.unreachable", "discord.connected",
-                "discord.disconnected", "job.cut_off", "job.failed", "records.dropped", "steam.logged_off", "steam.logged_on", "steam.logon_failed",
-                "steam.needs_sign_in", "steam.offline", "steam.token_renewed", "steam.token_saved"], BotEvents.All.Order(StringComparer.Ordinal));
+                "discord.disconnected", "job.cut_off", "job.failed", "posts.paused", "posts.resumed", "records.dropped", "request.interrupted", "request.rejected",
+                "requests.off", "steam.logged_off", "steam.logged_on", "steam.logon_failed", "steam.needs_sign_in", "steam.offline", "steam.token_renewed",
+                "steam.token_saved"], BotEvents.All.Order(StringComparer.Ordinal));
+            Assert.Equal(
+            [
+                (BotEvents.RequestRejected, EventLevel.Error),
+                (BotEvents.RequestsOff, EventLevel.Warning),
+                (BotEvents.RequestInterrupted, EventLevel.Warning),
+                (BotEvents.PostsPaused, EventLevel.Warning),
+                (BotEvents.PostsResumed, EventLevel.Info)
+            ], new[] { BotEvents.RequestRejected, BotEvents.RequestsOff, BotEvents.RequestInterrupted, BotEvents.PostsPaused, BotEvents.PostsResumed }
+                .Select(kind => (kind, BotEvents.LevelOf(kind))));
         }
 
         // Every constant of the bot's own and every kind Steam reports are on the list, so none is dropped

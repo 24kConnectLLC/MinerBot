@@ -7,6 +7,7 @@ namespace DataAccessLibrary.Status
         Task<int> DeleteEvents(DateTime before, int take);
         Task<int> DeleteGuildEvents(DateTime before, int take);
         Task<int> DeleteJobRuns(DateTime before, int take);
+        Task<int> DeleteRequests(DateTime before, int take);
         Task<int> DeleteSamples(DateTime before, int take);
         Task<int> DeleteSessions(DateTime before, int take);
         Task<int> TotalUptimeDays(DateTime from, DateTime to);

@@ -37,7 +37,11 @@ namespace MinerBot.Shared.Steam
 
             match = VanityLink.Match(text);
             if (match.Success)
-                return new SteamIdResult(SteamIdKind.NeedsLookup, 0, match.Groups[1].Value, null);
+            {
+                return IsCustomLinkName(match.Groups[1].Value)
+                    ? new SteamIdResult(SteamIdKind.NeedsLookup, 0, match.Groups[1].Value, null)
+                    : Invalid("A custom profile link's name has only the letters A to Z, digits, _ and -");
+            }
 
             // STEAM_X:Y:Z is account 2Z + Y, where X is the universe, which older games wrote as 0
             match = Steam2.Match(text);
@@ -75,6 +79,15 @@ namespace MinerBot.Shared.Steam
         }
 
         public static string ToSteam3(uint accountNumber) => $"[U:1:{accountNumber}]";
+
+        // The most characters in the name of a custom profile link
+        public const int CustomLinkNameLimit = 32;
+
+        // The name in a custom profile link, steamcommunity.com/id/<name>: 1 to 32 of the ASCII letters and digits, _ and -.
+        // Checked one character at a time, because VanityLink ignores case, and a pattern that ignores case takes the Kelvin
+        // sign for a k. The bot's own rule is the same (MinerBot 2.0/Utils/SteamLinks.cs).
+        public static bool IsCustomLinkName(string? name) =>
+            name is { Length: >= 1 and <= CustomLinkNameLimit } && name.All(character => char.IsAsciiLetterOrDigit(character) || character is '_' or '-');
 
         static SteamIdResult FromProfileLink(string digits)
         {
