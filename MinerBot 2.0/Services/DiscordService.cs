@@ -8,6 +8,16 @@ using MinerBot_2._0.Builders;
 
 namespace MinerBot_2._0.Services
 {
+    // Why the bot can't post in a channel now
+    public enum PostProblem
+    {
+        None,
+        NotInServer,
+        ServerUnavailable,
+        ServerNotSent,
+        ChannelNotInServer
+    }
+
     public class DiscordService
     {
         // Discord's own names, the way an admin sees them in a channel's settings
@@ -77,6 +87,45 @@ namespace MinerBot_2._0.Services
         {
             if (await GetGuild(guildId) != null)
                 await _guildData.DeleteGuild(guildId);
+        }
+
+        // A server the bot can use now, from Discord.Net's cache, never Discord's API: one the bot is in, that Discord doesn't
+        // report unavailable, and that Discord has sent. While the gateway itself is down every server shows as unavailable,
+        // and a post can still go through Discord's API. A server Discord.Net has nothing of but its ID, from a READY or an
+        // outage, has no name, and none of its channels.
+        public static SocketGuild? UsableGuild(DiscordSocketClient client, ulong guildId, out PostProblem problem)
+        {
+            var guild = client.GetGuild(guildId);
+
+            if (guild == null)
+                problem = PostProblem.NotInServer;
+            else if (!guild.IsConnected && client.ConnectionState == ConnectionState.Connected)
+                problem = PostProblem.ServerUnavailable;
+            else if (guild.Name == null)
+                problem = PostProblem.ServerNotSent;
+            else
+            {
+                problem = PostProblem.None;
+                return guild;
+            }
+
+            return null;
+        }
+
+        // The channel, only when it's a channel of that server that Discord.Net counts as a text channel: a text or
+        // announcement channel, or, as before, a voice, stage or thread channel, whose classes derive from its text channel.
+        // So a row of the website's can't send a post to another server's channel. The notification job's rule, which a test
+        // message from the dashboard shares, with its own check of the channel's type.
+        public static SocketTextChannel? PostChannel(DiscordSocketClient client, ulong guildId, ulong channelId, out PostProblem problem)
+        {
+            if (UsableGuild(client, guildId, out problem) is not { } guild)
+                return null;
+
+            if (guild.GetTextChannel(channelId) is { } channel)
+                return channel;
+
+            problem = PostProblem.ChannelNotInServer;
+            return null;
         }
 
         // The permissions the bot lacks in a channel, from the guild's cached roles and overwrites.

@@ -6,6 +6,7 @@ using DataAccessLibrary.Dashboard;
 using DataAccessLibrary.Discord;
 using DataAccessLibrary.Guilds;
 using DataAccessLibrary.Health;
+using DataAccessLibrary.Requests;
 using DataAccessLibrary.Status;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -38,9 +39,11 @@ namespace DataAccessLibrary
             return services;
         }
 
+        // With the reset of the cached armor names, which the bot's cached maps share, so one request clears both
         public static IServiceCollection AddArmorAccess(this IServiceCollection services)
         {
             services.AddTransient<IArmorData, ArmorData>();
+            services.AddSingleton<CacheReset>();
             return services;
         }
 
@@ -123,6 +126,21 @@ namespace DataAccessLibrary
         public static IServiceCollection AddGuildSettingsReads(this IServiceCollection services)
         {
             services.AddTransient<IGuildSettingsReads, GuildSettingsReads>();
+            return services;
+        }
+
+        // The bot's side of the dashboard's requests: reading, deciding, taking and finishing them, and its settings
+        public static IServiceCollection AddBotRequestAccess(this IServiceCollection services)
+        {
+            services.AddTransient<IBotRequestData, BotRequestData>();
+            return services;
+        }
+
+        // The dashboard's side of its requests to the bot: adding one with its audit row, and reading them back, without
+        // the bot's writes
+        public static IServiceCollection AddBotRequestQueue(this IServiceCollection services)
+        {
+            services.AddTransient<IBotRequestQueue, BotRequestQueue>();
             return services;
         }
     }

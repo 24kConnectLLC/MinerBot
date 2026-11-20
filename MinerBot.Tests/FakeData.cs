@@ -134,11 +134,19 @@ namespace MinerBot.Tests
             return Failure != null ? Task.FromException<T>(Failure) : Task.FromResult(value);
         }
 
+        // The colour job's writes, by armor ID
+        public Dictionary<int, string> ColorArrays { get; } = new();
+
+        public Task UpdateColorArray(int ID, string colorArray)
+        {
+            ColorArrays[ID] = colorArray;
+            return Call(true);
+        }
+
         public Task DeleteArmor(ArmorStyle armor) => throw new NotImplementedException();
         public Task<IEnumerable<string>> GetAllArmorNames() => throw new NotImplementedException();
         public Task InsertArmor(ArmorStyle armor) => throw new NotImplementedException();
         public Task UpdateArmor(ArmorStyle armor) => throw new NotImplementedException();
-        public Task UpdateColorArray(int ID, string colorArray) => throw new NotImplementedException();
     }
 
     internal sealed class FakeGuildData(Action<string> addStep) : IGuildData
@@ -196,12 +204,23 @@ namespace MinerBot.Tests
         public override DateTimeOffset GetUtcNow() => UtcNow;
     }
 
-    // Steam for the worker and the status sampler, which only start its pump and read its status
+    // Steam for the worker, the status sampler and the dashboard's requests: it starts its pump, gives its status, renews
+    // with the outcome a test sets, and reconnects by taking the status a test sets
     internal sealed class FakeSteam : ISteamAPIAccess
     {
         public TaskCompletionSource PumpStarted { get; } = new();
-        public int Renewals;
+        public int Renewals, Reconnects;
         public Exception? PumpFailure;
+
+        public TokenRenewal Renewal { get; set; } = new(TokenRenewalOutcome.Kept, new DateOnly(2027, 1, 1));
+
+        // Holds the renewal's answer until it completes, as Steam taking its time
+        public Task? RenewalHold { get; set; }
+
+        public SteamReconnect ReconnectAnswer { get; set; } = SteamReconnect.Started;
+
+        // The status a reconnect that started leaves, as the pump logging on again
+        public SteamStatus? StatusAfterReconnect { get; set; }
 
         public uint appID { get; set; }
         public CallbackManager manager { get; set; } = null!;
@@ -222,10 +241,24 @@ namespace MinerBot.Tests
             return PumpFailure != null ? Task.FromException(PumpFailure) : Task.Delay(Timeout.Infinite, stoppingToken);
         }
 
-        public Task RenewTokenAsync()
+        public async Task<TokenRenewal> RenewTokenAsync()
         {
-            Renewals++;
-            return Task.CompletedTask;
+            Interlocked.Increment(ref Renewals);
+
+            if (RenewalHold != null)
+                await RenewalHold;
+
+            return Renewal;
+        }
+
+        public SteamReconnect RequestReconnect()
+        {
+            Interlocked.Increment(ref Reconnects);
+
+            if (ReconnectAnswer == SteamReconnect.Started && StatusAfterReconnect is { } status)
+                Status = status;
+
+            return ReconnectAnswer;
         }
     }
 
@@ -303,7 +336,7 @@ namespace MinerBot.Tests
     // test can make a rule fail. Every call is kept, with the cutoff and the chunk it asked for.
     internal sealed class FakeRetentionData : IRetentionData
     {
-        public int AuditRows, Addresses, Events, GuildEvents, JobRuns, Days, Samples, Sessions;
+        public int AuditRows, Addresses, Events, GuildEvents, JobRuns, Requests, Days, Samples, Sessions;
         public readonly Dictionary<string, Exception> Failures = new();
         public readonly List<(string Rule, DateTime Cutoff, int Take)> Calls = new();
         public (DateTime From, DateTime To)? Totalled;
@@ -313,6 +346,7 @@ namespace MinerBot.Tests
         public Task<int> DeleteEvents(DateTime before, int take) => Take(nameof(DeleteEvents), before, take, ref Events);
         public Task<int> DeleteGuildEvents(DateTime before, int take) => Take(nameof(DeleteGuildEvents), before, take, ref GuildEvents);
         public Task<int> DeleteJobRuns(DateTime before, int take) => Take(nameof(DeleteJobRuns), before, take, ref JobRuns);
+        public Task<int> DeleteRequests(DateTime before, int take) => Take(nameof(DeleteRequests), before, take, ref Requests);
         public Task<int> DeleteSamples(DateTime before, int take) => Take(nameof(DeleteSamples), before, take, ref Samples);
         public Task<int> DeleteSessions(DateTime before, int take) => Take(nameof(DeleteSessions), before, take, ref Sessions);
 

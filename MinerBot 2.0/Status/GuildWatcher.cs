@@ -3,6 +3,17 @@ using Discord.WebSocket;
 
 namespace MinerBot_2._0.Status
 {
+    // How a write of a server's copy that the dashboard asked for went: written at a time, with its text and announcement
+    // channels, failed, with the failure's type and MariaDB's number, or not made, because the bot had left the server
+    public enum RewriteState
+    {
+        Written,
+        Failed,
+        Gone
+    }
+
+    public sealed record RewriteOutcome(RewriteState State, DateTime At = default, int Channels = 0, string? Failure = null);
+
     // Notes the servers whose copy in MinerBot's database may be out of date, for GuildWriter, which takes each one from
     // Discord.Net's cache and writes it when it changed: a server joined, left, changed or back from an outage, any of its
     // channels or roles, or the bot's own member, which Discord sends without the members intent. The handlers only note
@@ -12,9 +23,15 @@ namespace MinerBot_2._0.Status
     // database.
     public sealed class GuildWatcher(DiscordSocketClient client, TimeProvider clock)
     {
+        // How long a leave the dashboard asked for waits for Discord's word that the bot left
+        static readonly TimeSpan ExpectedLeaveLimit = TimeSpan.FromMinutes(2);
+
         readonly object gate = new();
         readonly Dictionary<ulong, Note> notes = new();
         long noted;
+
+        // The leaves the dashboard asked for, each with its detail, until Discord's word comes or its time is up
+        readonly Dictionary<ulong, (string Detail, DateTime Until)> expectedLeaves = new();
 
         // Each Ready, which Discord.Net raises once a new session's servers have arrived, or stopped arriving, with the
         // servers still unavailable then. Resumes don't raise it.
@@ -25,12 +42,15 @@ namespace MinerBot_2._0.Status
         // message: Discord.Net has them whole, and marks them connected, raising GuildAvailable, only once those have returned
         readonly HashSet<ulong> joining = new();
 
-        // A server's version grows with each note, so a server noted again while its write is under way stays noted
+        // A server's version grows with each note, so a server noted again while its write is under way stays noted. A leave
+        // the dashboard asked for has its detail, and a rewrite it asked for waits on the note with the version it was asked at.
         sealed class Note(long order)
         {
             public readonly long Order = order;
             public long Version;
             public DateTime? LeftAt;
+            public string? LeftDetail;
+            public List<(long Version, TaskCompletionSource<RewriteOutcome> Done)>? Rewrites;
         }
 
         public void Initialize()
@@ -88,6 +108,7 @@ namespace MinerBot_2._0.Status
 
         internal Task OnGuildUpdated(SocketGuild before, SocketGuild after) => OnGuild(after);
 
+        // With the detail of a leave the dashboard asked for, when Discord's word comes in time
         internal Task OnLeftGuild(SocketGuild guild) => Noting(() =>
         {
             var at = clock.GetUtcNow().UtcDateTime;
@@ -97,6 +118,7 @@ namespace MinerBot_2._0.Status
                 var note = NoteOf(guild.Id);
                 note.Version++;
                 note.LeftAt = at;
+                note.LeftDetail = expectedLeaves.Remove(guild.Id, out var expected) && at <= expected.Until ? expected.Detail : null;
                 joining.Remove(guild.Id);
             }
         });
@@ -133,11 +155,66 @@ namespace MinerBot_2._0.Status
             }
         }
 
-        // The servers noted, oldest first, each with its version and, when the bot left it, when
-        internal List<(ulong GuildId, long Version, DateTime? LeftAt)> PeekNotes()
+        // The servers noted, oldest first, each with its version, when the bot left it and the leave's detail, and whether the
+        // dashboard asked for its copy to be written again
+        internal List<(ulong GuildId, long Version, DateTime? LeftAt, string? LeftDetail, bool Forced)> PeekNotes()
         {
             lock (gate)
-                return notes.OrderBy(note => note.Value.Order).Select(note => (note.Key, note.Value.Version, note.Value.LeftAt)).ToList();
+            {
+                return notes.OrderBy(note => note.Value.Order)
+                    .Select(note => (note.Key, note.Value.Version, note.Value.LeftAt, note.Value.LeftDetail, note.Value.Rewrites is { Count: > 0 }))
+                    .ToList();
+            }
+        }
+
+        // For a dashboard request to leave a server, before the bot asks Discord: the detail its leave is recorded with, when
+        // Discord's word that the bot left comes within 2 minutes
+        internal void ExpectLeave(ulong guildId, string detail)
+        {
+            lock (gate)
+                expectedLeaves[guildId] = (detail, clock.GetUtcNow().UtcDateTime + ExpectedLeaveLimit);
+        }
+
+        // When Discord refused the leave
+        internal void ForgetLeave(ulong guildId)
+        {
+            lock (gate)
+                expectedLeaves.Remove(guildId);
+        }
+
+        // For a dashboard request to refresh a server: notes it, so GuildWriter writes its copy again at its next tick even when
+        // nothing changed, and says how that went
+        internal Task<RewriteOutcome> RequestRewrite(ulong guildId)
+        {
+            var done = new TaskCompletionSource<RewriteOutcome>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            lock (gate)
+            {
+                var note = NoteOf(guildId);
+                note.Version++;
+                (note.Rewrites ??= []).Add((note.Version, done));
+            }
+
+            return done.Task;
+        }
+
+        // The rewrites asked for up to the version the writer took, with how its write went. One asked for since waits for
+        // the next write.
+        internal void Rewritten(ulong guildId, long version, RewriteOutcome outcome)
+        {
+            List<TaskCompletionSource<RewriteOutcome>> done;
+
+            lock (gate)
+            {
+                if (!notes.TryGetValue(guildId, out var note) || note.Rewrites == null)
+                    return;
+
+                done = note.Rewrites.Where(rewrite => rewrite.Version <= version).Select(rewrite => rewrite.Done).ToList();
+                note.Rewrites.RemoveAll(rewrite => rewrite.Version <= version);
+            }
+
+            foreach (var rewrite in done)
+                rewrite.TrySetResult(outcome);
         }
 
         // A server noted again since its version was taken stays noted
@@ -156,7 +233,10 @@ namespace MinerBot_2._0.Status
             lock (gate)
             {
                 if (notes.TryGetValue(guildId, out var note) && note.LeftAt == leftAt)
+                {
                     note.LeftAt = null;
+                    note.LeftDetail = null;
+                }
             }
         }
 

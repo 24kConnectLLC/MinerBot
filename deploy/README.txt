@@ -15,11 +15,13 @@ Where everything is
   server.conf              this server's database names and the bot's ready line, for a bot image without a health check
                            (bootstrap.sh wrote it; never in Git); the connection strings in bot.env and dashboard.env
                            name the databases too
-  bot.env                  the bot's settings and secrets (./fill-secrets.sh changes the secrets)
+  bot.env                  the bot's settings and secrets (./fill-secrets.sh changes the secrets; ./setup-dashboard.sh
+                           writes REQUEST_SIGNING_KEY)
   dashboard.env            the dashboard's settings and secrets (./setup-dashboard.sh writes it)
   dashboard.env.previous   dashboard.env as it was before setup's last change
   compose.yml              how both containers run
-  deploy.sh, rollback.sh, setup-dashboard.sh, fill-secrets.sh, backup.sh, status.sh, and common.sh, which they share
+  deploy.sh, rollback.sh, setup-dashboard.sh, fill-secrets.sh, backup.sh, status.sh, request.sh, and common.sh, which
+                           they share
   dashboard-rights.sql     everything the dashboard's database login may do; rights-list.sql lists a login's rights
   minerbot-dashboard.conf  the reference copy of nginx's file, which only setup-dashboard.sh puts into nginx
   logs/                    one log per run (<UTC>-deploy.log and so on, the newest 60), history.log, and
@@ -62,7 +64,10 @@ Everyday commands, in /opt/minerbot
   ./deploy.sh [ref] [--only bot|dashboard] [--no-start]
                                                 build from GitHub and swap in, the dashboard first (ref: main)
   ./rollback.sh bot|dashboard                   back to a service's previous image; run it again to go forward again
-  tail logs/history.log                         what was deployed, rolled back or set up, and when
+  ./request.sh <kind> [--guild <server ID>] [--channel <channel ID>] [--text <text>]
+                                                sends the bot one of the dashboard's requests and prints its answer,
+                                                holding the lock until then; ./request.sh --list lists the kinds
+  tail logs/history.log                         what was deployed, rolled back, set up or requested, and when
   tail -n 50 -f "$(ls -t logs/*-deploy.log | head -n 1)"
                                                 follow a deploy again after its window closed (also -rollback, -setup)
   git -C src log --first-parent --oneline refs/remotes/origin/main
@@ -98,6 +103,10 @@ When a setting changes
       Discord ID with ./setup-dashboard.sh.
   The proxy key or the dashboard's database password is suspected leaked
       ./setup-dashboard.sh --no-questions --rotate-proxy-key, or --rotate-db-password
+  The request-signing key is suspected leaked, or the nightly check says its copies differ
+      ./setup-dashboard.sh --no-questions --rotate-request-key, or without it to make the copies agree. The key is in
+      bot.env and dashboard.env, and each container reads its file only when it's created: setup writes bot.env first,
+      then dashboard.env, and recreates the dashboard, then the bot, which is offline for about 30 seconds.
   A pull request changed the nginx file (deploy.sh says so, once the dashboard of that commit runs)
       ./setup-dashboard.sh --no-questions (over SSH without a terminal, with the owner's go-ahead: --no-questions --yes)
   WHM's piped logging goes off or on

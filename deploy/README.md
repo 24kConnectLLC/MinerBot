@@ -10,7 +10,7 @@ the tests of all of it. The server keeps its own names (database names, secrets)
 | In this folder | On the server | Mode |
 |---|---|---|
 | `compose.yml`, `common.sh`, `dashboard-rights.sql`, `rights-list.sql`, `minerbot-dashboard.conf` | `/opt/minerbot/<same name>` (the nginx file is a reference copy: only `setup-dashboard.sh` puts it into nginx) | 600 |
-| `deploy.sh`, `rollback.sh`, `setup-dashboard.sh`, `fill-secrets.sh`, `backup.sh`, `status.sh` | `/opt/minerbot/<same name>` | 700 |
+| `deploy.sh`, `rollback.sh`, `setup-dashboard.sh`, `fill-secrets.sh`, `backup.sh`, `status.sh`, `request.sh` | `/opt/minerbot/<same name>` | 700 |
 | `README.txt` | `/opt/minerbot/README.txt`, with `{{ORIGIN_CERT_ENDS}}` filled in from the installed certificate, or "not installed yet" | 600 |
 | `minerbot.cron` | `/etc/cron.d/minerbot` (cron refuses group- or world-writable files) | 644 |
 | `minerbot-dashboard.tmpfiles` | `/etc/tmpfiles.d/minerbot-dashboard.conf`, from which systemd-tmpfiles makes the dashboard's socket folder at every boot | 644 |
@@ -23,7 +23,7 @@ The server's layout, all of it root's but the socket's folder:
   server.conf                 600  SITE_DB, BOT_DB, BOT_READY_PATTERN (bootstrap.sh writes it; never in Git)
   bot.env  dashboard.env  dashboard.env.previous    600
   compose.yml common.sh README.txt dashboard-rights.sql rights-list.sql minerbot-dashboard.conf   600
-  deploy.sh rollback.sh setup-dashboard.sh fill-secrets.sh backup.sh status.sh                     700
+  deploy.sh rollback.sh setup-dashboard.sh fill-secrets.sh backup.sh status.sh request.sh          700
   src/                        the clone deploy.sh builds from, detached at the deployed commit
   state/                      700: lock, lock.info, backup.lock, deploy-files.commit, bootstrap.done,
                                    dashboard-rights.applied.sql (600, the rights file the last apply used),
@@ -94,14 +94,15 @@ what happened, what state it left and what to do.
 |---|---|---|---|
 | `./deploy.sh [ref] [--only bot\|dashboard] [--no-start]` | Builds a commit main itself pointed at (main's tip by default) and swaps it in, the dashboard first. Installs the deploy files, dumps and migrates when migrations are due, checks the dashboard's settings with its own validator, rehearses, applies and compares its database rights, then swaps by image ID. A swap that fails puts the service back on the exact image it ran. `--only` swaps one service; `--no-start` stops after the build and the migrations. | `minerbot-deploy` | 90 min |
 | `./rollback.sh bot\|dashboard` | Swaps a service between the image it runs and `:previous`, by image ID. Running it again goes forward again. When the service's container has another image than `:current`, a swap was cut off after it moved the tags, or Compose didn't put a failed swap back: then it finishes that swap on `:current` first, and moves no tag. Never touches the database, the rights, nginx or the other service. | `minerbot-rollback` | 15 min |
-| `./setup-dashboard.sh` | Asks for what only the owner has (the Origin certificate and key, neither shown as it's pasted, the Discord client ID and secret, the owners and admins, Cloudflare Access's team and AUD), then changes only what differs. Enter keeps a value, `keep` keeps a paste. | `minerbot-setup` | 30 min |
-| `./setup-dashboard.sh --no-questions [--yes]` | Keeps every value. Installs a changed nginx file once the dashboard of its commit runs, applies again the rights the last apply used, starts the dashboard when its container is stopped, recreates it when it runs on older settings than `dashboard.env` holds (after a recreate that failed), and repairs whatever differs. It asks "Go ahead?" unless `--yes`; without a terminal and without `--yes` it changes nothing. | `minerbot-setup` | 30 min |
-| `--rotate-proxy-key`, `--rotate-db-password` | Makes a new proxy key or database password; goes with either form above. | | |
+| `./setup-dashboard.sh` | Asks for what only the owner has (the Origin certificate and key, neither shown as it's pasted, the Discord client ID and secret, the owners and admins, Cloudflare Access's team and AUD), then changes only what differs. Enter keeps a value, `keep` keeps a paste. It makes the proxy key, the request-signing key and the database password itself, and recreates a bot that runs on another request-signing key than `bot.env` holds ("The bot's requests"). | `minerbot-setup` | 30 min |
+| `./setup-dashboard.sh --no-questions [--yes]` | Keeps every value. Installs a changed nginx file once the dashboard of its commit runs, applies again the rights the last apply used, starts the dashboard when its container is stopped, recreates it when it runs on older settings than `dashboard.env` holds (after a recreate that failed), recreates the bot when it runs on another request-signing key than `bot.env` holds, and repairs whatever differs. It asks "Go ahead?" unless `--yes`; without a terminal and without `--yes` it changes nothing. | `minerbot-setup` | 30 min |
+| `--rotate-proxy-key`, `--rotate-db-password`, `--rotate-request-key` | Makes a new proxy key, database password or request-signing key; each goes with either form above. | | |
 | `./setup-dashboard.sh --remove-nginx [--yes]` | The emergency path when `nginx -t` fails and names MinerBot's file: undoes a cut-off change first, takes the file out of nginx, keeping a copy, tests and reloads. Works while `nginx -t` fails. Nothing else: `/etc/nginx/minerbot`, with `pipelog.conf`, and cPanel's hook stay. | `minerbot-setup` | 30 min |
 | `./fill-secrets.sh` | Asks for `BOTTOKEN`, `WEBHOOKCHANNEL`, `STEAMWEB_PUB_KEY` and `STEAMUSER_NAME`, hidden, Enter keeps; writes them into `bot.env` and prints the recreate command. Holds the lock while it runs. | terminal | 10 min a question |
 | `./backup.sh nightly\|pre-deploy\|pre-move\|manual` | Dumps MinerBot's database into `/srv/backups/minerbot` and keeps 14 days, the newest 3 always. Prints nothing when it works and one line when it fails. | cron, deploy | its own limits, 2,400 s at most |
 | `bash src/deploy/move-database.sh [--drop-old]` | Once: moves MinerBot's database out of cPanel, and later deletes the old one through cPanel ("MinerBot's database out of cPanel"). | unit `minerbot-move-database` | 900 s |
-| `./status.sh` | A read-only look: containers, images, history, a running action, backups, the certificate, `nginx -t`, cPanel's Cloudflare list, the dashboard's socket, its proxy key while MinerBot's file is in nginx, the public home page's status, the disk. | terminal | 30 s a probe |
+| `./request.sh <kind> [--guild <server ID>] [--channel <channel ID>] [--text <text>]` | Sends the bot one of the dashboard's requests, through the dashboard's own code in its image, and prints the bot's answer; after a restart, waits until the bot is back on Discord. `./request.sh --list` lists the kinds. Holds the lock until the bot has answered ("The bot's requests"). | terminal | 900 s |
+| `./status.sh` | A read-only look: containers, images, history, a running action, backups, the certificate, `nginx -t`, cPanel's Cloudflare list, the dashboard's socket, its proxy key while MinerBot's file is in nginx, the public home page's status, the request-signing key in both env files and both containers, the disk. | terminal | 30 s a probe |
 | `./status.sh --check` | The nightly check, at 05:47: one line per problem and exit 1, silence and exit 0 when all is well. Never changes anything. | cron | 600 s (cron line) |
 | `./status.sh --mail-test` | Sends one message to root, to prove cron's mail reaches the owner. | terminal | 30 s |
 | `./status.sh --nginx-look` | nginx's http-level lines, its main context and its build flags, never a secret. | terminal | 30 s a probe |
@@ -273,6 +274,9 @@ starts it and checks that it's ready. Running it once more goes back to `:previo
   holding the proxy key the dashboard runs with (its container's, or `dashboard.env`'s when there's no container); and
   nginx's workers older than that file, so nginx hasn't loaded it (only when the file is right and no nginx change is
   cut off). After `./setup-dashboard.sh --remove-nginx`, neither is looked at until setup puts the file back;
+- with `dashboard.env` there: the request-signing key missing from `bot.env` or `dashboard.env`, or not 64 hexadecimal
+  digits in small letters there, the two files holding different keys, or the bot or the dashboard running with another
+  key than its file holds, each line saying what to run and never the key;
 - cPanel's Cloudflare list missing or empty;
 - an nginx change that was cut off;
 - with MinerBot's file in nginx: `/etc/nginx/minerbot/pipelog.conf` not matching cPanel's pipelog module (`pipelog
@@ -479,6 +483,7 @@ Once `./setup-dashboard.sh` has run, nginx loads MinerBot's file for every site,
 | Owners, admins, Discord client ID or secret, Access on or off, a new AUD, a new certificate | `./setup-dashboard.sh`: give the new value, Enter or `keep` for the rest. It recreates the dashboard or reloads nginx only as needed. |
 | An admin or owner joins or leaves while Access is on | Their email in Cloudflare's Access policy (Zero Trust › Access › Applications › MinerBot admin), and their Discord ID with `./setup-dashboard.sh`. Both. |
 | The proxy key or the dashboard's database password is suspected leaked | `./setup-dashboard.sh --no-questions --rotate-proxy-key` (or `--rotate-db-password`) |
+| The request-signing key is suspected leaked, or `./status.sh --check` says the copies differ | `./setup-dashboard.sh --no-questions --rotate-request-key`, or without `--rotate-request-key` to make the copies agree. It writes `bot.env`, then `dashboard.env`, and recreates the dashboard, then the bot ("The bot's requests") |
 | A PR changed the nginx file (deploy.sh says so, once the dashboard of that commit runs) | `./setup-dashboard.sh --no-questions` (over SSH without a terminal, with the owner's go-ahead: `--no-questions --yes`) |
 | WHM's piped logging goes off or on | Nothing: cPanel's hook keeps `pipelog.conf` in step (see nginx below) |
 | The bot's token, webhook, Steam key or Steam user | `./fill-secrets.sh`, then `docker compose up -d --no-build --no-deps --force-recreate bot` |
@@ -492,6 +497,141 @@ dashboard's socket, `Dashboard__UnixSocket`, comes from `compose.yml`, which win
 
 The certificate's end date: `setup-dashboard.sh` prints it, `README.txt` has it (rendered on install, and again by
 setup when the certificate changes), `status.sh` shows the days left, and the nightly check mails 30 days ahead.
+
+## The bot's requests
+
+The dashboard leaves the bot signed requests in MinerBot's own database, in `bot_commands`, and the bot takes each one
+within seconds and writes how it ended on the same row. The repository's README lists them ("Requests to the bot").
+The dashboard's page for them comes in PR 10; until then `request.sh` sends one from the server.
+
+### The request-signing key
+
+- One key, 32 random bytes written as 64 hexadecimal digits in small letters, which both apps hold:
+  `REQUEST_SIGNING_KEY` in `bot.env` and `Dashboard__RequestSigningKey` in `dashboard.env`. The dashboard signs each
+  request with it, and the bot refuses one that doesn't verify. So there are four copies: the two files, and each
+  container's environment, which Docker sets only when it creates the container.
+- `setup-dashboard.sh` makes it with `openssl rand -hex 32` inside its unit, and never shows it. Its step 2b chooses: a
+  new one for `--rotate-request-key`; else `bot.env`'s, when it's well formed and differs from `dashboard.env`'s, since
+  setup writes `bot.env` first: a run cut off between the two writes leaves `bot.env`'s the newer, and a run that
+  stopped because `bot.env` couldn't take a new key, as on a full disk, may have moved `dashboard.env` onto that key all
+  the same, while the bot kept `bot.env`'s; else `dashboard.env`'s, when it's well formed; else a new one. A key that
+  isn't well formed counts as none, and is never quoted.
+- It writes `bot.env` (600, replaced by rename, every other line kept) before `dashboard.env` moves. After the
+  dashboard's recreate, it recreates the bot when the bot's container runs with another key than `bot.env` holds, and
+  waits until it's ready, as a deploy does: about 30 seconds offline, which the summary before "Go ahead?" says. A bot
+  that isn't ready after its recreate has the key already, so the next run finds nothing to recreate: the problem line
+  gives its log, and `docker compose up -d --no-build --no-deps --force-recreate bot` for once the cause is fixed. A
+  stopped bot is left stopped, and loads the key when it's next created: `./status.sh --check` and `request.sh` then
+  give that recreate, rather than setup. A dashboard that isn't ready after its recreate stops the run before the
+  bot's, so the bot still runs with another key than `bot.env` holds: the stop line says it refuses the dashboard's
+  requests until `./setup-dashboard.sh --no-questions` recreates it, as `./status.sh --check` and `request.sh` say too.
+- Setup stops before anything changes when `bot.env` is missing: "bot.env is missing, so the request key has nowhere to
+  go. Nothing was changed."
+- Without a usable key each app runs as before, with requests off: the bot records `requests.off` once a run and
+  refuses every request, saying why; the dashboard starts with an empty key and sends nothing, and stops at its start
+  with a key that isn't 64 small hexadecimal digits, as its `check-settings` does, so a deploy refuses one before any
+  swap.
+- `./status.sh` shows one line for the key, and `./status.sh --check` reports a key missing or malformed in either
+  file, the two files apart, and a container on another key than its file holds, each line saying what to run. The
+  keys are only compared, never printed.
+- To rotate it: `./setup-dashboard.sh --no-questions --rotate-request-key`. A request signed with the old key in the
+  seconds between the two recreates is refused. The bot can't tell another key from a forged row, so its refusal and
+  its direct message about a signature that didn't match, at most one an hour, name both causes, and
+  `./status.sh --check` says which. A bot restarted by a request keeps its container, so it never picks up a changed
+  `bot.env`: only setup's recreate, or a deploy that swaps the bot, does.
+- `fill-secrets.sh`, `move-database.sh` and the bootstrap leave `REQUEST_SIGNING_KEY` as it is and never print it:
+  they change other lines of `bot.env` with `write_env`, which keeps every other line, or only read it. The backup
+  never reads `bot.env`.
+
+### PR 9's first deploy
+
+1. `./deploy.sh <commit>`. It installs the deploy files, `request.sh` among them, migrates to version 4 (`bot_commands`
+   and `bot_settings`), applies the rights, and swaps the dashboard (no key yet, so requests are off) and the bot (no
+   key, so `requests.off`; no settings row, so posts aren't paused).
+2. `./setup-dashboard.sh --no-questions`. It makes the key, writes `bot.env` then `dashboard.env`, and recreates the
+   dashboard and then the bot.
+3. `./status.sh --check` shows no line about the request key.
+
+### request.sh
+
+```bash
+./request.sh <kind> [--guild <server ID>] [--channel <channel ID>] [--text <text>]
+./request.sh --list
+```
+
+- It refuses unless it runs as root, `dashboard.env` is there, both files hold the same well-formed key and each
+  container runs with its file's, `minerbot-dashboard:current` is there, and the bot runs. Each refusal says what to
+  run, and "Nothing was sent." A `--guild` or `--channel` that isn't a Discord ID of 17 to 20 digits, or comes twice,
+  is refused with this script's usage before anything else.
+- It takes the lock and holds it until the bot has answered, so no deploy or setup runs meanwhile, and a restart never
+  lands in a deploy's readiness check. While another run holds the lock, it refuses.
+- It runs `minerbot-dashboard:current` once, as `minerbot-request`, removed with `docker rm -f -v` before and after,
+  with `request <kind> [--guild ...] [--channel ...]`: `--network host` to reach MariaDB, without the image's health
+  check, which would ask for a dashboard that doesn't run there, read-only, 256 MB and 64 processes, under
+  `run_for 900`, which covers a 10-minute expiry, the bot's longest action, and a restart with the 6 minutes the
+  command then waits. `--list` takes no lock, so it runs as `minerbot-request-list`, and never removes the one-off of a
+  request that waits for the bot, which Docker would kill. Only `ConnectionStrings__BotConnection`,
+  `Dashboard__RequestSigningKey` and `Dashboard__Owners` from `dashboard.env` go in, by name, and the text as
+  `MINERBOT_REQUEST_TEXT`: never on a command line, and never `--env-file dashboard.env`, which would hand it every
+  secret. The command uses the dashboard's own login, so the check also proves its rights, with a pool of 2
+  connections, which stays within the login's 15 beside the running dashboard's two pools of 6.
+- The request says the dashboard's first Owner asked, named "request.sh on the server", with no address. The command
+  prints the request's number, then the bot's answer ("Done at ...: ..."), a lookup's account number or a test
+  message's ID, and the bot's settings after a pause, a resume, a status text or a restart. After a restart, it waits up
+  to 6 minutes for a new run of the bot to be up on Discord: the bot writes done first, then lets a notification run the
+  schedule started meanwhile end, which takes at most 270 seconds, before it stops. It never prints the key, the
+  signature or a connection string. For `steam.lookup`, `--text` takes a custom link's name or the whole link.
+- One history line: `request  <kind>  -  <state>  request <number>`, the state being `done`, `failed`, `refused`,
+  `expired`, `unknown`, `no answer` or `not sent`.
+- Exit code 0 done, and the bot back after a restart; 1 refused, failed, expired, unknown, no answer, or refused before
+  sending; 2 the command refused an argument, with nothing sent.
+- A dashboard image from before PR 9 doesn't know the command, which `request.sh` recognises: "The dashboard's image
+  doesn't know the request command: deploy PR 9's dashboard first."
+
+### PR 9's live check
+
+Each request once on the real bot, over SSH, starting at least 5 minutes after setup recreated the bot, since the bot
+takes no restart in its first 5 minutes, with the owner's go-ahead for the restart and the leave. The owner confirms
+what shows in Discord: the direct messages, the status text and the silent test message.
+
+| # | Command | Look for |
+|---|---|---|
+| 0 | `./status.sh --check` | no line about the request key |
+| 1 | `./request.sh caches.clear` | done |
+| 2 | `./request.sh job.notifications` | done, and a new run of the notification job on the Bot page |
+| 3 | `./request.sh job.colors` | done, and a direct message naming `request.sh on the server` |
+| 4 | `./request.sh steam.renew` | renewed or kept, and a direct message |
+| 5 | `./request.sh steam.reconnect` | "logged on again after N s"; "Steam went offline", then "Logged on to Steam" on the Bot page; a direct message |
+| 6 | `./request.sh steam.lookup --text <a known custom link>` | the account number `/more steam_id` gives |
+| 7 | `./request.sh guild.test_message --guild <24kConnect> --channel <a channel>` | the silent embed, with no ping |
+| 8 | `./request.sh guild.refresh --guild <24kConnect>` | done, with the channel count |
+| 9 | `./request.sh owner.signin_alert` | the sign-in direct message, with no address |
+| 10 | `./request.sh posts.pause --text "Live check of PR 9"` | done; a direct message with the reason; the settings printed as paused; the next notification run's detail on the Bot page says posts are paused |
+| 11 | `./request.sh status.set --text "Live check of PR 9"` | the bot's profile shows it; a direct message |
+| 12 | `./request.sh bot.restart` | a direct message; back on Discord within 2 minutes, or up to 6 when a notification run had just started, which the restart lets end; the settings still paused; the profile still shows the text; a "Posts paused" event on the Bot page, "still paused since ...", at the start |
+| 13 | `./request.sh bot.restart` again, at once | refused by the limit: "The bot takes this at most once every 10 minutes, and last took one at ...". The limit comes before the 5 minutes since a start, whose refusal the tests prove |
+| 14 | `./request.sh posts.resume` | done; a direct message; the next notification run posts what waited since step 12's restart, which lost what the paused runs found before it |
+| 15 | `./request.sh status.set` | back to "Playing Murder Miners on my PC"; a direct message |
+| 16 | `./request.sh guild.leave --guild <a throwaway server>` | the bot leaves; the servers page shows "left on dashboard request N"; a direct message |
+| 17 | `./status.sh --check`, and the Bot page | the new events show by their labels, such as "Posts paused" and "Posts resumed"; "Message sent to the owner" rows show request numbers and no names |
+
+A leave deletes that server's channel settings, as a removal does, and only a new invite undoes it, so step 16 needs a
+server made for the check, with MinerBot invited before it. Without one, skip it: the tests cover the leave.
+
+### What to know
+
+- **One bot per database.** The bot counts a limit from `bot_commands`, then takes the request in a second statement,
+  so two bot processes on one database, such as a developer's run against the live one, could each take one request
+  past a limit, and a restart may stop the other process. Each request is still acted on once.
+- **A bot rolled back** to an image from before PR 9 doesn't read `bot_settings`, so it posts while posts are paused,
+  and leaves the requests to expire.
+- **A deploy that finds the bot already on its image** only checks that it's ready again, without recreating it. A
+  restart sent from the dashboard's page during that check moves the bot's restart count, which fails the deploy.
+  Nothing is put back, since the image is the same, and the next deploy goes through: rare, and harmless. `request.sh`
+  holds the lock, so it can't do this.
+- The nightly clean-up deletes a request 90 days after it was made, or after the bot ended it if that came first, so
+  a row dated years ahead by a writer without the key, which the bot refuses, still goes. The dumps hold the requests,
+  so a restore brings them back as they were dumped, which only each one's expiry keeps from being acted on.
 
 ## Rules for every script
 
@@ -507,9 +647,10 @@ setup when the certificate changes), `status.sh` shows the days left, and the ni
   included; the tests check it.
 - Every `read` has `-t`, and every `stty` runs only when `on_terminal` (`[ -t 0 ]`): without a terminal an unguarded
   `stty` fails, and in an EXIT trap under `set -e` it turns a finished run's status into 1.
-- A named helper container (`minerbot-migrate`, `minerbot-dashboard-check`) is removed with `docker rm -f -v` before it
-  starts and after it ends, since a run killed at its limit can leave one behind. The `-v` also removes the anonymous
-  volume the dashboard image's `VOLUME /app/keys` gives the migration's container.
+- A named helper container (`minerbot-migrate`, `minerbot-dashboard-check`, `minerbot-request`,
+  `minerbot-request-list`) is removed with `docker rm -f -v` before it starts and after it ends, since a run killed at
+  its limit can leave one behind. The `-v` also removes the anonymous volume the dashboard image's `VOLUME /app/keys`
+  gives the migration's container. Removing one that runs kills it, so two runs that can overlap never share a name.
 - Plain messages that say what happened, what state it left and what to do.
 - Passwords go to MariaDB only on stdin, with `--skip-print-query-on-error`: otherwise its client prints a failing
   statement, password included.
@@ -702,7 +843,8 @@ How the file grows. The approved plan's list is the ceiling:
 | PR 5, blacklist and audit page | `SELECT, INSERT, UPDATE, DELETE` on `ihvph_blacklist`; `SELECT` on `audit_log` |
 | PR 8, status and servers pages | `SELECT` on `bot_status`, `uptime_samples`, `uptime_daily`, `bot_events`, `job_status`, `job_runs`, `guilds`, `guild_channels`, `guild_events` and `guild_daily`, which only the bot writes; `SELECT` on `ihvph_discord_servers`, each server's ID and four channel IDs |
 | The server channels page | `INSERT, UPDATE (armor_channel_id, map_channel_id, lobby_channel_id, announcements_channel_id)` on `ihvph_discord_servers`, whose `SELECT` PR 8 gave |
-| The bot's command, switch and note tables | `INSERT` on `bot_commands`; `SELECT, INSERT, UPDATE, DELETE` on the dashboard's switches and notes, each in the PR that creates the table |
+| PR 9, the bot's requests | `SELECT` and an `INSERT` of the eleven request columns on `bot_commands`, so a request's state, run, times, result and direct message start empty and only the bot's own login writes them; `SELECT` on `bot_settings`, which only the bot writes |
+| The dashboard's switch and note tables | `SELECT, INSERT, UPDATE, DELETE` on the dashboard's switches and notes, each in the PR that creates the table |
 
 ## The settings rule
 
@@ -801,8 +943,8 @@ CI's required "Build and test" job runs, after the .NET tests:
 | `docker compose -f deploy/compose.yml config --quiet` (with an empty `deploy/bot.env`, which `*.env` keeps out of Git) | YAML and schema mistakes |
 | `bash deploy/tests/nginx-test.sh` | 26 checks of the nginx file in `nginx:1.31.8-alpine`, next to a cPanel-like configuration, with a stand-in dashboard on the socket: headers, the Cloudflare-only rule, body caps, timeouts, logs, the 503 page, `pipelog.conf`, and that nothing reaches 127.0.0.1:5080 |
 | `bash deploy/tests/nginx-procedure-test.sh` | 23 checks of the real `nginx_change`, `nginx_remove`, `nginx_undo_cut_off`, `nginx_look`, the reload's proof and cPanel's pipelog hook against a real nginx 1.31.8, cut-off runs, an undo after WHM's piped logging changed, and reloads nginx doesn't take included |
-| `bash deploy/tests/rights-test.sh` | 21 checks of the real `apply_rights` against MariaDB 11.4: the rights, the grant options, the copy setup applies, the refusal of triggers, events and routines, and `move-database.sh`'s steps: the bot's login, the copy and its comparison, and the rights on the new database |
-| `bash deploy/tests/scripts-test.sh` | 70 cases of the deploy, rollback, setup, bootstrap, move-database, fill-secrets, backup and status logic in `almalinux:9`, the server's bash and coreutils, with stand-ins for Docker, MariaDB, nginx, systemd and the rest |
+| `bash deploy/tests/rights-test.sh` | 22 checks of the real `apply_rights` against MariaDB 11.4: the rights, the grant options, the copy setup applies, the refusal of triggers, events and routines, `move-database.sh`'s steps (the bot's login, the copy and its comparison, and the rights on the new database), and the request table's columns the dashboard can't write |
+| `bash deploy/tests/scripts-test.sh` | 79 cases of the deploy, rollback, setup, bootstrap, move-database, fill-secrets, backup, status and request logic in `almalinux:9`, the server's bash and coreutils, with stand-ins for Docker, MariaDB, nginx, systemd and the rest |
 | `bash deploy/tests/image-files-test.sh` | 5 checks of both images, built from files only root can read, as `deploy.sh`'s checkout under umask 077 left them: their user, 1654, can read every file in `/app`, and owns and can change nothing there but its volume's folder |
 
 The job has 125 minutes, and each of the five test steps a limit above its script's own: 15 minutes for
@@ -816,9 +958,11 @@ The job has 125 minutes, and each of the five test steps a limit above its scrip
 | 1-12, 24-39, 60-65 | `deploy.sh` and `rollback.sh`: refusals, the first build, deploy files, full deploys, swaps that fail and go back, time limits, refs and main's first-parent line, Compose failing, a `compose.yml` a service can't run under, the socket, rewritten history, locks, units, readiness, an older dashboard's rights, cut-off swaps, following a run while `systemctl` doesn't answer, a swap Compose can't put back, the rights every dashboard that can be put back keeps, and a dashboard that can't render a page |
 | 66-69 | `move-database.sh`: a move and `--drop-old`, the refusals before anything changes, a copy that differs and a dashboard that isn't ready on the new database, each going back, and a run cut off after each step |
 | 13-16, 21, 50-59, 75 | `setup-dashboard.sh`: the first setup through a real terminal, nginx failures, converging, refusals, no terminal, the rights copy, password changes that stop, hidden pastes, a stopped dashboard, nginx's file waiting for its dashboard, a recreate Compose didn't do, a stale `pipelog.conf` or hook, a lone reload nginx didn't take, a stop after the undo of a cut-off nginx change, which names that undo |
+| 76-79 | `setup-dashboard.sh` and the request-signing key: one made when there's none, `bot.env` first, the dashboard and then the bot recreated; `--rotate-request-key`; a run cut off after `bot.env`; a bot on another key, one that's stopped, and one that isn't ready after its recreate; malformed keys; no `bot.env` |
+| 70-73 | `request.sh`: settings and the text by name only, the history line and each exit code; each refusal, and an image from before the request command; the wait after a restart while it holds the lock; the lock another run holds |
 | 90-92 | a reload nginx doesn't take, `pipelog.conf` following WHM's piped logging, and triggers, events or routines in MinerBot's database |
 | 17, 42 | `backup.sh` |
-| 18, 43, 45, 46 | `status.sh`, the public path, `pipelog.conf`, cPanel's hook and MinerBot's database included |
+| 18, 43, 45-47 | `status.sh`, the public path, `pipelog.conf`, cPanel's hook, MinerBot's database and the request-signing key included |
 | 22, 44 | `fill-secrets.sh` |
 | 23, 40, 41 | `bootstrap.sh` |
 | 19, 20 | across every case: no secret in any output, and the static rules; these two run last |

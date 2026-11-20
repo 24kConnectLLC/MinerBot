@@ -185,6 +185,15 @@ namespace MinerBot.Tests
             Assert.True(watcher < At("await client.LoginAsync("), "The server watcher is attached after the login");
 
             Assert.True(At("steamApi.RecordEvent = recorder.Record;") < At("steamApi.AuthenticateClient();"), "Steam signs in before its events are recorded");
+
+            // The dashboard's requests: their worker after the worker, so it starts once JobHandler has and stops before Steam's
+            // pump ends; their repository; and the status kept from before the login, so the first IDENTIFY carries it and every
+            // connection after sends it again
+            Assert.True(At("builder.Services.AddHostedService<RequestWorker>();") > worker, "The request worker is registered before the worker, so it stops after Steam's pump");
+            At(".AddBotRequestAccess()");
+            Assert.True(At("await host.Services.GetRequiredService<PresenceKeeper>().InitializeAsync();") < At("await client.LoginAsync("),
+                "The status's keeper starts after the login, so the first IDENTIFY doesn't carry it");
+            Assert.DoesNotContain("SetGameAsync", source);
         }
 
         // The image checks itself with the heartbeat, and carries the commit it was built from

@@ -27,8 +27,13 @@ namespace MinerBot_2._0.Services
             _recorder = recorder;
         }
 
-        // Each alert goes into the bot's history too. Its text is the bot's own wording, which never holds a secret.
-        public async Task SendAsync(string message)
+        // Each alert goes into the bot's history too. Its text is the bot's own wording, which never holds a secret. Steam's
+        // AlertOwner is this method, so it keeps one parameter: an optional second one wouldn't convert to Func<string, Task>.
+        public Task SendAsync(string message) => SendAsync(message, message);
+
+        // For a message that holds someone's name or words, such as one about a dashboard request: the bot's history keeps
+        // recordAs in its place, because Admins read it, and an event holds no name and no one's text
+        public async Task SendAsync(string message, string recordAs)
         {
             try
             {
@@ -42,11 +47,11 @@ namespace MinerBot_2._0.Services
             catch (Exception e)
             {
                 // The caller reports it as well
-                _recorder.Record(BotEvents.AlertFailed, $"{e.GetType().Name}: {Start(message)}");
+                _recorder.Record(BotEvents.AlertFailed, $"{e.GetType().Name}: {Start(recordAs)}");
                 throw;
             }
 
-            _recorder.Record(BotEvents.AlertSent, message);
+            _recorder.Record(BotEvents.AlertSent, recordAs);
         }
 
         // A character outside the Basic Multilingual Plane is kept whole or left out

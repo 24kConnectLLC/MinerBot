@@ -75,7 +75,7 @@ namespace DataAccessLibrary.Tests
             await db.AddArmorAsync(Approved(1, $"Test {Emoji} Armor"));
 
             using var cache = new MemoryCache(new MemoryCacheOptions());
-            var armor = new ArmorData(new SQLConnectionFactory(WithoutCharacterSet()), cache);
+            var armor = new ArmorData(new SQLConnectionFactory(WithoutCharacterSet()), cache, new CacheReset());
 
             Assert.Equal([$"Test {Emoji} Armor"], await armor.GetAllArmorNames());
         }
@@ -226,7 +226,7 @@ namespace DataAccessLibrary.Tests
 
             using var cache = new MemoryCache(new MemoryCacheOptions());
 
-            Assert.Null(await new ArmorData(new SQLConnectionFactory(WithoutCharacterSet()), cache).GetArmorStyle("Fire \U0001F525"));
+            Assert.Null(await new ArmorData(new SQLConnectionFactory(WithoutCharacterSet()), cache, new CacheReset()).GetArmorStyle("Fire \U0001F525"));
             Assert.NotNull(await db.Armor(cache).GetArmorStyle("Fire \U0001F525"));
         }
     }

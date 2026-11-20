@@ -135,6 +135,59 @@ namespace MinerBot.Dashboard.Tests
                 Assert.DoesNotContain(value, problem);
         }
 
+        // Made up, as setup-dashboard.sh makes the key
+        const string RequestSigningKey = "8e0d6f3a2b1c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6";
+
+        const string RequestSigningKeyProblem = "Dashboard:RequestSigningKey must be 64 hexadecimal digits in small letters, as setup-dashboard.sh makes it, or empty, which turns requests to the bot off.";
+
+        // Empty or left out turns requests to the bot off, so a dashboard deployed before setup made the key still starts.
+        // Fails if the key were required.
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData(RequestSigningKey)]
+        public void RequestSigningKeyMayBeEmpty(string? key)
+        {
+            var settings = Valid();
+            settings["Dashboard:RequestSigningKey"] = key;
+
+            Assert.Empty(Problems(settings));
+        }
+
+        // One digit short, one too many, or anything but 0-9 and a-f, which the scripts compare as text and the bot refuses
+        [Theory]
+        [InlineData(63)]
+        [InlineData(65)]
+        [InlineData(32)]
+        public void ShortRequestSigningKeyIsRefused(int length)
+        {
+            var settings = Valid();
+            settings["Dashboard:RequestSigningKey"] = string.Concat(Enumerable.Repeat(RequestSigningKey, 2))[..length];
+
+            var problem = Assert.Single(Problems(settings));
+            Assert.Equal(RequestSigningKeyProblem, problem);
+            Assert.DoesNotContain(RequestSigningKey[..16], problem);
+        }
+
+        [Theory]
+        [InlineData("capitals")]
+        [InlineData("a space")]
+        [InlineData("a letter past f")]
+        public void UppercaseRequestSigningKeyIsRefused(string which)
+        {
+            var settings = Valid();
+            settings["Dashboard:RequestSigningKey"] = which switch
+            {
+                "capitals" => RequestSigningKey.ToUpperInvariant(),
+                "a space" => RequestSigningKey[..63] + " ",
+                _ => RequestSigningKey[..63] + "g"
+            };
+
+            var problem = Assert.Single(Problems(settings));
+            Assert.Equal(RequestSigningKeyProblem, problem);
+            Assert.DoesNotContain(RequestSigningKey[..16], problem, StringComparison.OrdinalIgnoreCase);
+        }
+
         [Fact]
         public void ThirtyOneCharacterProxyKeyIsTooShort()
         {
@@ -248,12 +301,14 @@ namespace MinerBot.Dashboard.Tests
             settings["Discord:ClientSecret"] = ClientSecret + " " + ClientSecret;
             settings["Discord:TokenEndpoint"] = "http://discord.com/api/oauth2/token";
             settings["Dashboard:ProxyKey"] = ProxyKey + " ";
+            settings["Dashboard:RequestSigningKey"] = RequestSigningKey + "0";
 
             var problems = Problems(settings);
 
-            Assert.Equal(10, problems.Count);
+            Assert.Equal(11, problems.Count);
+            Assert.Contains(RequestSigningKeyProblem, problems);
 
-            foreach (var secret in new[] { ProxyKey, ClientSecret, SitePassword, BotPassword, "site_login", "bot_login" })
+            foreach (var secret in new[] { ProxyKey, ClientSecret, SitePassword, BotPassword, "site_login", "bot_login", RequestSigningKey })
                 Assert.All(problems, problem => Assert.DoesNotContain(secret, problem));
         }
 

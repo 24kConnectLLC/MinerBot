@@ -5,6 +5,7 @@ using Discord.WebSocket;
 using MinerBot_2._0;
 using MinerBot_2._0.Handlers;
 using MinerBot_2._0.Jobs;
+using MinerBot_2._0.Requests;
 using MinerBot_2._0.Services;
 using MinerBot_2._0.Status;
 using SteamWebAPIAccess;
@@ -33,6 +34,12 @@ builder.Services.AddHostedService<StatusSampler>();
 builder.Services.AddSingleton<GuildWatcher>();
 builder.Services.AddHostedService<GuildWriter>();
 builder.Services.AddHostedService<Worker>();
+// The dashboard's signed requests, which the bot takes from MinerBot's database. Registered after the worker, so it starts
+// once JobHandler has, and stops before Steam's pump ends.
+builder.Services.AddSingleton<PostsPause>();
+builder.Services.AddSingleton<PresenceKeeper>();
+builder.Services.AddSingleton<RequestActions>();
+builder.Services.AddHostedService<RequestWorker>();
 builder.Services.AddSingleton(new DiscordSocketConfig { GatewayIntents = GatewayIntents.Guilds });
 builder.Services.AddSingleton<DiscordSocketClient>();
 //builder.Services.AddSingleton<InteractionService>();
@@ -59,7 +66,8 @@ builder.Services.AddDataAccessServices(builder.Configuration)
                 .AddGuildAccess()
                 .AddBotStatusAccess()
                 .AddRetentionAccess()
-                .AddBotGuildAccess();
+                .AddBotGuildAccess()
+                .AddBotRequestAccess();
 
 // Steam API Access
 builder.Services.AddSteamAPIServices();
@@ -80,8 +88,9 @@ host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping
 // Need to use ILogger instead, but good for now.
 client.Log += Client_Log;
 
-// Client Activity
-await client.SetGameAsync("Murder Miners on my PC", type:ActivityType.Playing);
+// Client Activity: the default, which goes with the first IDENTIFY, until the request worker reads the status text the
+// dashboard set, once the bot runs. PresenceKeeper sends it again at every connection.
+await host.Services.GetRequiredService<PresenceKeeper>().InitializeAsync();
 // MM Game Embed, RPC needed
 //client.Activity.
 

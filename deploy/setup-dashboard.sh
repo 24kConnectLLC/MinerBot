@@ -2,9 +2,11 @@
 # Sets up MinerBot's web dashboard, and changes its settings later. The owner runs it as root, in WHM's Terminal or over
 # SSH. It asks only for what only the owner has: the Cloudflare Origin certificate and its private key, the MinerBot
 # Dashboard application's client ID and secret, the owners' and admins' Discord user IDs, and Cloudflare Access's team
-# domain and AUD tag when Access is on. It makes the proxy key and the dashboard's database password itself and never
-# shows them. The answers are checked here; the changes run as a systemd unit of their own, minerbot-setup, which this
-# terminal follows. They change only what differs, so running this again finishes whatever an interruption left.
+# domain and AUD tag when Access is on. It makes the proxy key, the request-signing key and the dashboard's database
+# password itself and never shows them. The request-signing key, which the dashboard signs its requests to the bot with,
+# goes into bot.env first and then dashboard.env, and a bot that runs on another key is recreated. The answers are checked
+# here; the changes run as a systemd unit of their own, minerbot-setup, which this terminal follows. They change only
+# what differs, so running this again finishes whatever an interruption left.
 # Usage:
 #   ./setup-dashboard.sh                         asks every question; Enter keeps a value, and keep keeps a paste
 #   ./setup-dashboard.sh --no-questions          keeps every current value, installs a changed nginx file once the
@@ -12,7 +14,9 @@
 #                                                again, repairs whatever differs and starts a dashboard that's stopped,
 #                                                then asks "Go ahead?"
 #   ./setup-dashboard.sh --no-questions --yes    the same without that question, for a run without a terminal
-#   --rotate-proxy-key, --rotate-db-password     make a new proxy key or database password; either goes with the above
+#   --rotate-proxy-key, --rotate-db-password, --rotate-request-key
+#                                                make a new proxy key, database password or request-signing key; each
+#                                                goes with the above
 #   ./setup-dashboard.sh --remove-nginx [--yes]  the emergency path: takes MinerBot's file out of nginx, nothing else
 # nginx changes only after the new files pass nginx -t on their own and then with every site, and a failure puts every
 # file back byte for byte. Exit code: 0 done; 1 refused or stopped, with the reason.
@@ -25,7 +29,7 @@ action=setup
 subject=dashboard
 step="taking its options"
 trap 'stopped $? $LINENO' ERR
-usage="Usage: ./setup-dashboard.sh [--no-questions] [--yes] [--rotate-proxy-key] [--rotate-db-password], or ./setup-dashboard.sh --remove-nginx [--yes]"
+usage="Usage: ./setup-dashboard.sh [--no-questions] [--yes] [--rotate-proxy-key] [--rotate-db-password] [--rotate-request-key], or ./setup-dashboard.sh --remove-nginx [--yes]"
 env_file=$home/dashboard.env
 # The copy apply_rights keeps of the rights file it last applied. Setup applies that copy again, so it never gives the
 # running dashboard rights from a newer commit than the last dashboard deploy applied: a --only bot deploy installs a
@@ -36,7 +40,7 @@ env_header_1="# The web dashboard's settings. setup-dashboard.sh writes this fil
 env_header_2="# It keeps lines under other names. The dashboard reads the file only when its container is created."
 managed=(Dashboard__PublicOrigin Dashboard__ProxyKey Dashboard__Owners Dashboard__Admins Discord__ClientId
     Discord__ClientSecret CloudflareAccess__TeamDomain CloudflareAccess__Audience ConnectionStrings__DefaultConnection
-    ConnectionStrings__BotConnection)
+    ConnectionStrings__BotConnection Dashboard__RequestSigningKey)
 # The end of a message that stops the unit before its own changes. Once its first step has undone a cut-off nginx
 # change, which can put nginx's files back and reload nginx, it names that undo instead.
 unchanged="Nothing was changed."
@@ -45,6 +49,7 @@ mode=questions
 yes=no
 rotate_key=no
 rotate_pw=no
+rotate_req=no
 apply_dir=
 options=0
 while [ $# -gt 0 ]; do
@@ -56,6 +61,7 @@ while [ $# -gt 0 ]; do
         --yes) yes=yes ;;
         --rotate-proxy-key) rotate_key=yes ;;
         --rotate-db-password) rotate_pw=yes ;;
+        --rotate-request-key) rotate_req=yes ;;
         --apply)
             [ $# -ge 2 ] || die "$usage"
             apply_dir=$2
@@ -67,7 +73,7 @@ while [ $# -gt 0 ]; do
     options=$((options + 1))
     shift
 done
-if [ "$mode" = remove-nginx ] && { [ "$rotate_key" = yes ] || [ "$rotate_pw" = yes ]; }; then
+if [ "$mode" = remove-nginx ] && { [ "$rotate_key" = yes ] || [ "$rotate_pw" = yes ] || [ "$rotate_req" = yes ]; }; then
     die "--remove-nginx goes only with --yes. $usage"
 fi
 if [ -n "$apply_dir" ] && [ "$options" != 0 ]; then
@@ -337,11 +343,11 @@ pipelog_stale() {
         || { [ -d "${pipelog_hook%/*}" ] && ! cmp -s <(pipelog_hook_text) "$pipelog_hook"; }
 }
 
-# True when the dashboard's container runs on other values of setup's ten settings than dashboard.env holds: a recreate
-# that failed left the old container running, or a run was cut off after dashboard.env moved, before its recreate.
-# Docker reads the env file only when it makes a container, so only a recreate brings it in step. False when they agree,
-# or when Docker or dashboard.env can't tell; a setting dashboard.env doesn't name isn't compared. The values are only
-# compared, never printed.
+# True when the dashboard's container runs on other values of setup's eleven settings than dashboard.env holds: a
+# recreate that failed left the old container running, or a run was cut off after dashboard.env moved, before its
+# recreate. Docker reads the env file only when it makes a container, so only a recreate brings it in step. False when
+# they agree, or when Docker or dashboard.env can't tell; a setting dashboard.env doesn't name isn't compared. The values
+# are only compared, never printed.
 container_env_stale() {
     local vars name value line
     vars=$(run_for 30 docker container inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$dashboard_container" 2> /dev/null) \
@@ -371,13 +377,29 @@ password_works() {   # password_works <password> <database>
         | run_for 15 mariadb --defaults-file=/dev/stdin -D "$2" -N -e 'SELECT 1' > /dev/null
 }
 
-# Writes the candidate dashboard.env: setup's two header lines and its ten settings, then every other line of the current
-# file, in its order, so lines the owner added under other names are kept. Run on its own output, it writes the same file.
-candidate_env() {   # candidate_env <proxy key> <password> <file to write>
-    local key=$1 pw=$2 out=$3 line i
+# bot.env's request-signing key, the bot's copy, or nothing when it's missing or breaks the safe-character rule. Only
+# compared, never printed.
+bot_request_key() {
+    env_value "$home/bot.env" REQUEST_SIGNING_KEY 2> /dev/null || true
+}
+
+# True when the bot's container runs with another request-signing key than bot.env holds: this run or one cut off before
+# the bot's recreate wrote bot.env after the bot was created, and Docker reads bot.env only when it makes a container.
+# False when they agree, when there's no bot container, or when Docker doesn't answer. Only compared, never printed.
+bot_key_stale() {
+    local running
+    running=$(container_env_value "$bot_container" REQUEST_SIGNING_KEY) || return 1
+    [ "$running" != "$(bot_request_key)" ]
+}
+
+# Writes the candidate dashboard.env: setup's two header lines and its eleven settings, then every other line of the
+# current file, in its order, so lines the owner added under other names are kept. Run on its own output, it writes the
+# same file.
+candidate_env() {   # candidate_env <proxy key> <password> <request-signing key> <file to write>
+    local key=$1 pw=$2 req=$3 out=$4 line i
     local -a values
     values=("https://$public_host" "$key" "$owners" "$admins" "$client_id" "$client_secret" "$team" "$aud"
-        "$(connection_string "$SITE_DB" "$pw")" "$(connection_string "$BOT_DB" "$pw")")
+        "$(connection_string "$SITE_DB" "$pw")" "$(connection_string "$BOT_DB" "$pw")" "$req")
     for i in "${!managed[@]}"; do
         env_safe "${values[$i]}" \
             || die "The value for ${managed[$i]} breaks the safe-character rule ($env_rule). $unchanged"
@@ -399,7 +421,7 @@ candidate_env() {   # candidate_env <proxy key> <password> <file to write>
     chmod 600 "$out"
 }
 
-is_managed_line() {   # is_managed_line <line>: true for a NAME=value line of one of setup's ten settings
+is_managed_line() {   # is_managed_line <line>: true for a NAME=value line of one of setup's eleven settings
     local name
     [[ $1 == *=* ]] || return 1
     for name in "${managed[@]}"; do
@@ -469,6 +491,7 @@ foreground_checks() {   # checks 4 to 9; 1 to 3 come first, in foreground_part
         || die "Another nginx file names $public_host, which means the host was added in cPanel: ${others//$'\n'/, }. Remove it there first; this host is never added in cPanel. Nothing was changed."
     [ -f "$home/minerbot-dashboard.conf" ] \
         || die "$home/minerbot-dashboard.conf is missing. deploy.sh installs it: run ./deploy.sh main --only dashboard --no-start first. Nothing was changed."
+    [ -f "$home/bot.env" ] || die "bot.env is missing, so the request key has nowhere to go. Nothing was changed."
 }
 
 shown_or_none() {   # the current value to show; "none" for an empty one in an existing dashboard.env, so Enter keeps it
@@ -542,7 +565,8 @@ gather_answers() {
 # What the unit will change, worked out ahead for the summary, with setting names and never values. The unit works it
 # out again itself before it changes anything.
 plan_and_summarize() {
-    local cur_key plan_key sent_key='' cur_pw hosts name served expected rights running
+    local cur_key plan_key sent_key='' cur_pw hosts name served expected rights running cur_req bot_req plan_req req_changes
+    local bot_running running_req
     local -a changed=() lines=()
     local -A new=()
     step="working out what changes"
@@ -567,13 +591,31 @@ plan_and_summarize() {
     if [ "$hosts" != 2 ] || [ "$rotate_pw" = yes ] || [ -z "$cur_pw" ] || ! password_works "$cur_pw" "$BOT_DB" 2> /dev/null; then
         pw_changes=yes
     fi
+    # The request-signing key the unit will use, as step 2b chooses it: bot.env's when the two differ, dashboard.env's, or
+    # a new one, empty here
+    cur_req=$(current Dashboard__RequestSigningKey)
+    bot_req=$(bot_request_key)
+    plan_req=$cur_req
+    req_changes=no
+    if [ "$rotate_req" = yes ]; then
+        req_changes=yes
+        plan_req=
+    elif [[ $bot_req =~ ^[0-9a-f]{64}$ ]] && [ "$bot_req" != "$cur_req" ]; then
+        req_changes=yes
+        plan_req=$bot_req
+    elif ! [[ $cur_req =~ ^[0-9a-f]{64}$ ]]; then
+        req_changes=yes
+        plan_req=
+    fi
     new=([Dashboard__PublicOrigin]="https://$public_host" [Dashboard__Owners]="$owners" [Dashboard__Admins]="$admins"
         [Discord__ClientId]="$client_id" [Discord__ClientSecret]="$client_secret" [CloudflareAccess__TeamDomain]="$team"
         [CloudflareAccess__Audience]="$aud" [Dashboard__ProxyKey]="$cur_key"
         [ConnectionStrings__DefaultConnection]="$(connection_string "$SITE_DB" "$cur_pw")"
-        [ConnectionStrings__BotConnection]="$(connection_string "$BOT_DB" "$cur_pw")")
+        [ConnectionStrings__BotConnection]="$(connection_string "$BOT_DB" "$cur_pw")" [Dashboard__RequestSigningKey]="$cur_req")
     for name in "${managed[@]}"; do
         if [ "$name" = Dashboard__ProxyKey ] && [ "$key_changes" = yes ]; then
+            changed+=("$name")
+        elif [ "$name" = Dashboard__RequestSigningKey ] && [ "$req_changes" = yes ]; then
             changed+=("$name")
         elif [[ $name == ConnectionStrings__* ]] && [ "$pw_changes" = yes ]; then
             changed+=("$name")
@@ -613,6 +655,13 @@ plan_and_summarize() {
     if [ -n "$sent_key" ] && [ "$sent_key" != "$cur_key" ] && [ "$plan_key" = "$sent_key" ]; then
         lines+=("give dashboard.env the proxy key nginx sends, which is newer: a run was cut off after nginx's change, before dashboard.env moved")
     fi
+    if [ -z "$plan_req" ]; then
+        lines+=("make a new request-signing key, which is never shown, and write it to bot.env, then dashboard.env")
+    elif [ "$plan_req" != "$bot_req" ]; then
+        lines+=("write dashboard.env's request-signing key to bot.env, which has none in the right form")
+    elif [ "$plan_req" != "$cur_req" ]; then
+        lines+=("give dashboard.env the request-signing key bot.env holds, which setup writes first: a run that stopped between the two writes left them apart")
+    fi
     if [ ${#changed[@]} -gt 0 ]; then
         printf -v name '%s, ' "${changed[@]}"
         lines+=("change these settings in dashboard.env: ${name%, }")
@@ -649,6 +698,17 @@ plan_and_summarize() {
     elif [ ${#changed[@]} -gt 0 ]; then
         lines+=("leave the dashboard to the next deploy, which starts it: it isn't running yet")
     fi
+    # The bot reads bot.env only when its container is created: one that runs with another key than bot.env will hold is
+    # recreated, and a stopped one is left as it is
+    bot_running=$(container_running "$bot_container")
+    if [ -n "$bot_running" ] && running_req=$(container_env_value "$bot_container" REQUEST_SIGNING_KEY) \
+        && { [ -z "$plan_req" ] || [ "$running_req" != "$plan_req" ]; }; then
+        if [ "$bot_running" = true ]; then
+            lines+=("recreate the bot to load the request-signing key: it's offline for about 30 seconds")
+        else
+            lines+=("leave the bot's container as it is: it's stopped, and loads the request-signing key when it's next created")
+        fi
+    fi
     echo
     echo "Ready to:"
     printf -- '- %s\n' "${lines[@]}"
@@ -667,6 +727,7 @@ hand_over() {   # writes the answers for the unit, then starts it and follows it
         printf 'AUD=%s\n' "${aud:-}"
         printf 'ROTATE_PROXY_KEY=%s\n' "$rotate_key"
         printf 'ROTATE_DB_PASSWORD=%s\n' "$rotate_pw"
+        printf 'ROTATE_REQUEST_KEY=%s\n' "$rotate_req"
     } > "$answers_dir/answers"
     chmod 600 "$answers_dir/answers"
     step="starting the changes"
@@ -731,10 +792,34 @@ detached_cleanup() {
 # - Else a dashboard this run stopped starts again on its old settings.
 # It also says so when an nginx change is left cut off.
 before_stop() {
+    local kept_req again
     [ "${run_mode:-}" = detached ] || return 0
     if [ "${env_moved:-no}" = no ]; then
         if [[ ${nginx_result:-} =~ ^(reloaded|problem)$ ]] && [ -f "$home/dashboard.env.next" ]; then
             env_moved=yes
+            # bot.env first, as step 8 writes it. When bot.env can't take the new key, which is what stops step 8, the
+            # candidate takes bot.env's own instead, or none, which turns the dashboard's requests off, so the two files
+            # agree. Only when the candidate can't take that either, as on a full disk, does it move with the new key,
+            # since nginx runs with its proxy key, and the line below says the bot refuses the dashboard's requests.
+            if [ -n "${req_key:-}" ] && [ "$(bot_request_key)" != "$req_key" ]; then
+                if write_env "$home/bot.env" REQUEST_SIGNING_KEY "$req_key"; then
+                    echo "bot.env got the request-signing key first. The bot loads it when it's next created: ./setup-dashboard.sh --no-questions recreates it."
+                else
+                    again="./setup-dashboard.sh --no-questions"
+                    if [ "${rotate_req:-no}" = yes ]; then
+                        again+=" --rotate-request-key"
+                    fi
+                    kept_req=$(bot_request_key)
+                    [[ $kept_req =~ ^[0-9a-f]{64}$ ]] || kept_req=
+                    if ! write_env "$home/dashboard.env.next" Dashboard__RequestSigningKey "$kept_req"; then
+                        echo "bot.env couldn't take the new request-signing key, nor dashboard.env bot.env's (above), so the bot refuses the dashboard's requests until $again runs once the cause is fixed."
+                    elif [ -n "$kept_req" ]; then
+                        echo "bot.env couldn't take the new request-signing key (above), so dashboard.env keeps the one bot.env holds. Run $again once the cause is fixed."
+                    else
+                        echo "bot.env couldn't take the new request-signing key (above), and holds no usable one, so dashboard.env gets none, which turns requests to the bot off. Run $again once the cause is fixed."
+                    fi
+                fi
+            fi
             if mv -f "$home/dashboard.env.next" "$env_file"; then
                 echo "nginx runs the new files already, so dashboard.env got its new settings too."
                 recreate_after_stop "with its new settings"
@@ -759,11 +844,27 @@ before_stop() {
 }
 
 # The database password changed in this run and dashboard.env didn't move: dashboard.env gets the new password and
-# nothing else, since the old one no longer works, and the dashboard is recreated with it
+# nothing else, since the old one no longer works, and the dashboard is recreated with it. Both connection strings go
+# into a copy, which then replaces dashboard.env whole, so it never holds the new password in one and the old in the
+# other. When the copy can't be made or moved, as on a full disk, dashboard.env stays as it was: it says so and returns
+# 1, and the dashboard isn't recreated on a password MariaDB no longer takes, so one this run stopped stays stopped.
 password_to_env() {
+    local tmp stays=''
     env_moved=yes
-    write_env "$env_file" ConnectionStrings__DefaultConnection "$(connection_string "$SITE_DB" "$pw")"
-    write_env "$env_file" ConnectionStrings__BotConnection "$(connection_string "$BOT_DB" "$pw")"
+    tmp=$(mktemp "$home/.dashboard.env.XXXXXX") || tmp=
+    if [ -z "$tmp" ] || ! cp -p "$env_file" "$tmp" \
+        || ! write_env "$tmp" ConnectionStrings__DefaultConnection "$(connection_string "$SITE_DB" "$pw")" \
+        || ! write_env "$tmp" ConnectionStrings__BotConnection "$(connection_string "$BOT_DB" "$pw")" \
+        || ! mv -f "$tmp" "$env_file"; then
+        if [ -n "$tmp" ]; then
+            rm -f "$tmp"
+        fi
+        if [ "${stopped_dashboard:-no}" = yes ]; then
+            stays=", and the dashboard this run stopped stays stopped: visitors see nginx's restarting page"
+        fi
+        echo "The dashboard's database password changed in this run, but dashboard.env couldn't take the new one (above), so the dashboard can't open its databases$stays. Once the cause is fixed, run ./setup-dashboard.sh --no-questions, which gives dashboard.env a password that works and recreates the dashboard with it."
+        return 1
+    fi
     echo "The dashboard's database password changed in this run, so dashboard.env got the new one and nothing else."
     recreate_after_stop "with its old settings and the new password"
 }
@@ -879,8 +980,9 @@ take_answers() {   # the answers the foreground left, taken into this run; then 
         aud=$(env_value "$file" AUD)
         rotate_key=$(env_value "$file" ROTATE_PROXY_KEY)
         rotate_pw=$(env_value "$file" ROTATE_DB_PASSWORD)
+        rotate_req=$(env_value "$file" ROTATE_REQUEST_KEY)
         if ! [[ $client_id =~ ^[0-9]{17,20}$ && $client_secret =~ ^[A-Za-z0-9_-]{16,128}$ && -n $owners ]] \
-            || ! [[ $new_cert =~ ^(yes|no)$ && $rotate_key =~ ^(yes|no)$ && $rotate_pw =~ ^(yes|no)$ ]]; then
+            || ! [[ $new_cert =~ ^(yes|no)$ && $rotate_key =~ ^(yes|no)$ && $rotate_pw =~ ^(yes|no)$ && $rotate_req =~ ^(yes|no)$ ]]; then
             die "The answers this run was started with aren't whole, so nothing was changed. Run ./setup-dashboard.sh again."
         fi
         if [ "$new_cert" = yes ]; then
@@ -943,7 +1045,7 @@ nginx_refused() {
     fi
     rm -f "$home/dashboard.env.next"
     if [ "$pw_applied" = yes ] && [ -f "$env_file" ]; then
-        password_to_env
+        password_to_env || true
         die "$kept"
     fi
     env_moved=yes
@@ -956,19 +1058,39 @@ nginx_refused() {
     die "$said."
 }
 
+# Step 8 writes bot.env before the dashboard's recreate, and recreates the bot only at its end, so a run that stops on a
+# dashboard that isn't ready leaves a bot that runs with another request-signing key than bot.env holds: one sentence
+# that says so, for the stop line. Nothing when the two agree, when the bot is stopped, which setup leaves stopped, or
+# when Docker doesn't answer.
+stale_bot_note() {
+    local running
+    bot_key_stale || return 0
+    running=$(run_for 30 docker container inspect -f '{{.State.Running}}' "$bot_container" 2> /dev/null) || running=
+    if [ "$running" = true ]; then
+        echo " The bot still runs with another request-signing key than bot.env holds, so it refuses the dashboard's requests until ./setup-dashboard.sh --no-questions recreates it."
+    fi
+}
+
 not_ready_after_recreate() {
     local tmp
     if [ "$pw_changed" = no ] && [ "$key_changed" = no ] && [ -f "$home/dashboard.env.previous" ]; then
         echo "The dashboard wasn't ready with the new settings, so the earlier ones go back."
+        # Except the request-signing key, which bot.env already holds: a key the check passed doesn't stop the dashboard.
+        # The copy is whole before it replaces dashboard.env, so dashboard.env never holds the earlier key. When it can't
+        # be made, as on a full disk, dashboard.env keeps the new settings, whose key bot.env holds too.
         tmp=$(mktemp "$home/.dashboard.env.XXXXXX")
-        cp -p "$home/dashboard.env.previous" "$tmp"
-        mv -f "$tmp" "$env_file"
-        if recreate_dashboard; then
-            die "The dashboard wasn't ready with the new settings (above), so it runs on the earlier ones again. Check the values you gave, then run ./setup-dashboard.sh again."
+        if ! cp -p "$home/dashboard.env.previous" "$tmp" \
+            || { [ "$req_changed" = yes ] && ! write_env "$tmp" Dashboard__RequestSigningKey "$req_key"; } \
+            || ! mv -f "$tmp" "$env_file"; then
+            rm -f "$tmp"
+            die "The dashboard wasn't ready with the new settings (above), and the earlier ones couldn't go back into dashboard.env (above), so the dashboard and dashboard.env keep the new ones. Check the values you gave, and once the cause is fixed, run ./setup-dashboard.sh again.$(stale_bot_note)"
         fi
-        die "The dashboard isn't ready with the earlier settings either (above), so the problem is outside its settings: the database or the server. Its log: docker logs --tail 50 $dashboard_container"
+        if recreate_dashboard; then
+            die "The dashboard wasn't ready with the new settings (above), so it runs on the earlier ones again. Check the values you gave, then run ./setup-dashboard.sh again.$(stale_bot_note)"
+        fi
+        die "The dashboard isn't ready with the earlier settings either (above), so the problem is outside its settings: the database or the server.$(stale_bot_note) Its log: docker logs --tail 50 $dashboard_container"
     fi
-    die "The dashboard wasn't ready with the new settings (above). Its proxy key or database password changed in this run, so the earlier settings no longer work. Look at its log with: docker logs --tail 50 $dashboard_container. Fix the cause, then run ./setup-dashboard.sh --no-questions."
+    die "The dashboard wasn't ready with the new settings (above). Its proxy key or database password changed in this run, so the earlier settings no longer work. Look at its log with: docker logs --tail 50 $dashboard_container. Fix the cause, then run ./setup-dashboard.sh --no-questions.$(stale_bot_note)"
 }
 
 refresh_readme() {   # renders README.txt again from the installed deploy files' commit, for the certificate's end date
@@ -993,7 +1115,8 @@ refresh_readme() {   # renders README.txt again from the installed deploy files'
 }
 
 detached_part() {
-    local cur_key sent_key cur_pw host n image id served expected ends name joined running
+    local cur_key sent_key cur_pw host n image id served expected ends name joined running cur_req bot_req bot_running trouble
+    local running_req
     local -a missing_hosts=() changes=() problems=()
     if [ "${MINERBOT_DETACHED:-}" != 1 ] || [ -z "${MINERBOT_LOG:-}" ]; then
         die "--apply is only for the run setup-dashboard.sh starts itself. Nothing was changed."
@@ -1052,6 +1175,29 @@ detached_part() {
         echo "A new proxy key was made. It's never shown."
     fi
 
+    # 2b. The request-signing key, which the dashboard signs its requests to the bot with and the bot checks them with:
+    # bot.env's when it differs from dashboard.env's, since step 8 writes bot.env first: a run cut off between the two
+    # writes leaves bot.env's the newer, and a run that stopped because bot.env couldn't take a new key, as on a full disk,
+    # may have moved dashboard.env onto that key all the same, while the bot kept bot.env's (before_stop); dashboard.env's;
+    # or a new one. A key that isn't 64 hexadecimal digits in small letters counts as none, and is never shown.
+    step="choosing the request-signing key"
+    [ -f "$home/bot.env" ] || die "bot.env is missing, so the request key has nowhere to go. $unchanged"
+    cur_req=$(current Dashboard__RequestSigningKey)
+    bot_req=$(bot_request_key)
+    if [ "$rotate_req" = no ] && [[ $bot_req =~ ^[0-9a-f]{64}$ ]] && [ "$bot_req" != "$cur_req" ]; then
+        req_key=$bot_req
+        req_changed=yes
+        echo "dashboard.env takes the request-signing key bot.env holds, which setup writes first: a run that stopped between the two writes left them apart."
+    elif [ "$rotate_req" = no ] && [[ $cur_req =~ ^[0-9a-f]{64}$ ]]; then
+        req_key=$cur_req
+        req_changed=no
+    else
+        req_key=$(run_for 10 openssl rand -hex 32) || die "openssl couldn't make a request-signing key (above). $unchanged"
+        [[ $req_key =~ ^[0-9a-f]{64}$ ]] || die "openssl made a request-signing key of the wrong shape. $unchanged"
+        req_changed=yes
+        echo "A new request-signing key was made. It's never shown."
+    fi
+
     # 3. The database password
     step="checking the dashboard's database password"
     for host in localhost 127.0.0.1; do
@@ -1076,7 +1222,7 @@ detached_part() {
 
     # 4. The candidate dashboard.env
     step="writing the candidate dashboard.env"
-    candidate_env "$key" "$pw" "$home/dashboard.env.next"
+    candidate_env "$key" "$pw" "$req_key" "$home/dashboard.env.next"
 
     # 5. The dashboard's own validator, before the database or nginx is touched
     step="checking the new settings"
@@ -1189,6 +1335,15 @@ detached_part() {
             problems+=("nginx serves another certificate than the installed one, and the reload that would fix it failed, or nginx didn't take it (above).")
         fi
     fi
+    # bot.env's request-signing key before dashboard.env moves, so a run cut off between the two leaves bot.env with the
+    # newer one, which the next run takes (step 2b). write_env uses builtins only, so the key is never in a command line.
+    if [ "$(bot_request_key)" != "$req_key" ]; then
+        step="writing bot.env's request-signing key"
+        write_env "$home/bot.env" REQUEST_SIGNING_KEY "$req_key"
+        changes+=("bot.env's request key")
+        echo "bot.env has the request-signing key now. The bot loads it when its container is created."
+    fi
+    cut_point 8-botenv
     step="moving dashboard.env"
     if [ "$env_changed" = yes ]; then
         if [ -f "$env_file" ]; then
@@ -1225,6 +1380,34 @@ detached_part() {
             || die "The dashboard didn't get ready on dashboard.env's settings (above). Its log: docker logs --tail 50 $dashboard_container. Once the cause is fixed, run ./setup-dashboard.sh --no-questions again."
         changes+=("dashboard recreated")
     fi
+    # The bot reads bot.env only when its container is created, so one that runs with another request-signing key than
+    # bot.env holds, as after this run wrote it or a run that was cut off before this step, is recreated, after the
+    # dashboard. A stopped bot is left stopped: it loads the key when it's next created.
+    trouble=
+    if [ ${#problems[@]} -gt 0 ]; then
+        trouble="an nginx problem"
+    fi
+    if bot_key_stale; then
+        bot_running=$(container_running "$bot_container")
+        if [ "$bot_running" = true ]; then
+            step="recreating the bot"
+            echo "Recreating the bot, which runs with another request-signing key than bot.env holds. It's offline for about 30 seconds."
+            if start_service bot --force-recreate && ready_bot; then
+                note_ready bot
+                changes+=("bot recreated")
+            else
+                # A container Compose made again has bot.env's key already, so it counts as recreated, and the next run
+                # finds nothing to recreate: the problem line gives the recreate itself, for once the cause is fixed
+                if running_req=$(container_env_value "$bot_container" REQUEST_SIGNING_KEY) && [ "$running_req" = "$(bot_request_key)" ]; then
+                    changes+=("bot recreated")
+                fi
+                problems+=("The bot wasn't ready after its recreate (above), so it may take no requests from the dashboard. Its log: docker logs --tail 50 $bot_container. Once the cause is fixed, docker compose up -d --no-build --no-deps --force-recreate bot makes it again with bot.env's request-signing key.")
+                trouble="${trouble:+$trouble and }a bot that wasn't ready"
+            fi
+        else
+            echo "The bot's container is stopped, so it wasn't recreated: it loads bot.env's request-signing key when it's next created, as ./deploy.sh does."
+        fi
+    fi
 
     # 9. README.txt, the history, and the summary
     step="rendering README.txt"
@@ -1246,7 +1429,7 @@ detached_part() {
     fi
     if [ ${#problems[@]} -gt 0 ]; then
         printf 'Problem: %s\n' "${problems[@]}"
-        finish failed "$joined, with an nginx problem"
+        finish failed "$joined, with $trouble"
     fi
     finish ok "$joined"
 }

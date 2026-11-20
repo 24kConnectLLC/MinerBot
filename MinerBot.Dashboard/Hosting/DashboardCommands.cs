@@ -4,14 +4,16 @@ using System.Net;
 using System.Net.Sockets;
 using DataAccessLibrary;
 using MinerBot.Dashboard.Health;
+using MinerBot.Dashboard.Requests;
 using MinerBot.Dashboard.Settings;
 
 namespace MinerBot.Dashboard.Hosting
 {
-    // The two jobs the deploy and the container run with the same program: "migrate" brings MinerBot's own database up to
-    // date, and "healthcheck" asks the running dashboard whether it answers, because the runtime image has no curl. Neither
-    // starts the web host, so neither needs the web settings or tries to take the port or socket the dashboard holds.
-    // "check-settings" is the third command, but Program.cs runs it, because it needs the web host's registrations.
+    // The jobs the deploy, the container and the server run with the same program: "migrate" brings MinerBot's own
+    // database up to date, "healthcheck" asks the running dashboard whether it answers, because the runtime image has no
+    // curl, and "request" sends the bot one request from the server (RequestCommand). None starts the web host, so none
+    // needs the web settings or tries to take the port or socket the dashboard holds. "check-settings" is one more command,
+    // but Program.cs runs it, because it needs the web host's registrations.
     internal static class DashboardCommands
     {
         public const string Migrate = "migrate";
@@ -26,10 +28,15 @@ namespace MinerBot.Dashboard.Hosting
         // Only the first argument, and only these exact words, so the arguments WebApplicationFactory and the host pass,
         // such as --environment=Production, never start one
         public static string? Find(string[] args) =>
-            args is [var first, ..] && (string.Equals(first, Migrate, StringComparison.Ordinal) || string.Equals(first, HealthCheck, StringComparison.Ordinal)) ? first : null;
+            args is [var first, ..] && (string.Equals(first, Migrate, StringComparison.Ordinal) || string.Equals(first, HealthCheck, StringComparison.Ordinal)
+                || string.Equals(first, RequestCommand.Name, StringComparison.Ordinal)) ? first : null;
 
         public static async Task<int> RunAsync(string command, string[] args)
         {
+            // Settings from the environment only: a value on its command line would show in the process list
+            if (command == RequestCommand.Name)
+                return await RequestCommand.RunAsync(args);
+
             // There's no appsettings file in the image, so the environment and the command line are all there is
             var configuration = new ConfigurationBuilder().AddEnvironmentVariables().AddCommandLine(args[1..]).Build();
 

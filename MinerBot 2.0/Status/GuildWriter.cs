@@ -9,11 +9,13 @@ namespace MinerBot_2._0.Status
     // channel pickers. Every 5 seconds it takes each server GuildWatcher noted from Discord.Net's cache: its row, and its
     // text and announcement channels with the bot's permissions in each. It writes one only when it differs from what it
     // last wrote of that server, so a burst of events in one server costs one write and an unchanged server costs nothing,
-    // and a server noted as left is written as left. At each new session it also finds the servers the table has that
-    // Discord no longer lists, which the bot left while it was offline, and every 15 minutes it notes every server, in case
-    // an event never came. A write that fails keeps every note and waits 30 seconds, then twice as long each time, up to 5
-    // minutes, with one warning when the failures start and one line when they end. Without BotConnection it writes
-    // nothing, and the bot posts as before. Nothing leaves its loop, because an exception there would stop the whole bot.
+    // and a server noted as left is written as left. A server the dashboard asked to refresh is written even when it hasn't
+    // changed, and a leave it asked for is written with its detail. At each new session it also finds the servers the table
+    // has that Discord no longer lists, which the bot left while it was offline, and every 15 minutes it notes every
+    // server, in case an event never came. A write that fails keeps every note and waits 30 seconds, then twice as long each
+    // time, up to 5 minutes, with one warning when the failures start and one line when they end. Without BotConnection it
+    // writes nothing, and the bot posts as before. Nothing leaves its loop, because an exception there would stop the whole
+    // bot.
     public sealed class GuildWriter : BackgroundService
     {
         static readonly TimeSpan FirstRetry = TimeSpan.FromSeconds(30);
@@ -135,14 +137,15 @@ namespace MinerBot_2._0.Status
 
             var writes = 0;
 
-            foreach (var (guildId, version, leftAt) in _watcher.PeekNotes())
+            foreach (var (guildId, version, leftAt, leftDetail, forced) in _watcher.PeekNotes())
             {
                 if (writes >= WritesPerTick)
                     return;
 
+                // With the detail of a leave the dashboard asked for, or none
                 if (leftAt is { } left)
                 {
-                    await LeaveAsync(guildId, left, null, stop);
+                    await LeaveAsync(guildId, left, leftDetail, stop);
                     _watcher.LeaveWritten(guildId, left);
                     writes++;
                 }
@@ -151,6 +154,9 @@ namespace MinerBot_2._0.Status
                 // the next session's check finds
                 if (_client.GetGuild(guildId) is not { } guild)
                 {
+                    if (forced)
+                        _watcher.Rewritten(guildId, version, new RewriteOutcome(RewriteState.Gone));
+
                     _watcher.Written(guildId, version);
                     continue;
                 }
@@ -184,7 +190,8 @@ namespace MinerBot_2._0.Status
                 if (_client.ConnectionState != ConnectionState.Connected)
                     return;
 
-                if (written.TryGetValue(guildId, out var last) && Same(last, snapshot))
+                // Unless the dashboard asked for it to be written again
+                if (!forced && written.TryGetValue(guildId, out var last) && Same(last, snapshot))
                 {
                     _watcher.Written(guildId, version);
                     continue;
@@ -201,13 +208,30 @@ namespace MinerBot_2._0.Status
                     // The repository checks every row before any SQL. A server it refuses is the bot's own mistake, and would
                     // fail every write after it, so its note goes.
                     _failures.Log(e, "MinerBot's database refused a server the bot read, so it wasn't written");
+
+                    if (forced)
+                        _watcher.Rewritten(guildId, version, new RewriteOutcome(RewriteState.Failed, Failure: FailureLog.Describe(e)));
+
                     _watcher.Written(guildId, version);
                     continue;
                 }
 
-                await NumberedAsync(saving, stop);
+                try
+                {
+                    await NumberedAsync(saving, stop);
+                }
+                catch (Exception e) when (forced && !(e is OperationCanceledException && stop.IsCancellationRequested))
+                {
+                    // The note stays, so a later tick writes it, but the request is told now
+                    _watcher.Rewritten(guildId, version, new RewriteOutcome(RewriteState.Failed, Failure: FailureLog.Describe(e)));
+                    throw;
+                }
 
                 written[guildId] = snapshot;
+
+                if (forced)
+                    _watcher.Rewritten(guildId, version, new RewriteOutcome(RewriteState.Written, now, snapshot.Channels.Length));
+
                 _watcher.Written(guildId, version);
                 writes++;
             }

@@ -8,13 +8,14 @@ using System.Globalization;
 namespace MinerBot_2._0.Jobs
 {
     // The daily clean-up of MinerBot's own database, with the owner's rules (decision 13 of the dashboard's plan): the audit
-    // log for 2 years, with the visitors' addresses cleared after 90 days, the bot's events, its joins and leaves of servers
-    // and its job runs for 90 days, the minute-by-minute uptime for 90 days with each day's totals kept, and dashboard
-    // sessions until 7 days after they end. The servers' rows and their daily member counts are kept. Every cutoff comes
-    // from the bot's own clock, never the database's. Each rule goes in chunks, until one comes back short, and every rule
-    // runs even when one before it failed; the job then fails, naming the rules that did with the exception's type and
-    // MariaDB's error number, and the log has a line for each. Without BotConnection, which the bot may run without, it
-    // does nothing: the bot said so once as it started.
+    // log for 2 years, with the visitors' addresses cleared after 90 days, the bot's events, its joins and leaves of servers,
+    // its job runs and the dashboard's requests to it for 90 days, the minute-by-minute uptime for 90 days with each day's
+    // totals kept, and dashboard sessions until 7 days after they end. The servers' rows and their daily member counts are
+    // kept, and so are the bot's settings that requests change. Every cutoff comes from the bot's own clock, never the
+    // database's. Each rule goes in chunks, until one comes back short, and every rule runs even when one before it failed;
+    // the job then fails, naming the rules that did with the exception's type and MariaDB's error number, and the log has a
+    // line for each. Without BotConnection, which the bot may run without, it does nothing: the bot said so once as it
+    // started.
     public class HousekeepingJob(IRetentionData retention, TimeProvider clock, IConfiguration configuration, ILogger<HousekeepingJob> logger)
     {
         internal const int ChunkSize = RetentionData.ChunkLimit;
@@ -28,8 +29,8 @@ namespace MinerBot_2._0.Jobs
 
         // After this, no rule starts a chunk but its first, and the days' totals still run, so the job ends well inside
         // JobHandler's limit of 270 seconds even when every statement is slow: MariaDB ends any statement after 14 seconds.
-        // The chunk under way, the later rules' first chunks and the totals make up to ten calls after it, which fit.
-        internal TimeSpan TimeBudget = TimeSpan.FromSeconds(105);
+        // The chunk under way, the later rules' first chunks and the totals make up to eleven calls after it, which fit.
+        internal TimeSpan TimeBudget = TimeSpan.FromSeconds(100);
 
         [Job("30 4 * * *")] // 04:30 US Eastern every day, after the nightly backup
         public async Task<string> ApplyRetention()
@@ -50,6 +51,7 @@ namespace MinerBot_2._0.Jobs
             var events = await Rule("events", take => retention.DeleteEvents(now - KeepEvents, take));
             var serverEvents = await Rule("server events", take => retention.DeleteGuildEvents(now - KeepEvents, take));
             var jobRuns = await Rule("job runs", take => retention.DeleteJobRuns(now - KeepEvents, take));
+            var requests = await Rule("requests", take => retention.DeleteRequests(now - KeepEvents, take));
 
             // The days before today are totalled before their samples go, and only while all of their samples are kept, so a
             // day's total is never worked out again from part of it. Only whole days of samples go.
@@ -69,7 +71,7 @@ namespace MinerBot_2._0.Jobs
             var sessions = await Rule("sessions", take => retention.DeleteSessions(now - KeepSessions, take));
 
             var detail = string.Create(CultureInfo.InvariantCulture,
-                $"deleted {Count(auditRows, "audit row")}, {Count(events, "event")}, {Count(serverEvents, "server event")}, {Count(jobRuns, "job run")}, {Count(minutes, "minute")} ({Count(days, "day")} totalled) and {Count(sessions, "session")}, and cleared {Count(addresses, "address", "addresses")}");
+                $"deleted {Count(auditRows, "audit row")}, {Count(events, "event")}, {Count(serverEvents, "server event")}, {Count(jobRuns, "job run")}, {Count(requests, "request")}, {Count(minutes, "minute")} ({Count(days, "day")} totalled) and {Count(sessions, "session")}, and cleared {Count(addresses, "address", "addresses")}");
 
             // After the failures, so a detail that runs past 300 characters loses this rather than MariaDB's number
             var more = unfinished ? "; more is left for the next run" : "";

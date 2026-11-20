@@ -61,6 +61,7 @@ namespace MinerBot.Dashboard.Tests.Support
             {
                 ["Dashboard:PublicOrigin"] = PublicOrigin,
                 ["Dashboard:ProxyKey"] = ProxyKey,
+                ["Dashboard:RequestSigningKey"] = RequestSigningKey,
                 ["Dashboard:Owners"] = TestUsers.Owner.IdText,
                 ["Dashboard:Admins"] = $"{TestUsers.Admin.IdText},{TestUsers.SecondAdmin.IdText}",
                 ["Dashboard:KeysFolder"] = KeysFolder,
@@ -77,8 +78,9 @@ namespace MinerBot.Dashboard.Tests.Support
             Discord = new FakeDiscord(ClientId, ClientSecret, PublicOrigin + DashboardAuth.CallbackPath);
         }
 
-        // Made up for each factory, as 64 hex characters like the real one
+        // Made up for each factory, as 64 hex characters like the real ones
         public string ProxyKey { get; } = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
+        public string RequestSigningKey { get; } = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
         public string ClientSecret { get; } = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
 
         public string KeysFolder { get; }

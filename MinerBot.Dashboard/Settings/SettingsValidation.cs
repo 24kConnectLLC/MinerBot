@@ -3,6 +3,7 @@ using System.Text.RegularExpressions;
 using DataAccessLibrary;
 using Microsoft.Extensions.Options;
 using MinerBot.Dashboard.Hosting;
+using MinerBot.Shared.Requests;
 
 // The settings rule, also in deploy/README.md: rollback.sh keeps the current dashboard.env, so the previous image must
 // still start with it. A setting is never renamed or removed in the pull request that stops using it: the old name stays
@@ -35,6 +36,9 @@ namespace MinerBot.Dashboard.Settings
 
             if (ProxyKeyProblem(options.ProxyKey) is { } proxyKey)
                 problems.Add(proxyKey);
+
+            if (RequestSigningKeyProblem(options.RequestSigningKey) is { } requestKey)
+                problems.Add(requestKey);
 
             ListProblems(options, problems);
 
@@ -122,6 +126,16 @@ namespace MinerBot.Dashboard.Settings
                 return $"Dashboard:ProxyKey is shorter than {MinProxyKeyLength} characters. Use 64 random hex characters, so that it can't be guessed.";
 
             return null;
+        }
+
+        // Empty is off, by the settings rule, so a dashboard deployed before setup-dashboard.sh made the key still starts.
+        // Anything else is the one form the bot takes, which the scripts compare as text.
+        internal static string? RequestSigningKeyProblem(string? key)
+        {
+            if (string.IsNullOrEmpty(key) || RequestSigning.KeyProblem(key) == null)
+                return null;
+
+            return "Dashboard:RequestSigningKey must be 64 hexadecimal digits in small letters, as setup-dashboard.sh makes it, or empty, which turns requests to the bot off.";
         }
 
         static void ListProblems(DashboardOptions options, List<string> problems)

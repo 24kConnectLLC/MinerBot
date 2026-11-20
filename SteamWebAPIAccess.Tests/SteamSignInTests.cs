@@ -1859,6 +1859,104 @@ namespace SteamWebAPIAccess.Tests
             }
         }
 
+        // A reconnect the dashboard asks for
+
+        // A logged-on connection is dropped, and the pump logs on again with the saved token after 2 seconds rather than 30,
+        // by its own rules. A drop after that waits as long as ever.
+        [Fact]
+        public void ReconnectOnRequestDisconnectsAndLogsOnAfterTwoSeconds()
+        {
+            var steam = CreateSteam("user", ValidTokenFile());
+            steam.SignedIn = SomeSteamID;
+            steam.Renewal = (_, _) => Task.FromResult(new SteamTokens(null, "access", ""));
+
+            Connected(steam);
+            LoggedOn(steam, EResult.OK);
+
+            Assert.Equal(SteamReconnect.Started, steam.RequestReconnect());
+            Assert.Equal(1, steam.Disconnects);
+
+            // SteamKit's answer to the disconnect
+            Disconnected(steam);
+            Assert.Equal(TimeSpan.FromSeconds(2), steam.Waits[^1]);
+
+            Connected(steam);
+            LoggedOn(steam, EResult.OK);
+
+            Assert.Equal(SteamConnection.LoggedOn, steam.Status.State);
+            Assert.Equal(2, steam.LogOns.Count);
+            Assert.All(steam.LogOns, logOn => Assert.Equal(GoodToken, logOn.AccessToken));
+            Assert.Single(steam.Events, line => line.StartsWith(SteamEvents.Offline + ": "));
+            Assert.Equal(2, steam.Events.Count(line => line.StartsWith(SteamEvents.LoggedOn + ": ")));
+
+            Disconnected(steam);
+            Assert.True(steam.Waits[^1] >= TimeSpan.FromSeconds(30), $"An ordinary drop waited {steam.Waits[^1]}");
+        }
+
+        // A new connection would start a sign-in over, and one while Steam isn't logged on is already what the pump does
+        [Fact]
+        public async Task ReconnectIsRefusedWhileSigningIn()
+        {
+            var steam = CreateSteam("user", tokenFile: null);
+            var scanned = new TaskCompletionSource<SteamTokens>();
+            steam.QRSignIn = () => scanned.Task;
+
+            Assert.Equal(SteamReconnect.NotLoggedOn, steam.RequestReconnect());
+
+            using var stop = new CancellationTokenSource(WaitLimit);
+            var pump = steam.RunCallbacksAsync(stop.Token);
+
+            steam.steamClient.PostCallback(Create<SteamClient.ConnectedCallback>());
+            await WaitUntil(() => steam.WaitLimits.Count == 1);
+
+            Assert.Equal(SteamReconnect.SigningIn, steam.RequestReconnect());
+            Assert.Equal(0, steam.Disconnects);
+
+            scanned.SetResult(NewTokens());
+            await WaitUntil(() => steam.LogOns.Count == 1);
+
+            stop.Cancel();
+            await pump.WaitAsync(WaitLimit, TestContext.Current.CancellationToken);
+        }
+
+        // Renewed, kept, failed, not saved first or not signed in, with the date the token in use ends
+        [Fact]
+        public async Task RenewalSaysWhatHappened()
+        {
+            static DateOnly Ends(string token) => DateOnly.FromDateTime(SteamSignInPolicy.ReadTokenExpiry(token)!.Value.UtcDateTime);
+
+            var renewed = CreateSteam("user", ValidTokenFile());
+            renewed.SignedIn = SomeSteamID;
+            renewed.Renewal = (_, _) => Task.FromResult(NewTokens());
+            Connected(renewed);
+            Assert.Equal(new TokenRenewal(TokenRenewalOutcome.Renewed, Ends(NewToken)), await renewed.RenewTokenAsync());
+
+            var kept = CreateSteam("user", ValidTokenFile());
+            kept.SignedIn = SomeSteamID;
+            kept.Renewal = (_, _) => Task.FromResult(new SteamTokens(null, "new access", ""));
+            Connected(kept);
+            Assert.Equal(new TokenRenewal(TokenRenewalOutcome.Kept, Ends(GoodToken)), await kept.RenewTokenAsync());
+
+            var failed = CreateSteam("user", ValidTokenFile());
+            failed.SignedIn = SomeSteamID;
+            failed.Renewal = (_, _) => throw new AuthenticationException("Failed to generate token", EResult.Revoked);
+            Connected(failed);
+            Assert.Equal(new TokenRenewal(TokenRenewalOutcome.Failed, Ends(GoodToken), nameof(AuthenticationException)), await failed.RenewTokenAsync());
+
+            var signedOut = CreateSteam("user", ValidTokenFile());
+            signedOut.SignedIn = null;
+            Connected(signedOut);
+            Assert.Equal(new TokenRenewal(TokenRenewalOutcome.NotSignedIn), await signedOut.RenewTokenAsync());
+
+            var notSaved = CreateSteam("user", ValidTokenFile());
+            notSaved.SignedIn = SomeSteamID;
+            notSaved.Renewal = (_, _) => Task.FromResult(NewTokens());
+            Connected(notSaved);
+            Directory.CreateDirectory(notSaved.AuthFullPath + ".tmp");
+            Assert.Equal(new TokenRenewal(TokenRenewalOutcome.NotSaved, Ends(GoodToken)), await notSaved.RenewTokenAsync());
+            Assert.Equal(0, notSaved.Renewals);
+        }
+
         // Helpers
 
         static readonly SteamID SomeSteamID = new(76561198000000000);

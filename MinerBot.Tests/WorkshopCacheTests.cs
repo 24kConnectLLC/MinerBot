@@ -1,3 +1,4 @@
+using DataAccessLibrary;
 using Microsoft.Extensions.Caching.Memory;
 using MinerBot_2._0.Services;
 
@@ -17,7 +18,7 @@ namespace MinerBot.Tests
         public WorkshopCacheTests()
         {
             steam = new FakeGetData(steps.Add);
-            service = new SteamAPIService(steam, new MemoryCache(new MemoryCacheOptions { Clock = clock }));
+            service = new SteamAPIService(steam, new MemoryCache(new MemoryCacheOptions { Clock = clock }), new CacheReset());
         }
 
         [Fact]

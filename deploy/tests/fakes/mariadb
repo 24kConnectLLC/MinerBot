@@ -66,15 +66,21 @@ fi
 record mariadb "$@"
 
 the_rights() {   # what the rights file gives, one per line, as deploy/rights-list.sql lists it
-    printf '%s\n' "column SELECT website_db ihvph_discord_servers guild_id" "column UPDATE website_db ihvph_armor_styles Status" \
+    printf '%s\n' "column INSERT minerbot_db bot_commands actor_id" "column INSERT minerbot_db bot_commands actor_name" \
+        "column INSERT minerbot_db bot_commands actor_role" "column INSERT minerbot_db bot_commands argument" \
+        "column INSERT minerbot_db bot_commands channel_id" "column INSERT minerbot_db bot_commands created_at" \
+        "column INSERT minerbot_db bot_commands expires_at" "column INSERT minerbot_db bot_commands guild_id" \
+        "column INSERT minerbot_db bot_commands kind" "column INSERT minerbot_db bot_commands request_key" \
+        "column INSERT minerbot_db bot_commands signature" \
+        "column SELECT website_db ihvph_discord_servers guild_id" "column UPDATE website_db ihvph_armor_styles Status" \
         "column UPDATE website_db ihvph_blacklist expire_date" "column UPDATE website_db ihvph_blacklist notes" \
         "column UPDATE website_db ihvph_blacklist reason" "column UPDATE website_db ihvph_blacklist username" \
         "global USAGE" "limits 15 20.000000 0 0 0" \
         "table DELETE minerbot_db dashboard_sessions" "table DELETE website_db ihvph_blacklist" \
         "table INSERT minerbot_db armor_reviews" "table INSERT minerbot_db audit_log" \
         "table INSERT minerbot_db dashboard_sessions" "table INSERT website_db ihvph_blacklist" \
-        "table SELECT minerbot_db armor_reviews" "table SELECT minerbot_db audit_log" \
-        "table SELECT minerbot_db bot_events" "table SELECT minerbot_db bot_status" \
+        "table SELECT minerbot_db armor_reviews" "table SELECT minerbot_db audit_log" "table SELECT minerbot_db bot_commands" \
+        "table SELECT minerbot_db bot_events" "table SELECT minerbot_db bot_settings" "table SELECT minerbot_db bot_status" \
         "table SELECT minerbot_db dashboard_sessions" "table SELECT minerbot_db guild_channels" \
         "table SELECT minerbot_db guild_daily" "table SELECT minerbot_db guild_events" "table SELECT minerbot_db guilds" \
         "table SELECT minerbot_db job_runs" "table SELECT minerbot_db job_status" "table SELECT minerbot_db uptime_daily" \

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Discord.Net;
+using Microsoft.Extensions.DependencyInjection;
 using MinerBot_2._0.Services;
 using MinerBot_2._0.Status;
 
@@ -111,6 +112,39 @@ namespace MinerBot.Tests
 
             Assert.Equal(Alert, Assert.Single(discord.Recorder.PeekEvents(100), row => row.kind == BotEvents.AlertSent).detail);
             Assert.DoesNotContain(discord.Recorder.PeekEvents(100), row => row.kind == BotEvents.AlertFailed);
+        }
+
+        // A message about a dashboard request holds a name and someone's words, so the bot's history keeps the bot's own words
+        // in its place, sent or failed, because Admins read it
+        [Fact]
+        public async Task RecordedTextReplacesTheMessage()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+            var alerts = discord.Services.GetRequiredService<OwnerAlertService>();
+
+            await alerts.SendAsync("Pause posts, asked for by `Jane`", "request 1: Pause posts, done");
+
+            Assert.Equal("Pause posts, asked for by `Jane`", discord.Single(SendStep).Content);
+            Assert.Equal("request 1: Pause posts, done", Assert.Single(discord.Recorder.PeekEvents(100), row => row.kind == BotEvents.AlertSent).detail);
+
+            discord.FailStep = SendStep;
+            await Assert.ThrowsAsync<HttpException>(() => alerts.SendAsync("Resume posts, asked for by `Jane`", "request 2: Resume posts, done"));
+
+            Assert.Equal("HttpException: request 2: Resume posts, done", Assert.Single(discord.Recorder.PeekEvents(100), row => row.kind == BotEvents.AlertFailed).detail);
+            Assert.DoesNotContain(discord.Recorder.PeekEvents(100), row => row.detail != null && row.detail.Contains("Jane"));
+        }
+
+        // Steam's AlertOwner is the one-argument method, whose text is the bot's own, recorded as it is
+        [Fact]
+        public async Task OneArgumentSendAsyncStillRecordsTheMessage()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+            Func<string, Task> alertOwner = discord.Services.GetRequiredService<OwnerAlertService>().SendAsync;
+
+            await alertOwner(Alert);
+
+            Assert.Equal(Alert, discord.Single(SendStep).Content);
+            Assert.Equal(Alert, Assert.Single(discord.Recorder.PeekEvents(100), row => row.kind == BotEvents.AlertSent).detail);
         }
 
         // With the exception's type, never Discord's own text, and the start of the alert, an emoji kept whole

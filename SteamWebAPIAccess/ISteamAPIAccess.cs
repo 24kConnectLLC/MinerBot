@@ -24,6 +24,11 @@ namespace SteamWebAPIAccess
         void AuthenticateClient();
         void SetCredentials(string key, string shouldRemember, string username = "", string password = "");
         Task RunCallbacksAsync(CancellationToken stoppingToken);
-        Task RenewTokenAsync();
+
+        // Asks Steam to renew the token, and says what happened
+        Task<TokenRenewal> RenewTokenAsync();
+
+        // For a dashboard request: drops a logged-on connection, so the pump logs on again at once, by its own rules
+        SteamReconnect RequestReconnect();
     }
 }

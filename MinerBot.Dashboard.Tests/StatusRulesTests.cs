@@ -301,7 +301,7 @@ namespace MinerBot.Dashboard.Tests
                 $"SteamStatus.cs declare {kinds.Count}: a kind declared in another file needs that file among the bot-source items in " +
                 "MinerBot.Dashboard.Tests.csproj, and a list written another way needs BotSource to read it");
 
-            Assert.Equal(18, kinds.Count);
+            Assert.Equal(23, kinds.Count);
             Assert.Equal(kinds, EventWords.Kinds.Select(word => word.Kind).Order(StringComparer.Ordinal));
             Assert.Equal(EventWords.Kinds.Count, EventWords.Kinds.Select(word => word.Label).Distinct().Count());
             Assert.All(EventWords.Kinds, word => Assert.NotEqual(word.Kind, EventWords.Label(word.Kind, null)));

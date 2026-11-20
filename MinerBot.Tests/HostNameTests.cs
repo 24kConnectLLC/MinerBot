@@ -1,3 +1,4 @@
+using DataAccessLibrary;
 using Microsoft.Extensions.Caching.Memory;
 using MinerBot_2._0;
 using MinerBot_2._0.Services;
@@ -158,7 +159,7 @@ namespace MinerBot.Tests
         [Fact]
         public async Task NameWithNothingLeftShowsHostUnknown()
         {
-            var service = new SteamAPIService(new FakeGetData(_ => { }), new MemoryCache(new MemoryCacheOptions()));
+            var service = new SteamAPIService(new FakeGetData(_ => { }), new MemoryCache(new MemoryCacheOptions()), new CacheReset());
             var lobby = LobbyListLimitTests.Lobby(1);
             lobby.HostName = Text(0x202E) + " " + Text(0x07);
 
@@ -168,7 +169,7 @@ namespace MinerBot.Tests
         [Fact]
         public async Task NameOfOnlyEmojiIsShown()
         {
-            var service = new SteamAPIService(new FakeGetData(_ => { }), new MemoryCache(new MemoryCacheOptions()));
+            var service = new SteamAPIService(new FakeGetData(_ => { }), new MemoryCache(new MemoryCacheOptions()), new CacheReset());
             var lobby = LobbyListLimitTests.Lobby(1);
             lobby.HostName = Text(0x1F600);
 

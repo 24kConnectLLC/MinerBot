@@ -197,13 +197,14 @@ load_secrets() {   # the made-up values up wrote, for check
     while IFS= read -r -t 5 line; do
         case $line in
             PROXY_KEY=*) proxy_key=${line#*=} ;;
+            REQUEST_KEY=*) request_key=${line#*=} ;;
             DB_PASSWORD=*) db_password=${line#*=} ;;
             CLIENT_SECRET=*) client_secret=${line#*=} ;;
             BOT_PASSWORD=*) bot_password=${line#*=} ;;
             ROOT_PASSWORD=*) root_password=${line#*=} ;;
         esac
     done < "$state/secrets"
-    if [ -z "${proxy_key:-}" ] || [ -z "${db_password:-}" ] || [ -z "${client_secret:-}" ] \
+    if [ -z "${proxy_key:-}" ] || [ -z "${request_key:-}" ] || [ -z "${db_password:-}" ] || [ -z "${client_secret:-}" ] \
         || [ -z "${bot_password:-}" ] || [ -z "${root_password:-}" ]; then
         stop "$state/secrets isn't complete. Run down, then up."
     fi
@@ -341,12 +342,13 @@ write_env_file() {   # write_env_file <file> <NAME=value>...: every value must p
 
 make_files() {
     proxy_key=$(made_up 64 0-9a-f)
+    request_key=$(made_up 64 0-9a-f)
     db_password=$(made_up 40 A-Za-z0-9)
     client_secret=$(made_up 32 A-Za-z0-9_-)
     bot_password=$(made_up 40 A-Za-z0-9)
     root_password=$(made_up 32 0-9a-f)
-    printf 'PROXY_KEY=%s\nDB_PASSWORD=%s\nCLIENT_SECRET=%s\nBOT_PASSWORD=%s\nROOT_PASSWORD=%s\n' \
-        "$proxy_key" "$db_password" "$client_secret" "$bot_password" "$root_password" > "$state/secrets"
+    printf 'PROXY_KEY=%s\nREQUEST_KEY=%s\nDB_PASSWORD=%s\nCLIENT_SECRET=%s\nBOT_PASSWORD=%s\nROOT_PASSWORD=%s\n' \
+        "$proxy_key" "$request_key" "$db_password" "$client_secret" "$bot_password" "$root_password" > "$state/secrets"
     # Made up, in the form setup-dashboard.sh writes, with Cloudflare Access off
     write_env_file "$state/dashboard.env" \
         "Dashboard__PublicOrigin=https://$public" \
@@ -358,7 +360,8 @@ make_files() {
         "CloudflareAccess__TeamDomain=" \
         "CloudflareAccess__Audience=" \
         "ConnectionStrings__DefaultConnection=$(connection "$site_db" "$dashboard_login" "$db_password")" \
-        "ConnectionStrings__BotConnection=$(connection "$bot_db" "$dashboard_login" "$db_password")"
+        "ConnectionStrings__BotConnection=$(connection "$bot_db" "$dashboard_login" "$db_password")" \
+        "Dashboard__RequestSigningKey=$request_key"
     # The one line of bot.env the migrations use, with the bot-like login
     write_env_file "$state/bot.env" "ConnectionStrings__BotConnection=$(connection "$bot_db" "$bot_login" "$bot_password")"
 }
@@ -656,8 +659,8 @@ database() {
     local out at_127 at_localhost
     out=$(sql -N <<< "SELECT @@character_set_server; SELECT CONCAT(version, ' ', name) FROM \`$bot_db\`.schema_version;" 2>&1)
     [ "$(printf '%s\n' "$out" | sed -n 1p)" = latin1 ] || problem "MariaDB's default character set isn't latin1" "$out"
-    [ "$(printf '%s\n' "$out" | sed -n '2,$p')" = $'1 0001_core\n2 0002_bot_status\n3 0003_guilds' ] \
-        || problem "schema_version isn't exactly 1 0001_core, 2 0002_bot_status and 3 0003_guilds" "$out"
+    [ "$(printf '%s\n' "$out" | sed -n '2,$p')" = $'1 0001_core\n2 0002_bot_status\n3 0003_guilds\n4 0004_bot_requests' ] \
+        || problem "schema_version isn't exactly 1 0001_core, 2 0002_bot_status, 3 0003_guilds and 4 0004_bot_requests" "$out"
     expect "rehearsed, applied and compared" "$(cat "$state/logs/rights.log" 2>&1)" "up's apply_rights"
     at_127=$(in_database "rights_of '$dashboard_login' 127.0.0.1" 2>&1) || problem "rights_of failed" "$at_127"
     at_localhost=$(in_database "rights_of '$dashboard_login' localhost" 2>&1) || problem "rights_of failed" "$at_localhost"
@@ -909,7 +912,7 @@ dashboard_stopped() {
 
 broken_settings() {
     local out status=0 key value
-    local bad_key=shortkey4mbtest bad_id=98765mbtest bad_team=mbtest-team.cloudflareaccess.com
+    local bad_key=shortkey4mbtest bad_id=98765mbtest bad_team=mbtest-team.cloudflareaccess.com bad_request_key=MBTESTREQUESTKEY0123456789
     {
         printf 'Dashboard__PublicOrigin=https://%s\n' "$public"
         printf 'Dashboard__ProxyKey=%s\n' "$bad_key"
@@ -922,6 +925,7 @@ broken_settings() {
         printf 'ConnectionStrings__DefaultConnection=Server=127.0.0.1;Port=3306;Uid=%s;Pwd=%s;SslMode=Disabled;\n' \
             "$dashboard_login" "$db_password"
         printf 'ConnectionStrings__BotConnection=%s\n' "$(connection "$bot_db" "$dashboard_login" "$db_password")"
+        printf 'Dashboard__RequestSigningKey=%s\n' "$bad_request_key"
     } > "$state/broken.env"
     out=$(check_settings_on "$state/broken.env" 2>&1) || status=$?
     printf '%s\n' "$out" > "$state/logs/check-settings-broken.log"
@@ -929,10 +933,10 @@ broken_settings() {
     [ "$(printf '%s\n' "$out" | sed -n 1p)" = "The dashboard didn't start, because of its settings:" ] \
         || problem "check-settings' first line isn't the usual header" "$out"
     for key in Dashboard:ProxyKey Dashboard:Admins Discord:ClientId CloudflareAccess:TeamDomain \
-        ConnectionStrings:DefaultConnection; do
+        ConnectionStrings:DefaultConnection Dashboard:RequestSigningKey; do
         expect "$key" "$out" "check-settings' list"
     done
-    for value in "$bad_key" "$bad_id" "$bad_team" "$owner_id" "$client_secret" "$db_password"; do
+    for value in "$bad_key" "$bad_id" "$bad_team" "$owner_id" "$client_secret" "$db_password" "$bad_request_key"; do
         if grep -qF -- "$value" <<< "$out"; then problem "check-settings' list repeats a value it was given"; fi
     done
 }
@@ -1194,9 +1198,9 @@ revision_labels() {
 
 no_secrets_in_logs() {
     local name text file i where
-    local -a secrets=("$proxy_key" "$db_password" "$client_secret" "$bot_password" "$root_password")
-    local -a what=("the proxy key" "the dashboard's database password" "the client secret" "the bot-like login's password"
-        "MariaDB's root password")
+    local -a secrets=("$proxy_key" "$request_key" "$db_password" "$client_secret" "$bot_password" "$root_password")
+    local -a what=("the proxy key" "the request-signing key" "the dashboard's database password" "the client secret"
+        "the bot-like login's password" "MariaDB's root password")
     text=$(dk 30 exec "$nginx" cat /var/log/nginx/minerbot-dashboard.access.log 2>&1)
     expect '"GET / HTTP/1.1" 200' "$text" "nginx's access log for the dashboard"
     for name in "$holder" "$db" "$dashboard" "$nginx" "$cloudflare" "$elsewhere" nginx-files own-logs; do
@@ -1242,7 +1246,7 @@ check() {
     image_settings || true
     verdict "the image has the health check every 2 s while it starts and every 30 s after, DOTNET_EnableDiagnostics=0, and user 1654"
     database || true
-    verdict "MariaDB's default is latin1, the migrations ran with the bot-like login (schema_version 1 0001_core, 2 0002_bot_status and 3 0003_guilds), and apply_rights left the same rights on both of the login's hosts"
+    verdict "MariaDB's default is latin1, the migrations ran with the bot-like login (schema_version 1 0001_core, 2 0002_bot_status, 3 0003_guilds and 4 0004_bot_requests), and apply_rights left the same rights on both of the login's hosts"
     dashboard_health || true
     verdict "Docker's health check says healthy, the healthcheck command exits 0 with Healthy, and the start-up log says the Access check is off and that it listens only on its socket"
     home_page || true

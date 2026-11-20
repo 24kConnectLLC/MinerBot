@@ -72,6 +72,24 @@ namespace MinerBot.Dashboard.Tests
             Assert.DoesNotContain("didn't start", run.Errors);
         }
 
+        // request.sh's command, as the image runs it: without its settings it stops at once with exit code 2, saying which
+        // is missing, rather than starting the web host, which would stop on its own settings with its plain message instead.
+        // Its list needs no setting.
+        [Fact]
+        public async Task RequestRunsWithoutTheWebHost()
+        {
+            var run = await RunAsync(new Dictionary<string, string>(), "request", "caches.clear");
+
+            Assert.Equal(2, run.ExitCode);
+            Assert.StartsWith("ConnectionStrings:BotConnection isn't set", run.Output);
+            Assert.DoesNotContain("didn't start", run.Output + run.Errors);
+
+            var list = await RunAsync(new Dictionary<string, string>(), "request", "--list");
+
+            Assert.Equal(0, list.ExitCode);
+            Assert.Contains("  bot.restart ", list.Output);
+        }
+
         // The settings stop the dashboard before anything listens, with one plain line for each problem and no stack trace.
         // A port that isn't a number is one of them, rather than an exception as the settings are read. A null value leaves
         // the setting out.

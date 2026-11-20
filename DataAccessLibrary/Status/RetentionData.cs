@@ -88,6 +88,22 @@ namespace DataAccessLibrary.Status
             return SaveDataCount(sql, new { before, take });
         }
 
+        // The dashboard's requests to the bot, by when the dashboard made them or when the bot ended them, whichever came
+        // first, whatever became of them. created_at is whatever the row's writer put there, and ended_at only ever the
+        // bot's own clock, so a row dated years ahead, which the bot refuses, still goes. The bot's settings stay, however
+        // old.
+        public Task<int> DeleteRequests(DateTime before, int take)
+        {
+            RequireChunk(before, take);
+
+            string sql = $@"{Limits}DELETE FROM {_names.Bot}.bot_commands
+                            WHERE created_at < @before OR ended_at < @before
+                            ORDER BY created_at, id
+                            LIMIT @take";
+
+            return SaveDataCount(sql, new { before, take });
+        }
+
         // Each UTC day from the first given up to the second that has samples, totalled into uptime_daily, and how many days
         // that was. The caller gives the first day it keeps the samples of, so a day is only ever totalled while all of its
         // samples are there, and a total written again counts the samples that arrived late.

@@ -4,9 +4,9 @@
 #   ids/<image ID>     every image built or known, holding its revision label. An image stays here after its last tag
 #                      moves, as Docker keeps a dangling image until a prune.
 #   ctr/<name>         a container: image ID, running, restart count, start time, health, PID, container ID, config hash
-#   env/<name>         the environment the dashboard's container was made with, the KEY=VALUE lines of dashboard.env at
-#                      that moment, which docker container inspect's {{range .Config.Env}} prints. A container without
-#                      one, such as the made-up states', prints its env file's lines as they are now.
+#   env/<name>         the environment the bot's or the dashboard's container was made with, the KEY=VALUE lines of its
+#                      env file at that moment, which docker container inspect's {{range .Config.Env}} prints. A
+#                      container without one, such as the made-up states', prints its env file's lines as they are now.
 # A build of the same commit gives the same image ID, as Docker's cache does. It answers only the calls the scripts make,
 # and anything else fails loudly. These variables change what it does:
 #   FAKE_BUILD           hang (the build hangs until its timeout fires), slow (it blocks for 30 seconds), fail-<service>
@@ -37,6 +37,11 @@
 #   FAKE_HEALTHY         bot@<rev>: the bot on that image has a health check, as from PR 6 on, and it reports healthy. Without
 #                        it the bot has none, as before PR 6, and its readiness is its log's ready line
 #   FAKE_NO_SOCKET       dashboard@<rev>: the dashboard on that image never makes its socket (record.sh's sync_socket)
+#   FAKE_REQUEST         how the dashboard image's request command ends: done (by default), refused, failed, expired,
+#                        unknown, no-answer (the bot never answered), not-sent (it refused its arguments), restart (done,
+#                        and the bot back), restart-not-back, hang (until its timeout fires), or old-image (an image from
+#                        before the command, which starts the web host and stops on its settings)
+#   FAKE_REQUEST_DELAY   seconds the request command waits, once its request is queued, before the bot answers
 # Compose's up recreates a container, as Compose does, when the image behind :current changed or the service's section
 # of the compose file did: a container it made remembers a hash of its section, as cfg-<hash> (one from before, such as
 # the made-up states', never counts as changed). A container made from a section that has a line with mbtest-never-ready
@@ -195,7 +200,7 @@ run() {
             --env-file) envfile=$2; shift 2 ;;
             -e) names+=("$2"); shift 2 ;;
             --network | --tmpfs | --cap-drop | --security-opt | --memory | --pids-limit | --pull) shift 2 ;;
-            --rm | --read-only) shift ;;
+            --rm | --read-only | --no-healthcheck) shift ;;
             -*) fail "fake docker run doesn't know $1" 9 ;;
             *)
                 image=$1
@@ -252,6 +257,15 @@ run() {
             fi
             echo "Applied the migrations up to $highest (made up)."
             ;;
+        request)
+            # A container run with --rm is gone once it ends, however it ended
+            number=0
+            request_command "${command[@]:1}" || number=$?
+            if [ -n "$name" ]; then
+                rm -f "$D/ctr/$name"
+            fi
+            exit "$number"
+            ;;
         check-settings)
             if [ "${FAKE_CHECK_SETTINGS:-}" = fail ]; then
                 rm -f "$D/ctr/$name"
@@ -275,6 +289,92 @@ run() {
     if [ -n "$name" ]; then
         rm -f "$D/ctr/$name"
     fi
+}
+
+# The dashboard image's request command (PR 9), made up: its settings and the request's text must come by name, from the
+# docker command's own environment, and never in its arguments, or it fails with 3 or 4. It keeps hashes of the values it
+# got, and its arguments, in /fake/db/request-*, then ends as FAKE_REQUEST says, with the real command's lines. Returns
+# the command's exit code.
+request_command() {
+    local arg setting first
+    local -a ctr
+    if [ "${FAKE_REQUEST:-}" = old-image ]; then
+        printf '%s\n' "The dashboard didn't start, because of its settings:" "- Dashboard:PublicOrigin isn't set. (made up)" >&2
+        return 1
+    fi
+    if [ "${1:-}" = --list ]; then
+        printf '%s\n' "The requests the bot takes, with who may ask, how often the bot takes each, how long one waits to be taken, and what it needs (made up):" \
+            "  caches.clear         Clear caches. The Owner or an Admin. At most 30 times an hour. Expires after 2 minutes."
+        return 0
+    fi
+    for setting in ConnectionStrings__BotConnection Dashboard__RequestSigningKey Dashboard__Owners; do
+        if [ -z "${!setting:-}" ] || ! listed "${names[*]}" "$setting"; then
+            echo "request: $setting wasn't passed with -e, or is empty" >&2
+            return 3
+        fi
+    done
+    for arg in "$@"; do
+        if [[ $arg == *Pwd=* || $arg == *"${Dashboard__RequestSigningKey:-}"* ]] \
+            || { [ -n "${MINERBOT_REQUEST_TEXT:-}" ] && [[ $arg == *"$MINERBOT_REQUEST_TEXT"* ]]; }; then
+            echo "request: a setting or the text is on the command line" >&2
+            return 4
+        fi
+    done
+    mkdir -p "$fake/db"
+    printf '%s' "${Dashboard__RequestSigningKey:-}" | sha256sum | cut -c1-64 > "$fake/db/request-key.sha256"
+    printf '%s' "${ConnectionStrings__BotConnection:-}" | sha256sum | cut -c1-64 > "$fake/db/request-value.sha256"
+    printf '%s\n' "$*" > "$fake/db/request-args"
+    rm -f "$fake/db/request-text"
+    if listed "${names[*]}" MINERBOT_REQUEST_TEXT; then
+        printf '%s\n' "${MINERBOT_REQUEST_TEXT:-}" > "$fake/db/request-text"
+    fi
+    if [ "${FAKE_REQUEST:-}" = not-sent ]; then
+        echo "The request wasn't sent, because the bot would refuse it: it needs a server."
+        return 2
+    fi
+    first=${Dashboard__Owners:-}
+    first=${first%%,*}
+    echo "Request 41 ($1) is queued, asked by request.sh on the server (Owner $first). It expires at 15:06:05 UTC."
+    if [ -n "${FAKE_REQUEST_DELAY:-}" ]; then
+        block "$FAKE_REQUEST_DELAY"
+    fi
+    case ${FAKE_REQUEST:-done} in
+        done) echo "Done at 15:04:07 UTC: Made up: the bot did it." ;;
+        refused) echo "Refused at 15:04:07 UTC: Made up: the bot refused it." ;;
+        failed) echo "Failed at 15:04:07 UTC: Made up: it failed." ;;
+        expired) echo "Expired at 15:06:05 UTC: Made up: it expired." ;;
+        unknown) echo "Unknown at 15:04:37 UTC: The bot stopped while this ran, so it may or may not have happened." ;;
+        no-answer) echo "No answer from the bot by 15:06:26 UTC: request 41 is still queued, past its expiry at 15:06:05 UTC. ./status.sh says whether the bot runs." ;;
+        restart | restart-not-back)
+            echo "Done at 15:04:07 UTC: The bot is restarting. It's usually back within a minute."
+            # Docker starts the bot again after it exits, under its restart policy
+            if [ -f "$D/ctr/minerbot-bot" ]; then
+                read -r -a ctr < "$D/ctr/minerbot-bot"
+                ctr[2]=$((ctr[2] + 1))
+                ctr[3]=$(now)
+                printf '%s\n' "${ctr[*]}" > "$D/ctr/minerbot-bot"
+            fi
+            echo "Waiting for the bot to be back on Discord, for up to 6 minutes."
+            if [ "$FAKE_REQUEST" = restart-not-back ]; then
+                echo "The bot isn't back on Discord 6 minutes after the restart. ./status.sh says whether it runs."
+            else
+                echo "The bot is back on Discord 38 s after the request: its new run started at 15:04:41 UTC."
+            fi
+            echo "The bot's settings now: posts aren't paused; the default status."
+            ;;
+        hang)
+            # What timeout's own timer does at the limit: the stand-in can't wait 15 minutes
+            if [ "$(cat "/proc/$PPID/comm" 2> /dev/null)" = timeout ]; then
+                kill -ALRM "$PPID"
+            fi
+            block 60
+            return 1
+            ;;
+    esac
+    case ${FAKE_REQUEST:-done} in
+        done | restart) return 0 ;;
+    esac
+    return 1
 }
 
 logs() {
@@ -381,10 +481,9 @@ up() {
     fi
     printf '%s true 0 %s %s %s %s cfg-%s\n' "$id" "$(now)" "$health" "$((RANDOM + 1000))" "$(new_hex)" "$section" \
         > "$D/ctr/$name"
-    if [ "$service" = dashboard ]; then
-        mkdir -p "$D/env"
-        env_of "$name" > "$D/env/$name"
-    fi
+    # The environment the container is made with, from its env file as it is now, until the next recreate
+    mkdir -p "$D/env"
+    env_of "$name" > "$D/env/$name"
     echo " Container $name  Recreated"
     echo " Container $name  Started"
     if [ "$service" = bot ] && [ -n "${FAKE_CLOCK_JUMP_AT_BOT_UP:-}" ]; then

@@ -15,10 +15,12 @@ using DataAccessLibrary.Guilds;
 using DataAccessLibrary.Guilds.Models;
 using DataAccessLibrary.Health;
 using DataAccessLibrary.Migrations;
+using DataAccessLibrary.Requests;
 using DataAccessLibrary.Status;
 using DataAccessLibrary.Status.Models;
 using DataAccessLibrary.Tests.Database;
 using MinerBot.Shared.Armor;
+using MinerBot.Shared.Requests;
 using MySql.Data.MySqlClient;
 
 namespace DataAccessLibrary.Tests
@@ -49,6 +51,17 @@ namespace DataAccessLibrary.Tests
         // Exactly what the login may do, as rights-list.sql lists it, sorted. Written out, so a new right changes this too.
         static readonly string[] Expected =
         [
+            "column INSERT minerbot_db bot_commands actor_id",
+            "column INSERT minerbot_db bot_commands actor_name",
+            "column INSERT minerbot_db bot_commands actor_role",
+            "column INSERT minerbot_db bot_commands argument",
+            "column INSERT minerbot_db bot_commands channel_id",
+            "column INSERT minerbot_db bot_commands created_at",
+            "column INSERT minerbot_db bot_commands expires_at",
+            "column INSERT minerbot_db bot_commands guild_id",
+            "column INSERT minerbot_db bot_commands kind",
+            "column INSERT minerbot_db bot_commands request_key",
+            "column INSERT minerbot_db bot_commands signature",
             "column SELECT website_db ihvph_discord_servers guild_id",
             "column UPDATE website_db ihvph_armor_styles Status",
             "column UPDATE website_db ihvph_blacklist expire_date",
@@ -65,7 +78,9 @@ namespace DataAccessLibrary.Tests
             "table INSERT website_db ihvph_blacklist",
             "table SELECT minerbot_db armor_reviews",
             "table SELECT minerbot_db audit_log",
+            "table SELECT minerbot_db bot_commands",
             "table SELECT minerbot_db bot_events",
+            "table SELECT minerbot_db bot_settings",
             "table SELECT minerbot_db bot_status",
             "table SELECT minerbot_db dashboard_sessions",
             "table SELECT minerbot_db guild_channels",
@@ -92,11 +107,24 @@ namespace DataAccessLibrary.Tests
             .Replace("{{BOT_DB}}", Bot)
             .Replace("{{GRANTEES}}", Grantee);
 
-        // The login as setup-dashboard.sh makes it, with no rights, then the file applied. Dropped afterwards whatever
-        // happened, which takes every right it had with it.
+        // A made-up request-signing key, the 32 bytes 00 01 ... 1f
+        static readonly byte[] SigningKey = Enumerable.Range(0, 32).Select(value => (byte)value).ToArray();
+
+        // A request's columns and values, written by hand, for the statements the login is refused
+        const string RequestColumns = "request_key, kind, actor_id, actor_name, actor_role, created_at, expires_at, signature";
+        const string RequestValues = "REPEAT('a', 32), 'posts.pause', 1, 'x', 'owner', NOW(3), NOW(3), REPEAT('a', 32)";
+
         async Task WithLoginAsync(Func<MariaDbFixture, string, Task> test)
         {
             var db = fixture.Require();
+            await AsDashboardAsync(db, password => test(db, password));
+        }
+
+        // The login as setup-dashboard.sh makes it, with no rights, then the file applied. Dropped afterwards whatever
+        // happened, which takes every right it had with it. Another class's test uses it for a row only this login could
+        // write.
+        internal static async Task AsDashboardAsync(MariaDbFixture db, Func<string, Task> test)
+        {
             var password = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
 
             await db.RootExecuteAsync($"DROP USER IF EXISTS {Grantee}");
@@ -105,7 +133,7 @@ namespace DataAccessLibrary.Tests
             try
             {
                 await ApplyAsync(db);
-                await test(db, password);
+                await test(password);
             }
             finally
             {
@@ -128,7 +156,7 @@ namespace DataAccessLibrary.Tests
 
         // The login's own connection, never pooled, so nothing of it stays open once the login is dropped. Its user
         // variables are allowed, so MySql.Data leaves an @ in a statement alone.
-        static string ConnectionAs(MariaDbFixture db, string password, string database) =>
+        internal static string ConnectionAs(MariaDbFixture db, string password, string database) =>
             new MySqlConnectionStringBuilder(db.ConnectionAs(Login, password, database)) { Pooling = false, AllowUserVariables = true }.ConnectionString;
 
         // The connections the dashboard has: the website's database for Armor, Blacklist and Guild, MinerBot's for Bot
@@ -228,7 +256,7 @@ namespace DataAccessLibrary.Tests
                 await db.ClearAsync(MariaDbFixture.SessionTable, MariaDbFixture.AuditTable, MariaDbFixture.ArmorTable, MariaDbFixture.ReviewTable,
                     MariaDbFixture.BlacklistTable, MariaDbFixture.StatusTable, MariaDbFixture.EventTable, MariaDbFixture.JobRunTable, MariaDbFixture.JobStatusTable,
                     MariaDbFixture.SampleTable, MariaDbFixture.DailyTable, MariaDbFixture.BotGuildTable, MariaDbFixture.BotChannelTable, MariaDbFixture.GuildEventTable,
-                    MariaDbFixture.GuildDailyTable, MariaDbFixture.GuildTable);
+                    MariaDbFixture.GuildDailyTable, MariaDbFixture.GuildTable, MariaDbFixture.RequestTable, MariaDbFixture.SettingsTable);
                 await db.AddArmorAsync(Armor(1, ArmorStatus.Pending, "Test Armor 1"));
                 await db.AddArmorAsync(Armor(2, ArmorStatus.Approved, "Test Armor 2"));
 
@@ -405,11 +433,37 @@ namespace DataAccessLibrary.Tests
                 Assert.Equal(2UL, Assert.Single(await settings.ListSettings()).armor_channel_id);
                 Assert.NotNull(await settings.GetSettings(1000000000000000005));
 
+                // A request to the bot, call for call as the dashboard's BotRequests writes one: the signed request and its audit
+                // row in one transaction on MinerBot's own connection, with the new request's ID from LAST_INSERT_ID(). Then the
+                // request command's reads of it by its key, while it waits for the bot, and by its ID, and of the bot's settings,
+                // before and after the bot writes them. An audit row on its own, as BotRequests writes for a commit the database
+                // didn't confirm, and the read of the bot's status after a restart, are above.
+                var queue = new BotRequestQueue(factory, names);
+                var pause = RequestFields.New(RequestFields.NewKey(), RequestKinds.Find(RequestKinds.PostsPause)!, UserId, "Test Owner", RequestRoles.Owner,
+                    null, null, "Testing", Noon);
+
+                var requestId = await queue.RunInTransaction(async transaction =>
+                {
+                    var added = await queue.AddRequest(pause, RequestSigning.Sign(SigningKey, pause), transaction);
+                    await audit.AddAudit(Audit(RequestKinds.PostsPause, "request", added.ToString(CultureInfo.InvariantCulture)), transaction);
+                    return added;
+                });
+
+                var request = await queue.GetRequest(requestId);
+                Assert.NotNull(request);
+                Assert.Null(request.state);
+                Assert.True(RequestSigning.Verify(SigningKey, request.Fields(), request.signature));
+                Assert.Equal(requestId, (await queue.GetRequestByKey(pause.RequestKey))?.id);
+                Assert.Null(await queue.GetSettings());
+                await db.Requests().SavePause(true, "Testing", Noon, UserId, requestId, Noon);
+                Assert.True((await queue.GetSettings())?.posts_paused);
+
                 var health = new DatabaseHealthData(factory);
                 Assert.True(await health.Answers(DBConnectionName.Armor, TimeSpan.FromSeconds(5)).WaitAsync(CallLimit, Token));
                 Assert.True(await health.Answers(DBConnectionName.Bot, TimeSpan.FromSeconds(5)).WaitAsync(CallLimit, Token));
 
-                Assert.Equal(["armor.approve", "armor.takedown", "auth.refused", "blacklist.add", "blacklist.edit", "blacklist.remove", "blacklist.remove", "session.start"],
+                Assert.Equal(["armor.approve", "armor.takedown", "auth.refused", "blacklist.add", "blacklist.edit", "blacklist.remove", "blacklist.remove", "posts.pause",
+                    "session.start"],
                     (await db.RootQueryAsync<string>($"SELECT action FROM {MariaDbFixture.AuditTable}")).Order(StringComparer.Ordinal));
                 Assert.Equal(0, (await db.RootQueryAsync<long>($"SELECT COUNT(*) FROM {MariaDbFixture.BlacklistTable}")).Single());
                 Assert.Equal(1, (await db.RootQueryAsync<long>($"SELECT COUNT(*) FROM {MariaDbFixture.SessionTable}")).Single());
@@ -465,6 +519,21 @@ namespace DataAccessLibrary.Tests
             { "add to guild_daily", $"INSERT INTO {Bot}.guild_daily (day, guild_id, member_count) VALUES (CURDATE(), 1, 1)" },
             { "change guild_daily", $"UPDATE {Bot}.guild_daily SET member_count = 1 WHERE 1 = 0" },
             { "delete from guild_daily", $"DELETE FROM {Bot}.guild_daily WHERE 1 = 0" },
+            // The requests to the bot, which this login adds by naming only the columns the dashboard fills in, and reads back,
+            // but never changes or deletes: no request starts done, taken by a run, at a time that would use up a limit, or with
+            // an ID of its own. The bot's settings only change through requests.
+            { "change a request", $"UPDATE {Bot}.bot_commands SET state = 'done' WHERE 1 = 0" },
+            { "delete a request", $"DELETE FROM {Bot}.bot_commands WHERE 1 = 0" },
+            { "truncate the requests", $"TRUNCATE TABLE {Bot}.bot_commands" },
+            { "replace a request", $"REPLACE INTO {Bot}.bot_commands ({RequestColumns}) VALUES ({RequestValues})" },
+            { "add a request or change the one there", $"INSERT INTO {Bot}.bot_commands ({RequestColumns}) VALUES ({RequestValues}) ON DUPLICATE KEY UPDATE kind = kind" },
+            { "add a request with its state", $"INSERT INTO {Bot}.bot_commands ({RequestColumns}, state) VALUES ({RequestValues}, 'done')" },
+            { "add a request with its result", $"INSERT INTO {Bot}.bot_commands ({RequestColumns}, result) VALUES ({RequestValues}, 'Done')" },
+            { "add a request taken at a time", $"INSERT INTO {Bot}.bot_commands ({RequestColumns}, claimed_at) VALUES ({RequestValues}, NOW(3))" },
+            { "add a request with its ID", $"INSERT INTO {Bot}.bot_commands (id, {RequestColumns}) VALUES (9999, {RequestValues})" },
+            { "add the bot's settings", $"INSERT INTO {Bot}.bot_settings (id, posts_paused, updated_at) VALUES (1, 1, NOW(3))" },
+            { "change the bot's settings", $"UPDATE {Bot}.bot_settings SET posts_paused = 1 WHERE 1 = 0" },
+            { "delete the bot's settings", $"DELETE FROM {Bot}.bot_settings WHERE 1 = 0" },
             // Structure, in both databases
             { "create a table in MinerBot's database", $"CREATE TABLE {Bot}.rights_check (id INT)" },
             { "create a table in the website's database", $"CREATE TABLE {Site}.rights_check (id INT)" },
@@ -570,9 +639,9 @@ namespace DataAccessLibrary.Tests
             });
         }
 
-        // The bot's own writes of its status, history and servers, each through the bot's own code, are refused: the
-        // dashboard reads them and nothing more. The servers' save and leave start with a locked read, which SELECT allows,
-        // and their transactions roll back at the first write.
+        // The bot's own writes of its status, history, servers and requests, each through the bot's own code, are refused:
+        // the dashboard reads them and nothing more. The servers' save and leave, and the requests' sweep, start with a locked
+        // read, which SELECT allows, and their transactions roll back at the first write.
         [Fact]
         public async Task TheBotsWritesAreRefused()
         {
@@ -580,7 +649,12 @@ namespace DataAccessLibrary.Tests
             {
                 await db.ClearAsync(MariaDbFixture.StatusTable, MariaDbFixture.EventTable, MariaDbFixture.JobRunTable, MariaDbFixture.JobStatusTable,
                     MariaDbFixture.SampleTable, MariaDbFixture.DailyTable, MariaDbFixture.BotGuildTable, MariaDbFixture.BotChannelTable, MariaDbFixture.GuildEventTable,
-                    MariaDbFixture.GuildDailyTable);
+                    MariaDbFixture.GuildDailyTable, MariaDbFixture.RequestTable, MariaDbFixture.SettingsTable);
+
+                // A request that waits, and one an earlier run took before Noon, which each write would change if it could
+                await db.RootExecuteAsync($@"INSERT INTO {MariaDbFixture.RequestTable} (id, {RequestColumns}, state, run_id, claimed_at)
+                                             VALUES (1, {RequestValues}, NULL, NULL, NULL), (2, REPEAT('b', 32), 'posts.pause', 1, 'x', 'owner', @old, @old,
+                                             REPEAT('a', 32), 'running', 7, @old)", new { old = Noon.AddHours(-1) });
 
                 var connections = Connections(db, password);
                 var factory = new SQLConnectionFactory(connections);
@@ -588,6 +662,7 @@ namespace DataAccessLibrary.Tests
                 var status = new BotStatusData(factory, names);
                 var guilds = new BotGuildData(factory, names);
                 var retention = new RetentionData(factory, names);
+                var requests = new BotRequestData(factory, names);
                 var day = Noon.Date;
 
                 var calls = new (string What, Func<Task> Call)[]
@@ -604,7 +679,15 @@ namespace DataAccessLibrary.Tests
                     ("BotGuildData.SaveMemberCount", () => guilds.SaveMemberCount(1, 10, day, Noon)),
                     ("RetentionData.TotalUptimeDays", () => retention.TotalUptimeDays(day.AddDays(-1), day)),
                     ("RetentionData.DeleteEvents", () => retention.DeleteEvents(Noon, 1)),
-                    ("RetentionData.DeleteSamples", () => retention.DeleteSamples(day, 1))
+                    ("RetentionData.DeleteSamples", () => retention.DeleteSamples(day, 1)),
+                    ("RetentionData.DeleteRequests", () => retention.DeleteRequests(Noon, 10)),
+                    ("BotRequestData.Decide", () => requests.Decide(1, 1, RequestStates.Refused, "Refused", Noon)),
+                    ("BotRequestData.Claim", () => requests.Claim(1, 1, Noon)),
+                    ("BotRequestData.Finish", () => requests.Finish(2, 7, RequestStates.Done, "Done", 1, Noon)),
+                    ("BotRequestData.SetDm", () => requests.SetDm(2, RequestDmStates.Sent)),
+                    ("BotRequestData.SweepOtherRuns", () => requests.SweepOtherRuns(1, Noon, "Unknown", Noon)),
+                    ("BotRequestData.SavePause", () => requests.SavePause(true, "Testing", Noon, UserId, 1, Noon)),
+                    ("BotRequestData.SaveStatus", () => requests.SaveStatus("Testing", Noon, UserId, 1, Noon))
                 };
 
                 foreach (var (what, call) in calls)
@@ -614,8 +697,13 @@ namespace DataAccessLibrary.Tests
                 }
 
                 foreach (var table in new[] { MariaDbFixture.StatusTable, MariaDbFixture.EventTable, MariaDbFixture.JobRunTable, MariaDbFixture.JobStatusTable,
-                    MariaDbFixture.SampleTable, MariaDbFixture.DailyTable, MariaDbFixture.BotGuildTable, MariaDbFixture.GuildEventTable, MariaDbFixture.GuildDailyTable })
+                    MariaDbFixture.SampleTable, MariaDbFixture.DailyTable, MariaDbFixture.BotGuildTable, MariaDbFixture.GuildEventTable, MariaDbFixture.GuildDailyTable,
+                    MariaDbFixture.SettingsTable })
                     Assert.Equal(0, (await db.RootQueryAsync<long>($"SELECT COUNT(*) FROM {table}")).Single());
+
+                // Both requests are as they were
+                Assert.Equal([(1UL, (string?)null, (string?)null), (2UL, "running", (string?)null)],
+                    await db.RootQueryAsync<(ulong, string?, string?)>($"SELECT id, state, dm_state FROM {MariaDbFixture.RequestTable} ORDER BY id"));
             });
         }
 
@@ -668,7 +756,7 @@ namespace DataAccessLibrary.Tests
             var file = DeployFile("dashboard-rights.sql");
             var tables = TableNames().Matches(file).Select(match => (Database: Database(match.Groups[1].Value), Table: match.Groups[2].Value)).Distinct().ToList();
 
-            Assert.Equal(16, tables.Count);
+            Assert.Equal(18, tables.Count);
 
             foreach (var (database, table) in tables)
             {

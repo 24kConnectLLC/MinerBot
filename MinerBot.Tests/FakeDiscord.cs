@@ -3,10 +3,12 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using DataAccessLibrary;
 using DataAccessLibrary.Armor;
 using DataAccessLibrary.Discord;
 using Discord;
 using Discord.Interactions;
+using Discord.Net;
 using Discord.Net.Rest;
 using Discord.Net.WebSockets;
 using Discord.WebSocket;
@@ -14,6 +16,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using MinerBot_2._0.Handlers;
 using MinerBot_2._0.Jobs;
+using MinerBot_2._0.Requests;
 using MinerBot_2._0.Services;
 using MinerBot_2._0.Status;
 using SteamWebAPIAccess;
@@ -23,6 +26,10 @@ namespace MinerBot.Tests
     // FakeDiscord swaps the console and the cooldowns are static, so these tests run one at a time.
     [CollectionDefinition("Discord", DisableParallelization = true)]
     public class DiscordCollection { }
+
+    // A presence the bot sent: with an IDENTIFY (op 2) or in a presence update (op 3), as its activity's name, type and state,
+    // which a custom status keeps its text in. No activity is all null.
+    internal sealed record SentPresence(int Op, string? Name, int? Type, string? State);
 
     // One thing the bot did, in order. Body is the JSON it sent to Discord, File the upload that came with it, and Endpoint where it went.
     internal sealed record Step(string Name, string Body = "", string? File = null, string Endpoint = "")
@@ -156,6 +163,10 @@ namespace MinerBot.Tests
         // Holds Discord's answer to each message the bot sends until it completes, as for a slow request
         public Task? SendHold { get; set; }
 
+        // Holds Discord's answer to the bot leaving a server until it completes, as for a slow request, and the gateway then
+        // isn't told: the bot is still in the server
+        public Task? LeaveHold { get; set; }
+
         // Servers Discord lists with the session as unavailable, in an outage, and doesn't send
         ulong[] unavailableAtStart;
 
@@ -197,6 +208,26 @@ namespace MinerBot.Tests
         public IReadOnlyList<string> StepNames => Steps.Select(step => step.Name).ToList();
 
         public Step Single(string name) => Assert.Single(Steps, step => step.Name == name);
+
+        // The bot's services, as Program.cs registers them, for the tests that build the request worker and its jobs on them
+        public IServiceProvider Services => services;
+
+        // The presence the bot sent with each IDENTIFY and in each presence update, in order, while the socket was open: a
+        // frame sent while it's closed is dropped, as Discord.Net's socket drops it
+        public IReadOnlyList<SentPresence> Presences
+        {
+            get
+            {
+                lock (presences)
+                    return presences.ToList();
+            }
+        }
+
+        readonly List<SentPresence> presences = new();
+
+        // How many times Discord.Net raised Connected, which it does after a READY and after a RESUMED
+        public int Connections => Volatile.Read(ref connections);
+        int connections;
 
         FakeDiscord(bool holdReady, ulong[] unavailableGuilds)
         {
@@ -246,7 +277,11 @@ namespace MinerBot.Tests
                 .AddSingleton<NotificationState>()
                 .AddSingleton<BotRecorder>()
                 .AddSingleton<DiscordStatusHandler>()
+                .AddSingleton<IDiscordStatus>(provider => provider.GetRequiredService<DiscordStatusHandler>())
                 .AddSingleton<GuildWatcher>()
+                .AddSingleton<PostsPause>()
+                .AddSingleton<PresenceKeeper>()
+                .AddSingleton<CacheReset>()
                 .AddSingleton<TimeProvider>(clock)
                 .AddSingleton<IGetData>(Steam)
                 .AddSingleton<IArmorData>(Armor)
@@ -303,6 +338,33 @@ namespace MinerBot.Tests
             }
         }
 
+        // The gateway's connection dropping, as in a short network outage: Discord.Net connects again and resumes the session,
+        // which Discord answers with RESUMED rather than READY, and which carries nothing of the bot's presence
+        public async Task DropAndResumeAsync()
+        {
+            var before = Connections;
+            gateway.Resumes = true;
+
+            try
+            {
+                await gateway.DropAsync();
+
+                var waited = System.Diagnostics.Stopwatch.StartNew();
+
+                while (Connections == before || client.ConnectionState != ConnectionState.Connected)
+                {
+                    if (waited.Elapsed > WaitLimit)
+                        throw new TimeoutException($"The gateway never resumed. Console output: {ConsoleText}");
+
+                    await Task.Delay(10);
+                }
+            }
+            finally
+            {
+                gateway.Resumes = false;
+            }
+        }
+
         // Discord.Net marks a guild synced on a task of its own once it has taken the guild, and until then raises no event for
         // its channels, roles or members, so tests that send those right away wait for every guild the session sent whole. One
         // sent with nothing but its ID, in an outage, never syncs, though Discord.Net counts it as connected; it has no name.
@@ -334,7 +396,8 @@ namespace MinerBot.Tests
         {
             Console.SetOut(console);
 
-            // In Program.cs's order: the status handler's Ready comes first, then the server watcher's handlers
+            // In Program.cs's order: the presence first, then the status handler's Ready, then the server watcher's handlers
+            await services.GetRequiredService<PresenceKeeper>().InitializeAsync();
             services.GetRequiredService<DiscordStatusHandler>().Initialize();
             services.GetRequiredService<GuildWatcher>().Initialize();
             await services.GetRequiredService<InteractionHandler>().InitializeAsync();
@@ -352,6 +415,12 @@ namespace MinerBot.Tests
             client.Ready += () =>
             {
                 ready.TrySetResult();
+                return Task.CompletedTask;
+            };
+
+            client.Connected += () =>
+            {
+                Interlocked.Increment(ref connections);
                 return Task.CompletedTask;
             };
 
@@ -392,6 +461,21 @@ namespace MinerBot.Tests
             await client.DisposeAsync();
             await services.DisposeAsync();
             Console.SetOut(realConsole);
+        }
+
+        // A presence's first activity, which is the only one Discord.Net sends
+        void AddPresence(int op, JsonElement? presence)
+        {
+            JsonElement activity = default;
+            var has = presence is { ValueKind: JsonValueKind.Object } value && value.TryGetProperty("activities", out var activities)
+                && activities.ValueKind == JsonValueKind.Array && activities.GetArrayLength() > 0 && (activity = activities[0]).ValueKind == JsonValueKind.Object;
+
+            string? Text(string name) => has && activity.TryGetProperty(name, out var text) && text.ValueKind == JsonValueKind.String ? text.GetString() : null;
+
+            var sent = new SentPresence(op, Text("name"), has && activity.TryGetProperty("type", out var type) ? type.GetInt32() : null, Text("state"));
+
+            lock (presences)
+                presences.Add(sent);
         }
 
         void AddStep(string name) => AddStep(new Step(name));
@@ -672,31 +756,68 @@ namespace MinerBot.Tests
         // Stands in for the gateway connection, it answers the login and delivers the events of the test
         sealed class FakeGateway(FakeDiscord discord) : IWebSocketClient
         {
+            volatile bool open;
+
             public event Func<byte[], int, int, Task>? BinaryMessage { add { } remove { } }
             public event Func<string, Task>? TextMessage;
-            public event Func<Exception, Task>? Closed { add { } remove { } }
+            public event Func<Exception, Task>? Closed;
+
+            // Whether a resume is answered with RESUMED, as after a short outage, rather than with a new session
+            public volatile bool Resumes;
 
             public void SetHeader(string key, string value) { }
             public void SetCancelToken(CancellationToken cancelToken) { }
-            public Task ConnectAsync(string host) => Task.CompletedTask;
-            public Task DisconnectAsync(int closeCode = 1000) => Task.CompletedTask;
+
+            public Task ConnectAsync(string host)
+            {
+                open = true;
+                return Task.CompletedTask;
+            }
+
+            public Task DisconnectAsync(int closeCode = 1000)
+            {
+                open = false;
+                return Task.CompletedTask;
+            }
+
             public void Dispose() { }
+
+            // The socket closing under Discord.Net, which then connects again by itself
+            public Task DropAsync()
+            {
+                open = false;
+                return Closed?.Invoke(new WebSocketClosedException(4000)) ?? Task.CompletedTask;
+            }
 
             public Task SendAsync(byte[] data, int index, int count, bool isText)
             {
                 using var json = JsonDocument.Parse(data.AsMemory(index, count));
 
-                const int identifyOpCode = 2, resumeOpCode = 6;
+                const int identifyOpCode = 2, presenceOpCode = 3, resumeOpCode = 6;
                 var opCode = json.RootElement.GetProperty("op").GetInt32();
+
+                // Discord.Net's socket drops a frame while it's closed, without an error
+                if (open && opCode == identifyOpCode)
+                    discord.AddPresence(opCode, json.RootElement.GetProperty("d").TryGetProperty("presence", out var presence) ? presence : null);
+
+                if (open && opCode == presenceOpCode)
+                    discord.AddPresence(opCode, json.RootElement.GetProperty("d"));
 
                 if (opCode == identifyOpCode)
                     _ = Task.Run(() => LoginAsync());
 
-                // The session can't be resumed, so Discord.Net identifies and gets a new one, as after the bot was offline
+                // Unless the test lets it resume, the session can't be, so Discord.Net identifies and gets a new one, as after the
+                // bot was offline
                 if (opCode == resumeOpCode)
-                    _ = Task.Run(() => RaiseAsync("""{"op":9,"d":false}"""));
+                    _ = Task.Run(() => Resumes ? ResumeAsync() : RaiseAsync("""{"op":9,"d":false}"""));
 
                 return Task.CompletedTask;
+            }
+
+            async Task ResumeAsync()
+            {
+                await RaiseAsync("""{"op":10,"d":{"heartbeat_interval":3600000}}""");
+                await DeliverAsync("RESUMED", "{}");
             }
 
             async Task LoginAsync()
@@ -760,6 +881,18 @@ namespace MinerBot.Tests
                 if (endpoint == "users/@me/channels")
                     return Response(HttpStatusCode.OK, DirectChannelJson(ulong.Parse(JsonDocument.Parse(body).RootElement.GetProperty("recipient_id").GetString()!)));
 
+                // The bot leaving a server: Discord answers with nothing, then tells the gateway, which removes the server
+                if (method == "DELETE" && Regex.Match(endpoint, @"^users/@me/guilds/(\d+)$") is { Success: true } left)
+                {
+                    if (discord.LeaveHold is { } leaveHold)
+                        return HeldLeaveAsync(leaveHold);
+
+                    var leftId = left.Groups[1].Value;
+                    _ = Task.Run(() => discord.gateway.DeliverAsync("GUILD_DELETE", $$"""{"id":"{{leftId}}"}"""));
+
+                    return Response(HttpStatusCode.NoContent, "");
+                }
+
                 if (endpoint.StartsWith("users/"))
                     return Response(HttpStatusCode.OK, UserJson(ulong.Parse(endpoint["users/".Length..])));
 
@@ -791,6 +924,12 @@ namespace MinerBot.Tests
                 return await Response(HttpStatusCode.OK, MessageJson());
             }
 
+            static async Task<RestResponse> HeldLeaveAsync(Task hold)
+            {
+                await hold;
+                return await Response(HttpStatusCode.NoContent, "");
+            }
+
             // Requests during login aren't steps of a command
             static string? StepName(string method, string endpoint, string body)
             {
@@ -819,6 +958,9 @@ namespace MinerBot.Tests
 
                 if (endpoint == "users/@me/channels")
                     return "open direct message";
+
+                if (method == "DELETE" && Regex.IsMatch(endpoint, @"^users/@me/guilds/\d+$"))
+                    return "leave server";
 
                 if (method == "GET" && Regex.IsMatch(endpoint, @"^channels/\d+$"))
                     return "get channel";

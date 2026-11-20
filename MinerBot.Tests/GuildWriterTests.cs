@@ -830,6 +830,92 @@ namespace MinerBot.Tests
             Assert.Single(logger.Entries, entry => entry.Level == LogLevel.Error && entry.Message.Contains("The server writer failed (InvalidOperationException)"));
         }
 
+        // Forced writes and leave details, for the dashboard's requests
+
+        // A refresh writes the server again though nothing changed, and says when, with its text and announcement channels.
+        // Unforced, the same server still costs nothing.
+        [Fact]
+        public async Task AForcedWriteWritesAnUnchangedServer()
+        {
+            await using var discord = await StartAsync();
+            var writer = Writer(discord);
+            await TickAsync(writer);
+
+            var rewrite = discord.Watcher.RequestRewrite(FakeDiscord.GuildId);
+            discord.Clock.UtcNow = Noon.AddMinutes(1);
+            await TickAsync(writer);
+
+            Assert.Equal(new RewriteOutcome(RewriteState.Written, Noon.AddMinutes(1).UtcDateTime, FirstGuildChannels.Length),
+                await rewrite.WaitAsync(WaitLimit, TestContext.Current.CancellationToken));
+            Assert.Equal(2, data.Saved.Count);
+            Assert.Equal(FirstGuildChannels, data.Saved[1].Channels);
+            Assert.Empty(discord.Watcher.PeekNotes());
+
+            discord.Watcher.NoteAll([FakeDiscord.GuildId]);
+            await TickAsync(writer);
+
+            Assert.Equal(2, data.Saved.Count);
+        }
+
+        // The bot left the server before the writer came to it
+        [Fact]
+        public async Task AForcedWriteOfAServerNotInTheCacheEnds()
+        {
+            await using var discord = await StartAsync();
+            var writer = Writer(discord);
+            await TickAsync(writer);
+
+            var rewrite = discord.Watcher.RequestRewrite(9999);
+            await TickAsync(writer);
+
+            Assert.Equal(RewriteState.Gone, (await rewrite.WaitAsync(WaitLimit, TestContext.Current.CancellationToken)).State);
+            Assert.Single(data.Saved);
+            Assert.Empty(discord.Watcher.PeekNotes());
+        }
+
+        // A write that fails tells the request at once, by the failure's type and MariaDB's number, and its note stays for the
+        // next tick
+        [Fact]
+        public async Task AForcedWriteThatFailsSaysWhy()
+        {
+            await using var discord = await StartAsync();
+            var writer = Writer(discord);
+            await TickAsync(writer);
+
+            var rewrite = discord.Watcher.RequestRewrite(FakeDiscord.GuildId);
+            data.Failure = Refused(1205);
+            await TickAsync(writer);
+
+            Assert.Equal(new RewriteOutcome(RewriteState.Failed, Failure: "MySqlException, MySQL error 1205"), await rewrite.WaitAsync(WaitLimit, TestContext.Current.CancellationToken));
+            Assert.Equal([FakeDiscord.GuildId], discord.Watcher.PeekNotes().Select(note => note.GuildId));
+        }
+
+        // A leave the dashboard asked for is recorded with its request, when Discord's word comes within 2 minutes, and one
+        // whose word came later, or a server removing the bot, with none
+        [Fact]
+        public async Task ALeaveCarriesItsDetail()
+        {
+            await using var discord = await StartAsync();
+            await discord.JoinGuildAsync(members: $"[{FakeDiscord.BotMemberJson(FakeDiscord.BotRoleId)}]");
+            var writer = Writer(discord);
+            await TickAsync(writer);
+
+            discord.Watcher.ExpectLeave(FakeDiscord.GuildId, "left on dashboard request 7");
+            await discord.LeaveGuildAsync();
+
+            discord.Watcher.ExpectLeave(FakeDiscord.JoinedGuildId, "left on dashboard request 8");
+            discord.Clock.UtcNow = Noon.AddMinutes(3);
+            await discord.DeliverAsync("GUILD_DELETE", $$"""{"id":"{{FakeDiscord.JoinedGuildId}}"}""");
+
+            await TickAsync(writer);
+
+            Assert.Equal(
+            [
+                (FakeDiscord.GuildId, Noon.UtcDateTime, (string?)"left on dashboard request 7"),
+                (FakeDiscord.JoinedGuildId, Noon.AddMinutes(3).UtcDateTime, null)
+            ], data.Leaves.OrderBy(leave => leave.GuildId));
+        }
+
         // Discord.Net skips an event's later handlers after one that throws, so the watcher's never do
         [Fact]
         public async Task WatcherNeverThrowsIntoDiscordNet()

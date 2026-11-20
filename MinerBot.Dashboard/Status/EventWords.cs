@@ -22,6 +22,11 @@ namespace MinerBot.Dashboard.Status
         public const string JobCutOff = "job.cut_off";
         public const string AlertSent = "alert.sent";
         public const string AlertFailed = "alert.failed";
+        public const string RequestRejected = "request.rejected";
+        public const string RequestsOff = "requests.off";
+        public const string RequestInterrupted = "request.interrupted";
+        public const string PostsPaused = "posts.paused";
+        public const string PostsResumed = "posts.resumed";
         public const string SteamLoggedOn = "steam.logged_on";
         public const string SteamOffline = "steam.offline";
         public const string SteamLoggedOff = "steam.logged_off";
@@ -43,6 +48,11 @@ namespace MinerBot.Dashboard.Status
             new(JobCutOff, "A job was cut off"),
             new(AlertSent, "Message sent to the owner"),
             new(AlertFailed, "Message to the owner failed"),
+            new(RequestRejected, "A request was refused"),
+            new(RequestsOff, "Requests are off"),
+            new(RequestInterrupted, "A request was cut short"),
+            new(PostsPaused, "Posts paused"),
+            new(PostsResumed, "Posts resumed"),
             new(SteamLoggedOn, "Logged on to Steam"),
             new(SteamOffline, "Steam went offline"),
             new(SteamLoggedOff, "Steam logged the bot off"),

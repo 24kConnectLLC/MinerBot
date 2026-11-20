@@ -1,14 +1,17 @@
 ﻿using DataAccessLibrary.Armor.Models;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Primitives;
 
 namespace DataAccessLibrary.Armor
 {
     public class ArmorData : DbBaseConnection, IArmorData
     {
         private readonly IMemoryCache _memoryCache;
-        public ArmorData(ISQLConnectionFactory connectionFactory, IMemoryCache cache) : base(connectionFactory, DBConnectionName.Armor)
+        private readonly CacheReset _reset;
+        public ArmorData(ISQLConnectionFactory connectionFactory, IMemoryCache cache, CacheReset reset) : base(connectionFactory, DBConnectionName.Armor)
         {
             _memoryCache = cache;
+            _reset = reset;
 
             // The bot's own queries keep the connection string exactly as configured
             SendsUtf8mb4 = false;
@@ -44,8 +47,11 @@ namespace DataAccessLibrary.Armor
 
             if (output == null)
             {
+                // Before the read, so a clear that comes during it keeps this list out
+                var reset = _reset.Token;
+
                 output = await GetAllArmorNames();
-                _memoryCache.Set(key, output, timeSpan);
+                _memoryCache.Set(key, output, new MemoryCacheEntryOptions { AbsoluteExpirationRelativeToNow = timeSpan }.AddExpirationToken(new CancellationChangeToken(reset)));
             }
 
             return output;

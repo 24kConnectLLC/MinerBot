@@ -1,6 +1,9 @@
 using DataAccessLibrary.Guilds;
+using DataAccessLibrary.Requests;
+using DataAccessLibrary.Requests.Models;
 using DataAccessLibrary.Status;
 using DataAccessLibrary.Status.Models;
+using MinerBot.Shared.Requests;
 
 namespace DataAccessLibrary.Tests
 {
@@ -114,6 +117,50 @@ namespace DataAccessLibrary.Tests
             await Assert.ThrowsAsync<InvalidOperationException>(() => guilds.FindChannels(Enumerable.Range(1, BotGuildReads.ChannelLookupLimit).Select(id => (ulong)id).ToList()));
             await Assert.ThrowsAsync<InvalidOperationException>(() => guilds.ListGuildEvents(1, 100));
             await Assert.ThrowsAsync<InvalidOperationException>(() => guilds.ListMemberDays(1, Day, Day.AddDays(100)));
+            Assert.Equal(0, database.Created);
+        }
+
+        // The bot's reads of the requests, and the dashboard's: a list within its limit, kinds on the request list, UTC times,
+        // and a key in the form the dashboard makes, since the column's collation ignores case
+        [Fact]
+        public async Task RequestReadsOutsideTheirLimitsAreRefused()
+        {
+            var requests = new BotRequestData(database, NoDatabase.Names);
+            var queue = new BotRequestQueue(database, NoDatabase.Names);
+
+            // A read model's times are UTC whatever they're given
+            var local = DateTime.SpecifyKind(Day, DateTimeKind.Local);
+            Assert.Equal(DateTimeKind.Utc, new BotRequestRow { created_at = local }.created_at.Kind);
+            Assert.Equal(DateTimeKind.Utc, new BotRequestRow { claimed_at = local }.claimed_at!.Value.Kind);
+            Assert.Equal(DateTimeKind.Utc, new BotSettingsRow { pause_changed_at = local }.pause_changed_at!.Value.Kind);
+            Assert.Equal(DateTimeKind.Utc, new ClaimCountRow { oldest = local }.oldest!.Value.Kind);
+
+            await RefusedAsync(() => requests.ListOpenIds(1, 0, restartOnly: false));
+            await RefusedAsync(() => requests.ListOpenIds(1, 101, restartOnly: true));
+            await RefusedAsync(() => requests.CountClaims([], Day));
+            await RefusedAsync(() => requests.CountClaims(null!, Day));
+            await RefusedAsync(() => requests.CountClaims(["posts.stop"], Day));
+            await RefusedAsync(() => requests.CountClaims([RequestKinds.PostsPause, "Posts.Resume"], Day));
+            await RefusedAsync(() => requests.CountClaims([RequestKinds.PostsPause], DateTime.Now));
+            await RefusedAsync(() => requests.ListUntoldRestarts(1, local));
+            await RefusedAsync(() => queue.GetRequestByKey("00112233445566778899AABBCCDDEEFF"));
+            await RefusedAsync(() => queue.GetRequestByKey("00112233445566778899aabbccddeef"));
+            await RefusedAsync(() => queue.GetRequestByKey("00112233445566778899aabbccddeef "));
+            await RefusedAsync(() => queue.GetRequestByKey(null!));
+        }
+
+        // Each limit itself passes
+        [Fact]
+        public async Task RequestReadsAtTheirLimitsPass()
+        {
+            var names = new DatabaseNames(new Dictionary<DBConnectionName, string>());
+            var requests = new BotRequestData(database, names);
+            var queue = new BotRequestQueue(database, names);
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() => requests.ListOpenIds(1, 100, restartOnly: false));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => requests.ListOpenIds(1, 1, restartOnly: true));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => requests.CountClaims(RequestKinds.All.Select(kind => kind.Word).ToList(), Day, 1));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => queue.GetRequestByKey("00112233445566778899aabbccddeeff"));
             Assert.Equal(0, database.Created);
         }
     }

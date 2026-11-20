@@ -9,11 +9,13 @@ using DataAccessLibrary.Discord;
 using DataAccessLibrary.Guilds;
 using DataAccessLibrary.Guilds.Models;
 using DataAccessLibrary.Health;
+using DataAccessLibrary.Requests;
 using DataAccessLibrary.Status;
 using DataAccessLibrary.Status.Models;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using MinerBot.Shared.Requests;
 using MySql.Data.MySqlClient;
 
 namespace DataAccessLibrary.Tests
@@ -70,7 +72,9 @@ namespace DataAccessLibrary.Tests
                 .AddBotGuildAccess()
                 .AddBotStatusReads()
                 .AddBotGuildReads()
-                .AddGuildSettingsReads();
+                .AddGuildSettingsReads()
+                .AddBotRequestAccess()
+                .AddBotRequestQueue();
 
             if (factory != null)
                 services.AddSingleton(factory);
@@ -95,6 +99,13 @@ namespace DataAccessLibrary.Tests
             Assert.Equal("`site_db`", names.Of(DBConnectionName.Guild));
         }
 
+        // A request the bot would take as it stands, made at the time given
+        static RequestFields Request(DateTime now) => RequestFields.New(RequestFields.NewKey(), RequestKinds.Find(RequestKinds.CachesClear)!, 1000000000000000001,
+            "Test Admin", RequestRoles.Admin, null, null, null, now);
+
+        // A transaction that has no connection, for a call that must stop before its first statement
+        static DataTransaction NoTransaction() => new(null!, null!, 1, CancellationToken.None);
+
         // The bot runs without BotConnection, so only a call that needs MinerBot's database may fail, and with a clear reason
         [Fact]
         public async Task MissingBotConnectionFailsOnlyWhenUsed()
@@ -114,6 +125,8 @@ namespace DataAccessLibrary.Tests
             var guilds = provider.GetRequiredService<IBotGuildData>();
             var statusReads = provider.GetRequiredService<IBotStatusReads>();
             var guildReads = provider.GetRequiredService<IBotGuildReads>();
+            var requests = provider.GetRequiredService<IBotRequestData>();
+            var queue = provider.GetRequiredService<IBotRequestQueue>();
             provider.GetRequiredService<IGuildSettingsReads>();
             Assert.IsType<DatabaseHealthData>(provider.GetRequiredService<IDatabaseHealthData>());
 
@@ -168,7 +181,26 @@ namespace DataAccessLibrary.Tests
                 () => sessions.GetSession(new string('k', 43), DateTime.UtcNow),
                 () => sessions.CreateSession(new string('k', 43), new DashboardSession { user_name = "Test User", ticket = [1] }),
                 () => sessions.DeleteOldestSessions(1, 5),
-                () => sessions.RunInTransaction(_ => Task.FromResult(0))
+                () => sessions.RunInTransaction(_ => Task.FromResult(0)),
+                () => requests.ListOpenIds(1, 20, restartOnly: false),
+                () => requests.GetRequest(1),
+                () => requests.Decide(1, 1, RequestStates.Refused, "Refused", now),
+                () => requests.Claim(1, 1, now),
+                () => requests.Finish(1, 1, RequestStates.Done, "Done", null, now),
+                () => requests.SetDm(1, RequestDmStates.Sent),
+                () => requests.SweepOtherRuns(1, now, "Unknown", now),
+                () => requests.CountClaims([RequestKinds.PostsPause, RequestKinds.PostsResume], now),
+                () => requests.ListUntoldRestarts(1, now),
+                () => requests.GetSettings(),
+                () => requests.SavePause(true, "Testing", now, 1, 1, now),
+                () => requests.SaveStatus(null, now, 1, 1, now),
+                () => retention.DeleteRequests(now, 1),
+                () => queue.GetRequest(1),
+                () => queue.GetRequestByKey(new string('a', 32)),
+                () => queue.GetSettings(),
+                () => queue.RunInTransaction(_ => Task.FromResult(0)),
+                // A request that passes every check gets as far as its SQL, which names the database
+                () => queue.AddRequest(Request(now), new byte[RequestSigning.SignatureLength], NoTransaction())
             };
 
             foreach (var call in calls)
@@ -272,11 +304,13 @@ namespace DataAccessLibrary.Tests
                 new BotGuildData(factory, names),
                 new BotStatusReads(factory, names),
                 new BotGuildReads(factory, names),
-                new GuildSettingsReads(factory)
+                new GuildSettingsReads(factory),
+                new BotRequestData(factory, names),
+                new BotRequestQueue(factory, names)
             }, repository => Assert.Equal("utf8mb4", CharacterSet(repository, factory)));
 
             var configured = new MySqlConnectionStringBuilder(Site + setting).CharacterSet;
-            Assert.Equal(configured, CharacterSet(new ArmorData(factory, cache), factory));
+            Assert.Equal(configured, CharacterSet(new ArmorData(factory, cache, new CacheReset()), factory));
             Assert.Equal(configured, CharacterSet(new GuildData(factory), factory));
         }
 
