@@ -26,10 +26,21 @@ namespace MinerBot.Dashboard.Tests
     {
         static CancellationToken Token => TestContext.Current.CancellationToken;
 
+        // The page an action leads to, with the action's word. An approval and a take-down ask the bot to clear its caches
+        // once the review has committed, and lead to that request's box; a move back to pending does when the armor was
+        // approved; a rejection never does.
         static void Redirected(HttpResponseMessage response, long id, string done)
         {
             Assert.True(response.StatusCode == HttpStatusCode.Redirect, $"The action answered {response.StatusCode}");
-            Assert.Equal($"/admin/armor/{id}?done={done}", SignInSteps.PathOf(response.Headers.Location));
+
+            var clear = done switch
+            {
+                "approved" or "taken-down" => "&request=[0-9]+#result",
+                "pending" => "(&request=[0-9]+#result)?",
+                _ => ""
+            };
+
+            Assert.Matches($"^/admin/armor/{id}\\?done={done}{clear}$", SignInSteps.PathOf(response.Headers.Location));
         }
 
         static async Task Refused(HttpResponseMessage response, HttpStatusCode status, string message)
@@ -422,7 +433,7 @@ namespace MinerBot.Dashboard.Tests
 
             var response = await CraftedAsync(admin, action, page.Token, ("expected", page.Expected), ("version", page.Version));
             Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
-            Assert.Equal("/admin/armor/53?done=approved&list=pending&q=frost", SignInSteps.PathOf(response.Headers.Location));
+            Assert.Matches("^/admin/armor/53\\?done=approved&request=[0-9]+&list=pending&q=frost#result$", SignInSteps.PathOf(response.Headers.Location));
 
             var after = await admin.Client.GetStringAsync(SignInSteps.PathOf(response.Headers.Location), Token);
             Assert.Contains(ArmorWords.Approved, WebUtility.HtmlDecode(after));

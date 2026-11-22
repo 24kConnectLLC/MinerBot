@@ -17,6 +17,10 @@ namespace MinerBot.Dashboard.Audit
         // A sign-in that was refused, and the sessions ended for someone taken off the lists
         public const string Refused = "auth.refused";
 
+        // A session the Owner ended on the Sessions page, and every other session at once
+        public const string Ended = "auth.ended";
+        public const string EndedOthers = "auth.ended_others";
+
         public const string ArmorApprove = "armor.approve";
         public const string ArmorReject = "armor.reject";
         public const string ArmorTakeDown = "armor.takedown";
@@ -40,6 +44,8 @@ namespace MinerBot.Dashboard.Audit
             new(SignIn, "Signed in"),
             new(SignOut, "Signed out"),
             new(Refused, "Refused or ended a session"),
+            new(Ended, "Ended a session"),
+            new(EndedOthers, "Ended every other session"),
             new(ArmorApprove, "Approved armor"),
             new(ArmorReject, "Rejected armor"),
             new(ArmorTakeDown, "Took armor down"),
@@ -89,8 +95,12 @@ namespace MinerBot.Dashboard.Audit
 
         public static string TargetLabel(string? target) => Target(target)?.Label ?? target ?? "";
 
-        public static string OutcomeLabel(string outcome) => outcome switch
+        // A request's row records the asking, not what the bot then did, which its page shows: it was sent, or the commit
+        // wasn't confirmed, so it may not have been
+        public static string OutcomeLabel(string outcome, string? target = null) => outcome switch
         {
+            AuditOutcome.Ok when target == RequestTarget => "Sent to the bot",
+            AuditOutcome.Unknown when target == RequestTarget => "Not sure it was sent",
             AuditOutcome.Ok => "Done",
             AuditOutcome.Refused => "Refused",
             AuditOutcome.Failed => "Failed",

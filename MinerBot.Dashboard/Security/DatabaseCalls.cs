@@ -1,4 +1,6 @@
 using System.Data.Common;
+using System.Globalization;
+using MySql.Data.MySqlClient;
 
 namespace MinerBot.Dashboard.Security
 {
@@ -19,7 +21,10 @@ namespace MinerBot.Dashboard.Security
             }
             catch (Exception e) when (e is DbException or TimeoutException)
             {
-                logger.LogWarning("A database call failed with {Type}, SQL state {State}", e.GetType().Name, (e as DbException)?.SqlState ?? "none");
+                // MariaDB's error number, never the message: MySql.Data leaves the SQL state empty, so the number is what
+                // tells a right the login lacks, 1142 or 1143, from a database that's down
+                logger.LogWarning("A database call failed with {Type}, SQL state {State}, MariaDB error {Number}", e.GetType().Name, (e as DbException)?.SqlState ?? "none",
+                    e is MySqlException mariaDb ? mariaDb.Number.ToString(CultureInfo.InvariantCulture) : "none");
                 throw new DashboardUnavailableException();
             }
         }

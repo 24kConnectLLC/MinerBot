@@ -7,11 +7,20 @@
 @*
     Everything the submitter wrote goes through RevealedText, inside a bdi, and the title never holds it. The previews show
     it raw, as Discord would, but isolated the same way. The rules and the forms come last, after the previews and the
-    history, so a reviewer reaches the buttons having passed everything, and the warnings' ticks stay next to Approve.
+    history, so a reviewer reaches the buttons having passed everything, and the warnings' ticks stay next to Approve. What
+    follows on the bot's side comes first, under the notice: the box of the request the redirect names, which refreshes
+    itself through refresh.js until it's final, and Announce now for approved armor the bot hasn't seen yet, or what stands
+    in its place, such as why the bot won't post it once it has started again since its last notification run.
 *@
 @{
     var id = Model.Id.ToString(CultureInfo.InvariantCulture);
     ViewData["Title"] = Model.Unsure ? "Not sure it was saved" : "Armor " + id;
+}
+@section Scripts {
+    @if (Model.Result is { View.Final: false })
+    {
+        <script src="~/js/refresh.js" asp-append-version="true" defer></script>
+    }
 }
 @if (Model.Unsure || Model.Armor == null || Model.Check == null)
 {
@@ -32,7 +41,66 @@ else
     {
         <div class="notice @(Model.NoticeIsProblem ? "notice-problem" : "notice-done")" role="@(Model.NoticeIsProblem ? "alert" : "status")">
             <p>@Model.Notice</p>
+            @if (Model.FollowUp != null)
+            {
+                <p>@Model.FollowUp</p>
+            }
         </div>
+    }
+
+    @if (Model.Result != null)
+    {
+        <partial name="_RequestSection" model="Model.Result" />
+    }
+
+    @if (Model.Announce is { } announce)
+    {
+        <section aria-labelledby="announce">
+            <h2 id="announce">Announce now</h2>
+            @if (announce.State == AnnounceState.Offered)
+            {
+                <p id="announce-help" class="muted">@ArmorWords.AnnounceHelp</p>
+                @if (Model.AnnounceAvailability is { Waiting: { } waiting } waits)
+                {
+                    var number = waiting.ToString(CultureInfo.InvariantCulture);
+                    <p>@waits.Words <a href="@("/admin/requests/" + number)">request @number</a>.</p>
+                }
+                else if (Model.AnnounceAvailability is { } availability)
+                {
+                    <p>@availability.Words</p>
+                }
+                @if (Model.AnnounceProblem != null)
+                {
+                    <div class="notice notice-problem">
+                        <p>@Model.AnnounceProblem @if (Model.AnnounceRequest is { } named) {<a href="@("/admin/requests/" + named.ToString(CultureInfo.InvariantCulture))">That request</a>}</p>
+                    </div>
+                }
+                <form method="post" asp-page-handler="Announce" asp-route-id="@id" asp-route-list="@Model.FromTab?.Word" asp-route-q="@Model.FromSearch" class="action">
+                    <input type="hidden" name="formkey" value="@Model.AnnounceKey" />
+                    <button type="submit" class="button" aria-describedby="announce-help">Announce now</button>
+                </form>
+            }
+            else if (announce.State == AnnounceState.Paused)
+            {
+                <p>@ArmorWords.AnnouncePaused</p>
+            }
+            else if (announce.State == AnnounceState.Off)
+            {
+                <p>@ArmorWords.AnnounceOff</p>
+            }
+            else if (announce.State == AnnounceState.Restarted)
+            {
+                <p>@ArmorWords.AnnounceRestarted(MinerBot.Dashboard.Status.TimeWords.Utc(announce.StartedAt!.Value))</p>
+            }
+            else if (announce.State == AnnounceState.Stopped)
+            {
+                <p>@ArmorWords.AnnounceStopped</p>
+            }
+            else
+            {
+                <p>@ArmorWords.AnnounceRunning(MinerBot.Dashboard.Requests.RequestWords.When(announce.RunningSince))</p>
+            }
+        </section>
     }
 
     <section aria-labelledby="submission">

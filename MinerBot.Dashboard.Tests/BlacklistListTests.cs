@@ -109,8 +109,8 @@ namespace MinerBot.Dashboard.Tests
             }, WebUtility.HtmlDecode(html));
         }
 
-        // A custom profile link can only be looked for in names, and the page says so above the results, and where to get
-        // the account's number. No other search says it.
+        // A custom profile link can only be looked for in names, and the page says so above the results, and that Add to the
+        // blacklist looks one up. No other search says it.
         [Fact]
         public async Task CustomLinkSearchSaysWhereToGetTheNumber()
         {
@@ -124,12 +124,13 @@ namespace MinerBot.Dashboard.Tests
 
             Assert.Contains("<div class=\"notice\" role=\"status\">", html);
             Assert.Contains(BlacklistWords.CustomLinkSearch, text);
-            Assert.Contains("MinerBot's /more steam_id command in Discord gives the SteamID64 of a custom link written as https://steamcommunity.com/id/ and the name.", text);
+            Assert.Contains("Custom profile links can't be searched for directly, so this searched names only. Add to the blacklist looks a custom link up first, and says "
+                + "if its account is on the blacklist already.", text);
             Assert.True(text.IndexOf(BlacklistWords.CustomLinkSearch, StringComparison.Ordinal) < text.IndexOf("No entry matches that search.", StringComparison.Ordinal));
             PageTests.AssertAccessible("a search for a custom link", html);
 
             foreach (var search in new[] { "", "Test", "[U:1:12345]", "https://steamcommunity.com/profiles/" + SteamId64, "not an id" })
-                Assert.DoesNotContain(BlacklistWords.CustomLinkLookup, WebUtility.HtmlDecode(await admin.Client.GetStringAsync("/admin/blacklist?q=" + Uri.EscapeDataString(search), Token)));
+                Assert.DoesNotContain(BlacklistWords.CustomLinkSearch, WebUtility.HtmlDecode(await admin.Client.GetStringAsync("/admin/blacklist?q=" + Uri.EscapeDataString(search), Token)));
         }
 
         // The box stops at 100 characters, so only an address someone typed is longer

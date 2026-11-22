@@ -1,0 +1,28 @@
+@model MinerBot.Dashboard.Pages.Admin.ControlView
+@using MinerBot.Dashboard.Requests
+@*
+    A control's form when all it takes is a press, or a press and its word typed: posted to the controls page's handler
+    through asp-page-handler, so the tag helper adds the antiforgery token, with the form's own key. The word's box starts
+    empty on every render, and the server compares what's typed, whatever the box allowed. A form drawn alone, after a save
+    the database didn't confirm, also has its text box, with what was typed into it.
+*@
+<form method="post" asp-page-handler="@Model.Handler">
+    <input type="hidden" name="formkey" value="@Model.FormKey" />
+    @if (Model.TextBox is { } text)
+    {
+        <div class="field">
+            <label for="@text.Id">@text.Label</label>
+            <input type="text" id="@text.Id" name="@text.Name" value="@text.Value" maxlength="@text.Limit" required aria-describedby="@text.HintId" />
+            <p id="@text.HintId" class="muted">@text.Hint</p>
+        </div>
+    }
+    @if (Model.Word != null)
+    {
+        var box = "confirm-" + Model.Handler;
+        <div class="field">
+            <label for="@box">@ControlWords.TypeToConfirm(Model.Word)</label>
+            <input type="text" id="@box" name="confirm" autocomplete="off" spellcheck="false" required />
+        </div>
+    }
+    <button type="submit" class="button" aria-describedby="@Model.HelpId">@Model.Label</button>
+</form>

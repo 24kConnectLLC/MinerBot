@@ -1,0 +1,42 @@
+@model MinerBot.Dashboard.Pages.Admin.ControlView
+@using System.Globalization
+@using MinerBot.Dashboard.Armor
+@using MinerBot.Dashboard.Requests
+@*
+    A control on the controls page, above its form: its label, what it does, what the bot last recorded of it, such as a
+    job's last run, the bot's limit, its last use, and, for whoever may use it, whether one more would be sent now. A
+    refusal of the last try from it is repeated here, beside the alert at the top of the page. While a control that needs a
+    fresh sign-in hasn't one, the way to sign in again stands in place of its form, with what was typed into it, read-only,
+    to copy: a link, never a form, since browsers apply form-action to the redirect after a form, and Discord isn't 'self'.
+*@
+<h3>@Model.Label</h3>
+<p id="@Model.HelpId" class="control-help">@Model.Help</p>
+@if (Model.Note != null)
+{
+    <p>@Model.Note</p>
+}
+<p class="muted">@Model.Limit.</p>
+<partial name="_RequestLine" model="Model.Last" />
+@if (Model.Availability is { Waiting: { } waiting } waits)
+{
+    var number = waiting.ToString(CultureInfo.InvariantCulture);
+    <p>@waits.Words <a href="@("/admin/requests/" + number)">request @number</a>.</p>
+}
+else if (Model.Availability is { } availability)
+{
+    <p>@availability.Words</p>
+}
+@if (Model.Problem != null)
+{
+    <div class="notice notice-problem">
+        <p>@Model.Problem</p>
+    </div>
+}
+@if (Model.SignInAgain != null)
+{
+    <p>@Model.FreshLine <a href="@Model.SignInAgain">@ControlWords.SignInAgain</a></p>
+    @if (Model.Typed != null)
+    {
+        <p>@ControlWords.WhatYouTyped @RevealedText.Html(Model.Typed)</p>
+    }
+}

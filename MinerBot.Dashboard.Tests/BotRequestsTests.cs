@@ -262,10 +262,54 @@ namespace MinerBot.Dashboard.Tests
             Assert.Equal(1, await CountAsync(db, MariaDbFixture.RequestTable));
             Assert.Equal(1, await CountAsync(db, MariaDbFixture.AuditTable));
 
-            await Assert.ThrowsAsync<InvalidOperationException>(() => requests.SendAsync(order, Owner with { Id = AdminId }, null, null));
-            await Assert.ThrowsAsync<InvalidOperationException>(() => requests.SendAsync(new RequestOrder(RequestKinds.CachesClear, FormKey: formKey), Owner, null, null));
+            // Named for what it is, and still the InvalidOperationException it was before it had a name
+            var otherPerson = await Assert.ThrowsAsync<FormKeyTakenException>(() => requests.SendAsync(order, Owner with { Id = AdminId }, null, null));
+            await Assert.ThrowsAsync<FormKeyTakenException>(() => requests.SendAsync(new RequestOrder(RequestKinds.CachesClear, FormKey: formKey), Owner, null, null));
+            Assert.IsAssignableFrom<InvalidOperationException>(otherPerson);
             Assert.Equal(1, await CountAsync(db, MariaDbFixture.RequestTable));
             Assert.Equal(1, await CountAsync(db, MariaDbFixture.AuditTable));
+        }
+
+        // Prepare works a request out and signs it, writing nothing, so it can come before a transaction that may run again;
+        // WriteAsync writes it and its audit row in the caller's own transaction, so they commit with the caller's other work
+        // or not at all, as a sign-in's message to the owner does
+        [Fact]
+        public async Task PrepareWritesNothingAndWriteAsyncJoinsTheCallersTransaction()
+        {
+            var db = await ReadyAsync();
+            var clock = new FakeClock();
+            clock.Advance(TimeSpan.FromTicks(1_234_567));
+            var requests = Requests(db, clock);
+            var queue = db.RequestQueue();
+
+            var prepared = requests.Prepare(new RequestOrder(RequestKinds.PostsPause, Argument: "Testing the queue"), Owner with { Name = "Test" + (char)7 + "Owner" });
+
+            Assert.Equal((0L, 0L), (await CountAsync(db, MariaDbFixture.RequestTable), await CountAsync(db, MariaDbFixture.AuditTable)));
+            Assert.Equal((RequestKinds.PostsPause, "Test Owner", false), (prepared.Kind.Word, prepared.Actor.Name, prepared.KeyFromForm));
+            Assert.Equal(RequestFields.ToMillisecond(clock.GetUtcNow().UtcDateTime), prepared.Fields.CreatedAt);
+            Assert.True(RequestSigning.Verify(Convert.FromHexString(KeyText), prepared.Fields, prepared.Signature));
+            Assert.True(requests.Prepare(new RequestOrder(RequestKinds.CachesClear, FormKey: RequestFields.NewKey()), Owner).KeyFromForm);
+
+            // The caller's other work fails after the write: the request and its audit row roll back with it
+            await Assert.ThrowsAsync<InvalidOperationException>(() => queue.RunInTransaction<ulong>(async transaction =>
+            {
+                await requests.WriteAsync(prepared, transaction, "203.0.113.72", "made-up-trace-3");
+                throw new InvalidOperationException("The caller's other work failed");
+            }));
+
+            Assert.Equal((0L, 0L), (await CountAsync(db, MariaDbFixture.RequestTable), await CountAsync(db, MariaDbFixture.AuditTable)));
+
+            // It commits: both are there, the request as it was signed
+            var id = await queue.RunInTransaction(transaction => requests.WriteAsync(prepared, transaction, "203.0.113.72", "made-up-trace-3"));
+            var row = await db.Requests().GetRequest(id);
+
+            Assert.NotNull(row);
+            Assert.Equal((prepared.Fields.RequestKey, "Testing the queue", "Test Owner"), (row.request_key, row.argument!, row.actor_name));
+            Assert.True(RequestSigning.Verify(Convert.FromHexString(KeyText), row.Fields(), row.signature));
+
+            var audit = Assert.Single(await db.AuditAsync());
+            Assert.Equal((RequestKinds.PostsPause, id.ToString(CultureInfo.InvariantCulture), "203.0.113.72", "made-up-trace-3", "Test Owner"),
+                (audit.action, audit.target_id!, audit.ip!, audit.request_id!, audit.actor_name!));
         }
 
         static TimeoutException Dropped() => new("The database didn't answer within 15 seconds");

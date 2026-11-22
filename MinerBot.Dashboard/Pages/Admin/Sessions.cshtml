@@ -1,0 +1,146 @@
+@page "/Admin/Sessions"
+@model SessionsModel
+@using MinerBot.Dashboard.Armor
+@using MinerBot.Dashboard.Requests
+@using MinerBot.Dashboard.Security
+@using MinerBot.Dashboard.Status
+@*
+    The Owner's page of sessions and the dashboard's checks of itself. A session's name and browser are what its visitor's
+    Discord and browser sent, so they go through RevealedText, and its address is shown here and in the audit rows, which
+    only the Owner sees. A session is named by its key's hash, which signs nobody in; never by its key or ticket, which no
+    read here gives. The forms post to this page through asp-page-handler, never an action attribute, so the form tag helper
+    adds their token. No script: the checks run when the page is drawn, and a reload runs them again.
+*@
+@{
+    ViewData["Title"] = SessionWords.Title;
+    ViewData["Wide"] = true;
+}
+<h1>@SessionWords.Title</h1>
+
+@if (Model.Problem != null)
+{
+    <div class="notice notice-problem" role="alert">
+        <p>@Model.Problem</p>
+        @if (!Model.Fresh)
+        {
+            <p><a href="@Model.SignInAgainLink">@ControlWords.SignInAgain</a></p>
+        }
+    </div>
+}
+else if (Model.Done != null)
+{
+    <div class="notice notice-done" role="status">
+        <p>@Model.Done</p>
+    </div>
+}
+
+<section aria-labelledby="signed-in">
+    <h2 id="signed-in">Signed in now</h2>
+    <p>@SessionWords.Intro</p>
+    @if (Model.Fresh && Model.SignedInAt is { } at && Model.FreshUntil is { } until)
+    {
+        <p>@SessionWords.Fresh(at, until)</p>
+    }
+    else
+    {
+        <p>@SessionWords.NeedsFresh(Model.SignedInAt) <a href="@Model.SignInAgainLink">@ControlWords.SignInAgain</a></p>
+        <p class="muted">@Model.SignInAgainNote</p>
+    }
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th scope="col">Who</th>
+                    <th scope="col">Role now</th>
+                    <th scope="col">Signed in</th>
+                    <th scope="col">Last used</th>
+                    <th scope="col">Ends</th>
+                    <th scope="col">From</th>
+                    <th scope="col">Browser</th>
+                    <th scope="col">End</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var session in Model.Sessions)
+                {
+                    <tr>
+                        <th scope="row">
+                            <p class="cell-line">@RevealedText.Html(session.UserName)</p>
+                            <p class="cell-line muted"><a href="/admin/audit?person=@session.UserIdText" class="address">@session.UserIdText</a></p>
+                        </th>
+                        <td>@session.Role</td>
+                        <td>
+                            <p class="cell-line audit-when">@TimeWords.Utc(session.SignedIn)</p>
+                            @if (session.Fresh)
+                            {
+                                <p class="cell-line muted">Within the last 15 minutes</p>
+                            }
+                        </td>
+                        <td class="audit-when">About @TimeWords.Utc(session.LastUsed)</td>
+                        <td class="audit-when">@TimeWords.Utc(session.Ends)</td>
+                        <td class="address">@(session.Ip ?? "Not recorded")</td>
+                        <td>@if (string.IsNullOrEmpty(session.Browser)) {<text>Not sent</text>} else {@RevealedText.Html(session.Browser)}</td>
+                        <td>
+                            @if (session.IsCurrent)
+                            {
+                                @SessionWords.ThisSession
+                            }
+                            else
+                            {
+                                <form method="post" asp-page-handler="@SessionWords.End">
+                                    <input type="hidden" name="session" value="@session.Hash" />
+                                    <button type="submit" class="button button-quiet" aria-describedby="end-help">End</button>
+                                </form>
+                            }
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+    <form method="post" asp-page-handler="@SessionWords.EndOthersHandler" class="action">
+        <button type="submit" class="button" aria-describedby="end-help">@SessionWords.EndOthers</button>
+        <p id="end-help" class="muted">@SessionWords.EndHelp</p>
+    </form>
+</section>
+
+<section aria-labelledby="changes">
+    <h2 id="changes">Changes to sessions</h2>
+    @if (Model.Changes.Rows.Count == 0)
+    {
+        <p>None.</p>
+    }
+    else
+    {
+        <p>@TimeWords.Count(Model.ChangeTotal, "change"), newest first: sign-ins, sign-outs, refusals and endings.</p>
+        <partial name="_AuditRows" model="Model.Changes" />
+    }
+    <p><a href="/admin/audit?type=session">All of them in the audit log</a></p>
+</section>
+
+<section aria-labelledby="checks">
+    <h2 id="checks">Self-checks</h2>
+    <p>@SessionWords.Checked(Model.Now)</p>
+    <div class="table-wrap" tabindex="0" role="group" aria-labelledby="checks">
+        <table>
+            <thead>
+                <tr>
+                    <th scope="col">Check</th>
+                    <th scope="col">Result</th>
+                    <th scope="col">Detail</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var check in Model.Checks)
+                {
+                    <tr>
+                        <th scope="row">@check.Name</th>
+                        <td><span class="marker @check.Marker">@check.Label</span></td>
+                        <td>@check.Detail</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+</section>
+<p class="muted">Times are in UTC.</p>

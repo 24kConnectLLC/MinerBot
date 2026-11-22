@@ -36,10 +36,15 @@
                 <nav aria-label="Dashboard" class="site-nav">
                     <a href="/admin">Overview</a>
                     <a href="/admin/bot">Bot</a>
+                    <a href="/admin/bot/controls">Controls</a>
                     <a href="/admin/servers">Servers</a>
                     <a href="/admin/armor">Armor</a>
                     <a href="/admin/blacklist">Blacklist</a>
                     <a href="/admin/audit">Audit log</a>
+                    @if (role == DashboardRole.Owner)
+                    {
+                        <a href="/admin/sessions">Sessions</a>
+                    }
                 </nav>
             }
             else

@@ -195,6 +195,38 @@ namespace DataAccessLibrary.Tests
             Assert.Null(await reads.LatestEvent("bot.started"));
         }
 
+        // The newest event of a kind since a time whose detail holds one of the phrases, as they're written: a later event
+        // without them, an earlier one, another kind's, and one that holds a phrase only as LIKE's wildcards would read it are
+        // passed over, a tie broken by the order written. Fails if the search ignores the phrases, the time or the kind, or
+        // reads a phrase as a pattern.
+        [Fact]
+        public async Task LatestEventWithAPhrase()
+        {
+            var db = await StartAsync();
+
+            await db.Status().AddEvents(
+            [
+                Event(1, Noon, "request.rejected", EventLevel.Warning, "request 1 refused: its signature didn't match"),
+                Event(2, Noon.AddMinutes(1), "request.rejected", EventLevel.Warning, "request 2 refused: it isn't in the form the dashboard writes"),
+                Event(3, Noon.AddMinutes(1), "request.rejected", EventLevel.Warning, "request 3 refused: its signature didn't match"),
+                Event(4, Noon.AddMinutes(2), "request.rejected", EventLevel.Warning, "request 4 refused: its kind isn't on the bot's list"),
+                Event(5, Noon.AddMinutes(3), "requests.off", EventLevel.Warning, "its signature didn't match"),
+                Event(6, Noon.AddMinutes(4), "request.rejected", EventLevel.Warning, "request 6 refused: 100 of them")
+            ]);
+            var reads = db.StatusReads();
+            string[] unsigned = ["the form the dashboard writes", "signature didn't match"];
+
+            var latest = await reads.LatestEventWith("request.rejected", unsigned, Noon);
+            Assert.Equal("request 3 refused: its signature didn't match", latest?.detail);
+            Assert.Equal(DateTimeKind.Utc, latest!.at.Kind);
+            Assert.Equal("request 2 refused: it isn't in the form the dashboard writes", (await reads.LatestEventWith("request.rejected", ["the form the dashboard writes"], Noon))?.detail);
+            Assert.Null(await reads.LatestEventWith("request.rejected", unsigned, Noon.AddMinutes(2)));
+            Assert.Null(await reads.LatestEventWith("bot.started", unsigned, Noon));
+            Assert.Null(await reads.LatestEventWith("request.rejected", ["100%"], Noon));
+            Assert.Null(await reads.LatestEventWith("request.rejected", ["signature_didn't"], Noon));
+            Assert.Equal("request 6 refused: 100 of them", (await reads.LatestEventWith("request.rejected", ["100 of"], Noon))?.detail);
+        }
+
         // From the first time on, and of those from the second, only for kinds that have any
         [Fact]
         public async Task EventsAreCountedSinceEachTime()

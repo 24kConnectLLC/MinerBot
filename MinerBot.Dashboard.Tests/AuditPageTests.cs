@@ -89,8 +89,54 @@ namespace MinerBot.Dashboard.Tests
             var text = WebUtility.HtmlDecode(await admin.Client.GetStringAsync("/admin/audit", Token));
 
             Assert.Contains("Every change made on the dashboard, every sign-in and sign-out, and the changes and sign-ins it refused, newest first.", text);
-            Assert.Contains("A form sent back to correct a field, a form that had expired or was incomplete, an action on armor that had since been removed, a cancelled or failed sign-in, and a request turned away before it reached its page, such as one from another site or one over the rate limit, aren't recorded, but the request that ends the sessions of someone taken off the lists is.", text);
+            Assert.Contains("A form sent back to correct a field, a typed confirmation included, a request to the bot held back by the bot's own limit, a form that had expired or was incomplete, an action on armor that had since been removed, a cancelled or failed sign-in, and a request turned away before it reached its page, such as one from another site or one over the rate limit, aren't recorded, but the request that ends the sessions of someone taken off the lists is. A request to the bot reads Sent to the bot: its page shows what the bot did with it for the 90 days MinerBot's database keeps requests.", text);
             Assert.DoesNotContain("every refusal", text);
+        }
+
+        // A request's row records the asking, so it reads Sent to the bot, never Done, whatever the bot then did, which its
+        // page shows: "Bot request N" links there, made from the number the ID parsed as. A refusal before a request was
+        // written has no ID and no link, and an ID that isn't a request's number is text. Fails if a request's row reads
+        // Done, or links from the stored text.
+        [Fact]
+        public async Task RequestRowsSayTheyWereSentAndLinkToTheirPage()
+        {
+            var db = await fixture.ReadyAsync();
+            await AddAsync(db,
+                Row("Row A", Noon, "caches.clear", targetType: "request", targetId: "41"),
+                Row("Row B", Noon.AddMinutes(1), "bot.restart", targetType: "request", targetId: "42", outcome: AuditOutcome.Unknown),
+                Row("Row C", Noon.AddMinutes(2), "bot.restart", targetType: "request", targetId: null, outcome: AuditOutcome.Refused),
+                Row("Row D", Noon.AddMinutes(3), "job.colors", targetType: "request", targetId: "43x"),
+                Row("Row E", Noon.AddMinutes(4), "armor.approve", targetType: "armor", targetId: "31"));
+            await using var factory = new DashboardFactory(db);
+            var admin = await ArmorSteps.ReviewerAsync(factory, "198.51.100.95");
+
+            var html = await admin.Client.GetStringAsync("/admin/audit?from=2026-11-05&to=2026-11-05", Token);
+            var rows = Regex.Matches(html, "<tr>(.*?)</tr>", RegexOptions.Singleline).Select(row => Regex.Replace(WebUtility.HtmlDecode(row.Groups[1].Value), "\\s+", " ")).ToList();
+            string RowOf(string detail) => Assert.Single(rows, row => row.Contains(detail, StringComparison.Ordinal));
+
+            foreach (var (detail, outcome, target) in new[]
+            {
+                ("Row A", "Sent to the bot", "<a href=\"/admin/requests/41\">Bot request 41</a>"),
+                ("Row B", "Not sure it was sent", "<a href=\"/admin/requests/42\">Bot request 42</a>"),
+                ("Row C", "Refused", "<p> Bot request </p>"),
+                ("Row D", "Sent to the bot", "<p> Bot request 43x </p>"),
+                ("Row E", "Done", "<a href=\"/admin/armor/31\">Armor 31</a>")
+            })
+            {
+                var row = RowOf(detail);
+                Assert.Contains($"<p>{outcome}</p>", row);
+                Assert.Contains(target, row);
+            }
+
+            Assert.DoesNotContain("Done", RowOf("Row A"));
+
+            var links = Regex.Matches(html, "href=\"(/admin/requests/[^\"]*)\"").Select(match => match.Groups[1].Value).Order(StringComparer.Ordinal);
+            Assert.Equal(["/admin/requests/41", "/admin/requests/42"], links);
+
+            // The rows about one request say so, with a link to its page
+            Assert.Contains("Only the rows about <a href=\"/admin/requests/41\">Bot request 41</a>",
+                Regex.Replace(await admin.Client.GetStringAsync("/admin/audit?type=request&id=41", Token), @"\s+", " "));
+            PageTests.AssertAccessible("an audit log with requests to the bot", html);
         }
 
         [Fact]

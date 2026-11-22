@@ -1,0 +1,26 @@
+@model RequestView
+@using MinerBot.Dashboard.Armor
+@using MinerBot.Dashboard.Requests
+@*
+    A request's result box, which a page draws where its form's redirect leads, its own page draws, and the request page's
+    Result handler sends again for refresh.js. No heading, since it sits in the page's own section, and no live region: it's
+    drawn again every few seconds, often unchanged, as the status box is. The name is Discord's, which anyone can set, so it
+    goes through RevealedText; the rest is fixed words and the bot's own, encoded. Each line's sentences are joined here,
+    since Razor writes nothing between two text blocks.
+*@
+<div class="request-box">
+    <p>@Model.Label, request @Model.IdText, asked for by @RevealedText.Html(Model.AskedBy) (@Model.Role) at @Model.AskedAtClock.</p>
+    <p><span class="marker @Model.Marker">@Model.StageLabel</span> @Model.Says</p>
+    @if (Model.Then != null)
+    {
+        <p>@Model.Then</p>
+    }
+    @if (Model.Link != null)
+    {
+        <p><a href="@Model.Link">@Model.LinkText</a></p>
+    }
+    @if (Model.Dm != null)
+    {
+        <p class="muted">@Model.Dm</p>
+    }
+</div>

@@ -36,16 +36,27 @@ namespace MinerBot.Dashboard.Tests
             Assert.Superset(Public, routes);
             Assert.Contains("Admin", routes);
 
-            // The status, servers, armor, blacklist and audit log pages, spelt with the capital A that the check below needs
+            // The status, controls, servers, leave, armor, blacklist, audit log, request and Sessions pages, spelt with the
+            // capital A that the check below needs
             Assert.Contains("Admin/Bot", routes);
+            Assert.Contains("Admin/Bot/Controls", routes);
+            Assert.Contains("Admin/Requests/{id:long}", routes);
             Assert.Contains("Admin/Servers", routes);
             Assert.Contains("Admin/Servers/{id:long}", routes);
+            Assert.Contains("Admin/Servers/{id:long}/Leave", routes);
+            Assert.Contains("Admin/Sessions", routes);
             Assert.Contains("Admin/Armor", routes);
             Assert.Contains("Admin/Armor/{id:long}", routes);
             Assert.Contains("Admin/Blacklist", routes);
             Assert.Contains("Admin/Blacklist/Add", routes);
             Assert.Contains("Admin/Blacklist/{account:long}", routes);
             Assert.Contains("Admin/Audit", routes);
+
+            // The Owner's own pages, exactly: leaving a server and the Sessions page, whose policy refuses an Admin before
+            // any handler. Fails for one that loses it, or for another page that gains it unnoticed.
+            Assert.Equal(["Admin/Servers/{id:long}/Leave", "Admin/Sessions"],
+                endpoints.Where(endpoint => endpoint.Metadata.GetOrderedMetadata<IAuthorizeData>().Any(data => data.Policy == Policies.Owner))
+                    .Select(Route).Distinct().Order(StringComparer.Ordinal));
 
             foreach (var endpoint in endpoints)
             {

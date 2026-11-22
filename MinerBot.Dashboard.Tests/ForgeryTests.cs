@@ -1,6 +1,10 @@
 using System.Net;
+using DataAccessLibrary.Dashboard;
 using DataAccessLibrary.Tests.Database;
+using MinerBot.Dashboard.Pages.Admin;
+using MinerBot.Dashboard.Requests;
 using MinerBot.Dashboard.Tests.Support;
+using MinerBot.Shared.Requests;
 
 namespace MinerBot.Dashboard.Tests
 {
@@ -104,6 +108,48 @@ namespace MinerBot.Dashboard.Tests
             Assert.Contains("samesite=lax", attributes);
             Assert.Contains("path=/", attributes);
             Assert.DoesNotContain(attributes, attribute => attribute.StartsWith("domain", StringComparison.Ordinal));
+        }
+
+        // Every form that sends a request to the bot or ends a session, the controls page's, the armor page's Announce now, a
+        // server's test message and refresh, the leave page's, the blacklist's custom-link lookup and the Sessions page's,
+        // needs the form's token and the dashboard's own origin, as sign-out does, before anything is read or written. The
+        // same form sent properly works.
+        [Fact]
+        public async Task EveryNewFormNeedsItsTokenAndTheDashboardsOrigin()
+        {
+            var db = await fixture.ReadyBotAsync();
+            await db.AddArmorAsync(ArmorSteps.Submission(1, Shared.Armor.ArmorStatus.Approved));
+            await StatusSteps.ServersAsync(db);
+            await using var factory = new DashboardFactory(db);
+            var owner = factory.Visitor("203.0.113.81");
+            await SignInSteps.SignedInAsync(factory, owner, TestUsers.Owner);
+            var other = factory.Visitor("203.0.113.82");
+            await SignInSteps.SignedInAsync(factory, other, TestUsers.Admin);
+            var page = await RequestSteps.ControlsAsync(owner);
+            var before = (await db.AuditAsync()).Count;
+            var server = "/admin/servers/" + StatusSteps.ServerId;
+            var paths = ControlsModel.Handlers.Keys.Select(handler => "/admin/bot/controls?handler=" + handler)
+                .Concat(["/admin/armor/1?handler=Announce", server + "?handler=TestMessage", server + "?handler=Refresh", server + "/leave", "/admin/blacklist/add",
+                    "/admin/sessions?handler=End", "/admin/sessions?handler=EndOthers"]);
+
+            foreach (var path in paths)
+            {
+                KeyValuePair<string, string>[] fields = [new("formkey", RequestFields.NewKey()), new("confirm", "restart"), new("channel", "3001"),
+                    new("steamid", "https://steamcommunity.com/id/gabelogannewell"), new("session", Convert.ToHexStringLower(DashboardSessionData.HashOf(other.SessionKey!)))];
+
+                Assert.Equal(HttpStatusCode.BadRequest, (await SignInSteps.PostAsync(owner, path, null, origin: DashboardFactory.PublicOrigin, fields: fields)).StatusCode);
+                Assert.Equal(HttpStatusCode.Forbidden, (await SignInSteps.PostAsync(owner, path, page.Token, origin: "https://murderminershub.com", fields: fields)).StatusCode);
+                Assert.Equal(HttpStatusCode.Forbidden, (await SignInSteps.PostAsync(owner, path, page.Token, fetchSite: "same-site", fields: fields)).StatusCode);
+            }
+
+            Assert.Empty(await db.SentAsync());
+            Assert.Equal(before, (await db.AuditAsync()).Count);
+            Assert.Equal(2, (await db.SessionsAsync()).Count);
+            Assert.Equal(0, await db.EntryCountAsync());
+
+            var sent = await RequestSteps.PostControlAsync(owner, page, ControlWords.ClearCaches);
+            Assert.Equal(HttpStatusCode.Redirect, sent.StatusCode);
+            Assert.Single(await db.SentAsync());
         }
 
         // The forged-request page shows the plain 400 page, not a stack trace

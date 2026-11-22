@@ -3,15 +3,19 @@
 @using System.Globalization
 @using DataAccessLibrary.Guilds
 @using MinerBot.Dashboard.Armor
+@using MinerBot.Dashboard.Requests
 @using MinerBot.Dashboard.Servers
 @using MinerBot.Dashboard.Status
 @*
     Server, category and channel names are Discord's, which anyone in a server can set, so each goes through RevealedText,
-    inside a bdi, and the title never holds one. IDs are text. Channels hidden from MinerBot are counted, not listed, since
+    inside a bdi, and the title never holds one; a test message's options hold text alone, so a channel's name there has
+    its hidden characters written as their codes. IDs are text. Channels hidden from MinerBot are counted, not listed, since
     Discord sends each one with the same made-up name. Apart from the dashboard's changes, a table here holds no link, or
     only a setting's link to another server, so each one's wrapper takes the keyboard's focus itself, as a group named by
     its heading, and a keyboard can scroll one too wide for a phone: Safari, unlike Chrome and Firefox, doesn't make a
-    scrolling box focusable on its own.
+    scrolling box focusable on its own. The actions' forms post to this page through asp-page-handler, never an action
+    attribute, so the form tag helper adds their token, each with a key of its own; the box of the request a form sent
+    refreshes itself through refresh.js until it's final, and the page works without it.
 *@
 @{
     ViewData["Title"] = "Server " + Model.IdText;
@@ -19,8 +23,21 @@
     var server = Model.Server;
     var now = Model.Now;
 }
+@section Scripts {
+    @if (Model.Result is { View.Final: false })
+    {
+        <script src="~/js/refresh.js" asp-append-version="true" defer></script>
+    }
+}
 <p><a href="/admin/servers">Back to the servers</a></p>
 <h1>Server @Model.IdText</h1>
+
+@if (Model.Problem != null)
+{
+    <div class="notice notice-problem" role="alert">
+        <p>@Model.Problem @if (Model.ProblemRequest is { } named) {<a href="@("/admin/requests/" + named.ToString(CultureInfo.InvariantCulture))">That request</a>}</p>
+    </div>
+}
 
 @if (server == null)
 {
@@ -120,6 +137,79 @@ else
         }
     </section>
 }
+
+@if (Model.Result != null)
+{
+    <partial name="_RequestSection" model="Model.Result" />
+}
+
+<section aria-labelledby="actions">
+    <h2 id="actions">@ServerActions.Heading</h2>
+    @if (Model.Actions != ServerActionState.Offered)
+    {
+        <p>@ServerActions.Line(Model.Actions)</p>
+    }
+    else
+    {
+        var test = Model.Control(ServerActions.TestMessage);
+        var offered = Model.TestChannels.Where(channel => channel.Offered).ToList();
+        var refused = Model.TestChannels.Where(channel => !channel.Offered).ToList();
+
+        <div class="control">
+            <partial name="_Control" model="test" />
+            @if (Model.TestChannels.Count == 0)
+            {
+                <p>@ServerActions.NoChannels</p>
+            }
+            else if (offered.Count == 0)
+            {
+                <p>@ServerActions.NoneOffered</p>
+            }
+            else
+            {
+                <form method="post" asp-page-handler="@ServerActions.TestMessage" asp-route-id="@Model.IdText">
+                    <input type="hidden" name="formkey" value="@test.FormKey" />
+                    <div class="field">
+                        <label for="test-channel">@ServerActions.ChannelLabel</label>
+                        <select id="test-channel" name="channel">
+                            @foreach (var channel in offered)
+                            {
+                                <option value="@channel.IdText" selected="@(channel.Id == Model.PostedChannel)">@ServerActions.Label(channel)</option>
+                            }
+                        </select>
+                    </div>
+                    <button type="submit" class="button" aria-describedby="@test.HelpId">@test.Label</button>
+                </form>
+            }
+            @if (refused.Count > 0)
+            {
+                <ul>
+                    @foreach (var channel in refused)
+                    {
+                        <li>@ServerActions.KindsText(channel.Kinds): @if (channel.Channel is { } known && !ChannelGroups.IsHidden(known)) {<text>#</text>@RevealedText.Html(known.name)} else {<text>channel </text><span class="address">@channel.IdText</span>@(channel.Channel == null ? "" : ", hidden from MinerBot,")} can't take the test message: @channel.Why.</li>
+                    }
+                </ul>
+            }
+        </div>
+
+        var refresh = Model.Control(ServerActions.Refresh);
+        <div class="control">
+            <partial name="_Control" model="refresh" />
+            <form method="post" asp-page-handler="@ServerActions.Refresh" asp-route-id="@Model.IdText">
+                <input type="hidden" name="formkey" value="@refresh.FormKey" />
+                <button type="submit" class="button" aria-describedby="@refresh.HelpId">@refresh.Label</button>
+            </form>
+        </div>
+
+        @if (Model.IsOwner)
+        {
+            <div class="control">
+                <p><a href="@Model.LeaveLink">@ServerActions.LeaveLink&hellip;</a></p>
+                <partial name="_RequestLine" model="Model.LastLeave" />
+            </div>
+        }
+    }
+</section>
 
 <section aria-labelledby="settings">
     <h2 id="settings">Its channels for MinerBot's posts</h2>

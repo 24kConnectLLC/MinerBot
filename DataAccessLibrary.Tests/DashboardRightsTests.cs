@@ -22,21 +22,18 @@ using DataAccessLibrary.Tests.Database;
 using MinerBot.Shared.Armor;
 using MinerBot.Shared.Requests;
 using MySql.Data.MySqlClient;
+using static DataAccessLibrary.Tests.Database.DashboardLogin;
 
 namespace DataAccessLibrary.Tests
 {
     // deploy/dashboard-rights.sql, applied as root statement by statement, as deploy.sh applies it, to the web dashboard's
     // login: everything today's dashboard does works, and nothing else does. The login is made fresh for each test with a
     // password of its own, and dropped afterwards with every right it had, because the other database tests share these
-    // databases. A pull request that adds a right changes the list here on purpose.
+    // databases (DashboardLogin, which the dashboard's tests share). A pull request that adds a right changes
+    // DashboardRights' list on purpose, which the Sessions page also compares the login's own rights with.
     [Collection("Database")]
     public partial class DashboardRightsTests(MariaDbFixture fixture)
     {
-        const string Login = "minerbot-dashboard";
-
-        // % rather than the server's localhost and 127.0.0.1, because the tests reach MariaDB through a mapped port
-        const string Grantee = "'" + Login + "'@'%'";
-
         const string Site = MariaDbFixture.SiteDatabase;
         const string Bot = MariaDbFixture.BotDatabase;
 
@@ -48,64 +45,12 @@ namespace DataAccessLibrary.Tests
         static readonly DateTime Noon = new(2026, 11, 5, 12, 0, 0, DateTimeKind.Utc);
         const ulong UserId = 1000000000000000001;
 
-        // Exactly what the login may do, as rights-list.sql lists it, sorted. Written out, so a new right changes this too.
-        static readonly string[] Expected =
-        [
-            "column INSERT minerbot_db bot_commands actor_id",
-            "column INSERT minerbot_db bot_commands actor_name",
-            "column INSERT minerbot_db bot_commands actor_role",
-            "column INSERT minerbot_db bot_commands argument",
-            "column INSERT minerbot_db bot_commands channel_id",
-            "column INSERT minerbot_db bot_commands created_at",
-            "column INSERT minerbot_db bot_commands expires_at",
-            "column INSERT minerbot_db bot_commands guild_id",
-            "column INSERT minerbot_db bot_commands kind",
-            "column INSERT minerbot_db bot_commands request_key",
-            "column INSERT minerbot_db bot_commands signature",
-            "column SELECT website_db ihvph_discord_servers guild_id",
-            "column UPDATE website_db ihvph_armor_styles Status",
-            "column UPDATE website_db ihvph_blacklist expire_date",
-            "column UPDATE website_db ihvph_blacklist notes",
-            "column UPDATE website_db ihvph_blacklist reason",
-            "column UPDATE website_db ihvph_blacklist username",
-            "global USAGE",
-            "limits 15 20.000000 0 0 0",
-            "table DELETE minerbot_db dashboard_sessions",
-            "table DELETE website_db ihvph_blacklist",
-            "table INSERT minerbot_db armor_reviews",
-            "table INSERT minerbot_db audit_log",
-            "table INSERT minerbot_db dashboard_sessions",
-            "table INSERT website_db ihvph_blacklist",
-            "table SELECT minerbot_db armor_reviews",
-            "table SELECT minerbot_db audit_log",
-            "table SELECT minerbot_db bot_commands",
-            "table SELECT minerbot_db bot_events",
-            "table SELECT minerbot_db bot_settings",
-            "table SELECT minerbot_db bot_status",
-            "table SELECT minerbot_db dashboard_sessions",
-            "table SELECT minerbot_db guild_channels",
-            "table SELECT minerbot_db guild_daily",
-            "table SELECT minerbot_db guild_events",
-            "table SELECT minerbot_db guilds",
-            "table SELECT minerbot_db job_runs",
-            "table SELECT minerbot_db job_status",
-            "table SELECT minerbot_db uptime_daily",
-            "table SELECT minerbot_db uptime_samples",
-            "table SELECT website_db ihvph_armor_styles",
-            "table SELECT website_db ihvph_blacklist",
-            "table SELECT website_db ihvph_discord_servers",
-            "table UPDATE minerbot_db dashboard_sessions"
-        ];
+        // Exactly what the login may do, as rights-list.sql lists it, sorted: DashboardRights' list, written out there, with
+        // this run's names, and deploy's line for the two limits
+        static readonly string[] Expected = [.. DashboardRights.For(Site, Bot)
+            .Append($"limits {DashboardRights.Connections} {DashboardRights.StatementSeconds}.000000 0 0 0").Order(StringComparer.Ordinal)];
 
         static CancellationToken Token => TestContext.Current.CancellationToken;
-
-        static string DeployFile(string name) => File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "deploy", name));
-
-        // With this run's names, as deploy.sh renders it
-        static string Rendered(string sql) => sql
-            .Replace("{{SITE_DB}}", Site)
-            .Replace("{{BOT_DB}}", Bot)
-            .Replace("{{GRANTEES}}", Grantee);
 
         // A made-up request-signing key, the 32 bytes 00 01 ... 1f
         static readonly byte[] SigningKey = Enumerable.Range(0, 32).Select(value => (byte)value).ToArray();
@@ -120,44 +65,12 @@ namespace DataAccessLibrary.Tests
             await AsDashboardAsync(db, password => test(db, password));
         }
 
-        // The login as setup-dashboard.sh makes it, with no rights, then the file applied. Dropped afterwards whatever
-        // happened, which takes every right it had with it. Another class's test uses it for a row only this login could
-        // write.
-        internal static async Task AsDashboardAsync(MariaDbFixture db, Func<string, Task> test)
-        {
-            var password = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
-
-            await db.RootExecuteAsync($"DROP USER IF EXISTS {Grantee}");
-            await db.RootExecuteAsync($"CREATE USER {Grantee} IDENTIFIED BY '{password}'");
-
-            try
-            {
-                await ApplyAsync(db);
-                await test(password);
-            }
-            finally
-            {
-                await db.RootExecuteAsync($"DROP USER IF EXISTS {Grantee}");
-            }
-        }
-
-        static async Task ApplyAsync(MariaDbFixture db)
-        {
-            foreach (var statement in MigrationScript.Split(Rendered(DeployFile("dashboard-rights.sql"))))
-                await db.RootExecuteAsync(statement);
-        }
-
         // rights-list.sql for the login, as deploy.sh compares two logins, sorted the same way
         static async Task<List<string>> RightsAsync(MariaDbFixture db)
         {
             var rights = await db.RootQueryAsync<string>(DeployFile("rights-list.sql").Replace("{{WHO}}", $"''{Login}''@''%''"));
             return [.. rights.Order(StringComparer.Ordinal)];
         }
-
-        // The login's own connection, never pooled, so nothing of it stays open once the login is dropped. Its user
-        // variables are allowed, so MySql.Data leaves an @ in a statement alone.
-        internal static string ConnectionAs(MariaDbFixture db, string password, string database) =>
-            new MySqlConnectionStringBuilder(db.ConnectionAs(Login, password, database)) { Pooling = false, AllowUserVariables = true }.ConnectionString;
 
         // The connections the dashboard has: the website's database for Armor, Blacklist and Guild, MinerBot's for Bot
         static Dictionary<DBConnectionName, string> Connections(MariaDbFixture db, string password)
@@ -244,10 +157,12 @@ namespace DataAccessLibrary.Tests
             await WithLoginAsync(async (db, _) => Assert.Equal(Expected, await RightsAsync(db)));
         }
 
-        // Every repository call the dashboard makes today, under its login: the sessions, the audit rows, on MinerBot's own
-        // connection and inside a transaction on the website's, and the audit page's reads of them, armor review's reads and
-        // each kind of its transactions, the blacklist's reads and each kind of its changes, the status and servers pages'
-        // reads of what the bot writes and of the website's settings, and the readiness check of both databases
+        // Every repository call the dashboard makes today, under its login: the sessions, with the Sessions page's list and
+        // endings, the audit rows, on MinerBot's own connection and inside a transaction on the website's, and the audit
+        // page's and the Overview's reads of them, armor review's reads and each kind of its transactions, the blacklist's
+        // reads and each kind of its changes, the status and servers pages' reads of what the bot writes and of the website's
+        // settings, the requests to the bot and the pages' reads of them, the Sessions page's checks of this login, and the
+        // readiness check of both databases
         [Fact]
         public async Task EverythingTodaysDashboardDoesWorks()
         {
@@ -290,6 +205,28 @@ namespace DataAccessLibrary.Tests
                     await audit.AddAudit(Audit("session.start"), transaction);
                     return true;
                 }));
+
+                // The Sessions page: who is signed in, then ending one session by its hash, and every other one, each with its
+                // audit row in one transaction on MinerBot's own connection. The one named last is the one left.
+                var (kept, ended, other) = (NewKey(), NewKey(), NewKey());
+                await sessions.CreateSession(kept, Session());
+                await sessions.CreateSession(ended, Session());
+                await sessions.CreateSession(other, Session());
+                Assert.Equal(4, (await sessions.ListSessions(Noon, Noon.AddMinutes(-30))).Count);
+
+                Assert.NotNull(await sessions.RunInTransaction(async transaction =>
+                {
+                    var session = await sessions.DeleteSessionByHash(DashboardSessionData.HashOf(ended), transaction);
+                    await audit.AddAudit(Audit("auth.ended"), transaction);
+                    return session;
+                }));
+
+                Assert.Equal(2, (await sessions.RunInTransaction(async transaction =>
+                {
+                    var others = await sessions.DeleteSessionsBut(kept, transaction);
+                    await audit.AddAudit(Audit("auth.ended_others"), transaction);
+                    return others;
+                })).Count);
 
                 await audit.AddAudit(Audit("auth.refused"));
 
@@ -382,9 +319,10 @@ namespace DataAccessLibrary.Tests
 
                 Assert.Empty(await blacklist.ListOutOfRangeSteamIds());
 
-                // The audit page's reads, with and without the visitors' addresses, an entry's history, and the latest change
-                // of each entry on a page of the list
-                Assert.Equal(8, (await audit.ListAudit(new AuditQuery())).Total);
+                // The audit page's reads, with and without the visitors' addresses, the Overview's, which leaves some actions
+                // out, an entry's history, and the latest change of each entry on a page of the list
+                Assert.Equal(10, (await audit.ListAudit(new AuditQuery())).Total);
+                Assert.Equal(9, (await audit.ListAudit(new AuditQuery { ExcludeActions = [RequestKinds.OwnerSigninAlert, "session.start"] })).Total);
                 Assert.Null((await audit.ListAudit(new AuditQuery())).Rows[0].ip);
                 Assert.Equal("203.0.113.7", (await audit.ListAudit(new AuditQuery { IncludeIp = true })).Rows[0].ip);
                 Assert.Equal(3, (await audit.ListAudit(new AuditQuery { TargetType = "blacklist", TargetId = "12345" })).Total);
@@ -407,6 +345,7 @@ namespace DataAccessLibrary.Tests
                 Assert.Equal(1, (await statusReads.ListEvents(new EventQuery())).Total);
                 var connected = await statusReads.LatestEvent("discord.connected");
                 Assert.NotNull(await statusReads.FirstEventAfter("discord.disconnected", connected));
+                Assert.Equal("GatewayReconnectException", (await statusReads.LatestEventWith("discord.disconnected", ["Reconnect"], day.AddDays(-1)))?.detail);
                 Assert.Single(await statusReads.CountEvents(["discord.connected"], day.AddDays(-30), day.AddDays(-7)));
                 Assert.Single(await statusReads.ListJobs());
                 Assert.Single(await statusReads.ListJobRuns(["ArmorJob.AddColorArrays"], 50));
@@ -458,12 +397,33 @@ namespace DataAccessLibrary.Tests
                 await db.Requests().SavePause(true, "Testing", Noon, UserId, requestId, Noon);
                 Assert.True((await queue.GetSettings())?.posts_paused);
 
+                // The pages' reads of the requests, and what the dashboard counts before it sends one: a request's page, the
+                // latest of each kind and of a server's, the claims the bot counts and the requests that wait, one person's
+                // requests, the bot's last direct message to the owner, the sign-in alerts and the last one the bot refused
+                Assert.Equal(requestId, (await queue.GetRequestView(requestId))?.id);
+                Assert.Equal(requestId, Assert.Single(await queue.ListLatest([RequestKinds.PostsPause, RequestKinds.CachesClear])).id);
+                Assert.Empty(await queue.ListLatest([RequestKinds.GuildTestMessage], 1000000000000000005));
+                Assert.Empty(await queue.ListClaimsSince(Noon.AddHours(-1)));
+                Assert.Equal(requestId, Assert.Single(await queue.ListWaiting(Noon)).id);
+                Assert.Equal(RequestKinds.PostsPause, Assert.Single(await queue.ListAskedBy(UserId, Noon.AddHours(-1))).kind);
+                Assert.Null(await queue.LatestDm());
+                Assert.Equal(0, await queue.CountAlertsSince(Noon.AddHours(-1)));
+                Assert.Null(await queue.LatestRefusedAlert());
+
+                // The Sessions page's checks of this login: its own rights and limits, never through SHOW GRANTS, and the
+                // migrations through its one right on schema_version
+                var checks = new DashboardChecks(factory, names);
+                var own = await checks.ListOwnRights();
+                Assert.Equal((0, 0), (own.Missing.Count, own.Extra.Count));
+                Assert.Equal(((long?)DashboardRights.Connections, (decimal?)DashboardRights.StatementSeconds), (own.Connections, own.StatementSeconds));
+                Assert.Equal(DatabaseMigrations.Expected(), await checks.ListMigrations());
+
                 var health = new DatabaseHealthData(factory);
                 Assert.True(await health.Answers(DBConnectionName.Armor, TimeSpan.FromSeconds(5)).WaitAsync(CallLimit, Token));
                 Assert.True(await health.Answers(DBConnectionName.Bot, TimeSpan.FromSeconds(5)).WaitAsync(CallLimit, Token));
 
-                Assert.Equal(["armor.approve", "armor.takedown", "auth.refused", "blacklist.add", "blacklist.edit", "blacklist.remove", "blacklist.remove", "posts.pause",
-                    "session.start"],
+                Assert.Equal(["armor.approve", "armor.takedown", "auth.ended", "auth.ended_others", "auth.refused", "blacklist.add", "blacklist.edit", "blacklist.remove",
+                    "blacklist.remove", "posts.pause", "session.start"],
                     (await db.RootQueryAsync<string>($"SELECT action FROM {MariaDbFixture.AuditTable}")).Order(StringComparer.Ordinal));
                 Assert.Equal(0, (await db.RootQueryAsync<long>($"SELECT COUNT(*) FROM {MariaDbFixture.BlacklistTable}")).Single());
                 Assert.Equal(1, (await db.RootQueryAsync<long>($"SELECT COUNT(*) FROM {MariaDbFixture.SessionTable}")).Single());
@@ -482,7 +442,7 @@ namespace DataAccessLibrary.Tests
             // MinerBot's other tables. Armor review's history is only ever added to.
             { "change armor_reviews", $"UPDATE {Bot}.armor_reviews SET reason = 'changed' WHERE 1 = 0" },
             { "delete from armor_reviews", $"DELETE FROM {Bot}.armor_reviews WHERE 1 = 0" },
-            { "read schema_version", $"SELECT * FROM {Bot}.schema_version" },
+            // The migrations' table, which the Sessions page reads, but which only the migrations write
             { "add to schema_version", $"INSERT INTO {Bot}.schema_version (version, name, checksum, applied_at) VALUES (9999, 'x', 'x', NOW(3))" },
             { "change schema_version", $"UPDATE {Bot}.schema_version SET name = 'changed' WHERE 1 = 0" },
             { "delete from schema_version", $"DELETE FROM {Bot}.schema_version WHERE 1 = 0" },
@@ -756,7 +716,7 @@ namespace DataAccessLibrary.Tests
             var file = DeployFile("dashboard-rights.sql");
             var tables = TableNames().Matches(file).Select(match => (Database: Database(match.Groups[1].Value), Table: match.Groups[2].Value)).Distinct().ToList();
 
-            Assert.Equal(18, tables.Count);
+            Assert.Equal(19, tables.Count);
 
             foreach (var (database, table) in tables)
             {

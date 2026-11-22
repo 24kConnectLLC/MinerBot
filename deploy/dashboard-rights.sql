@@ -92,3 +92,8 @@ GRANT INSERT (`request_key`, `kind`, `actor_id`, `actor_name`, `actor_role`, `gu
 
 -- The bot's pause flag and status text, which only signed requests change
 GRANT SELECT ON `{{BOT_DB}}`.`bot_settings` TO {{GRANTEES}};
+
+-- The Sessions and security page compares the migrations MinerBot's database has run with the ones built into the
+-- dashboard, so it reads the table the migrations keep: each one's number, name, checksum and time, nothing private.
+-- Nothing here changes it.
+GRANT SELECT ON `{{BOT_DB}}`.`schema_version` TO {{GRANTEES}};

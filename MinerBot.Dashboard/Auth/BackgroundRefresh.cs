@@ -14,6 +14,11 @@ namespace MinerBot.Dashboard.Auth
         // page: the script replaces a box only with an answer that has it, never with a sign-in page or an error
         public const string FragmentHeader = "X-MinerBot-Fragment";
 
+        // Beside a request box's marker, also on the response itself: the seconds before the script looks again, from 2 to
+        // 30, or end once what the box shows can't change, when the script stops without its note
+        public const string NextHeader = "X-MinerBot-Refresh-Next";
+        public const string NextEnd = "end";
+
         public static bool Marks(HttpRequest request) => HttpMethods.IsGet(request.Method) && request.Headers[Header] == Value;
     }
 }

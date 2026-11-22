@@ -24,27 +24,29 @@ namespace MinerBot.Dashboard.Tests.Support
 
     internal static class Rows
     {
-        // The database every test that starts the app needs, with no sessions, audit rows, armor, reviews or blacklist entries
-        // left from another test
+        // The database every test that starts the app needs, with no sessions, audit rows, armor, reviews, blacklist entries,
+        // requests to the bot or bot settings left from another test. Every sign-in writes a request since the sign-in
+        // alerts, and every approval may, and the limits the dashboard checks before it sends one count them, so a test that
+        // ran before this one, in whatever order xunit picks, can't change what this one counts.
         public static async Task<MariaDbFixture> ReadyAsync(this MariaDbFixture fixture)
         {
             var db = fixture.Require();
             await db.ClearAsync(MariaDbFixture.SessionTable, MariaDbFixture.AuditTable, MariaDbFixture.ArmorTable, MariaDbFixture.ReviewTable,
-                MariaDbFixture.BlacklistTable);
+                MariaDbFixture.BlacklistTable, MariaDbFixture.RequestTable, MariaDbFixture.SettingsTable);
             return db;
         }
 
-        // MinerBot's status and history, its copy of its servers, its requests and settings, and the website's channel
-        // settings, which the status pages read, as the bot's own tests list them
+        // MinerBot's status and history, its copy of its servers, and the website's channel settings, which the status pages
+        // read, as the bot's own tests list them. ReadyAsync clears the bot's requests and settings.
         public static readonly string[] BotTables =
         [
             MariaDbFixture.StatusTable, MariaDbFixture.EventTable, MariaDbFixture.JobRunTable, MariaDbFixture.JobStatusTable, MariaDbFixture.SampleTable,
             MariaDbFixture.DailyTable, MariaDbFixture.BotGuildTable, MariaDbFixture.BotChannelTable, MariaDbFixture.GuildEventTable,
-            MariaDbFixture.GuildDailyTable, MariaDbFixture.GuildTable, MariaDbFixture.RequestTable, MariaDbFixture.SettingsTable
+            MariaDbFixture.GuildDailyTable, MariaDbFixture.GuildTable
         ];
 
-        // As ReadyAsync, and with none of the bot's rows or the website's settings either, for a test that checks what the
-        // status pages show: another test class may have left any of them
+        // As ReadyAsync, and with none of the bot's other rows or the website's settings either, for a test that checks what
+        // the status pages show: another test class may have left any of them
         public static async Task<MariaDbFixture> ReadyBotAsync(this MariaDbFixture fixture)
         {
             var db = await fixture.ReadyAsync();

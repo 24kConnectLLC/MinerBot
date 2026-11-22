@@ -36,7 +36,8 @@ namespace MinerBot.Dashboard.Audit
         public static AuditTable Table(IEnumerable<AuditEntry> entries, bool showIp, string? labelledBy = null) =>
             new(entries.Select(entry => Row(entry, showIp)).ToList(), showIp, labelledBy);
 
-        // Whether the partial draws a link in the row: its person's Discord ID, an armor or a blacklist entry, or its server.
+        // Whether the partial draws a link in the row: its person's Discord ID, an armor, a blacklist entry or a request to the
+        // bot, or its server.
         // A sign-in refused before Discord said who it was has none of these.
         public static bool HasLink(AuditRow row) => row.ActorId != null || row.Target?.Link != null || row.GuildId != null;
 
@@ -48,7 +49,7 @@ namespace MinerBot.Dashboard.Audit
             AuditWords.RoleLabel(entry.actor_role),
             entry.actor_id == null && entry.actor_role is not (AuditRole.Bot or AuditRole.System),
             AuditWords.ActionLabel(entry.action),
-            AuditWords.OutcomeLabel(entry.outcome),
+            AuditWords.OutcomeLabel(entry.outcome, entry.target_type),
             entry.guild_id,
             Target(entry.target_type, entry.target_id),
             Change(entry.before_json),
@@ -71,6 +72,13 @@ namespace MinerBot.Dashboard.Audit
 
             if (type == AuditWords.BlacklistTarget && uint.TryParse(id, NumberStyles.None, CultureInfo.InvariantCulture, out var account))
                 return new AuditTarget("Blacklist entry " + SteamAccounts.Steam3(account), SteamAccounts.EntryLink(account));
+
+            // A request to the bot, whose page shows what the bot did. A refusal before one was written has no ID.
+            if (type == AuditWords.RequestTarget && ulong.TryParse(id, NumberStyles.None, CultureInfo.InvariantCulture, out var request) && request > 0)
+            {
+                var number = request.ToString(CultureInfo.InvariantCulture);
+                return new AuditTarget("Bot request " + number, "/admin/requests/" + number);
+            }
 
             // Such as a session, a number no account can be, or a kind of target a later version writes
             var label = AuditWords.TargetLabel(type);

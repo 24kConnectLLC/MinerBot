@@ -1,0 +1,248 @@
+@page "/Admin/Bot/Controls"
+@model ControlsModel
+@using System.Globalization
+@using MinerBot.Dashboard.Armor
+@using MinerBot.Dashboard.Requests
+@using MinerBot.Dashboard.Status
+@using MinerBot.Shared.Requests
+@*
+    The bot's controls. Every form posts to this page through asp-page-handler, never an action attribute, so the form tag
+    helper adds its token, and carries a key of its own, new on every render but after a save the database didn't confirm.
+    An Admin sees their two controls; the Owner sees every one, and each that needs a fresh sign-in shows the way to sign in
+    again in place of its form while the sign-in isn't. The status box refreshes itself through refresh.js, as on the Bot
+    status page, and so does a request's box until what it shows is final; the page works without it. Text someone typed,
+    a stored reason and a status text the rules pass included, goes through RevealedText or is shown with its hidden
+    characters as their codes, and a stored status text the rules refuse is never shown. After a save the database didn't
+    confirm, when the page's own reads fail too, only why and the form sent are drawn, never the error page, which would
+    say nothing was changed.
+*@
+@{
+    ViewData["Title"] = ControlWords.Title;
+}
+@section Scripts {
+    <script src="~/js/refresh.js" asp-append-version="true" defer></script>
+}
+<h1>@ControlWords.Title</h1>
+<p>@ControlWords.Intro</p>
+@if (!Model.IsOwner)
+{
+    <p>@ControlWords.AdminLine</p>
+}
+
+@if (Model.Problem != null)
+{
+    <div class="notice notice-problem" role="alert">
+        <p>@Model.Problem @if (Model.ProblemRequest is { } named) {<a href="@("/admin/requests/" + named.ToString(CultureInfo.InvariantCulture))">That request</a>}</p>
+    </div>
+}
+
+@* After a save the database didn't confirm, when nothing else could be read: the form sent, alone, still with its key *@
+@if (Model.Unread is { } sent)
+{
+    <section aria-labelledby="sent-again">
+        <h2 id="sent-again">@sent.Label</h2>
+        <p id="@sent.HelpId" class="control-help">@sent.Help</p>
+        @if (sent.Form == ControlForm.Offered)
+        {
+            <partial name="_ControlForm" model="sent" />
+        }
+        else if (sent.SignInAgain != null)
+        {
+            <p>@sent.FreshLine <a href="@sent.SignInAgain">@ControlWords.SignInAgain</a></p>
+            @if (sent.Typed != null)
+            {
+                <p>@ControlWords.WhatYouTyped @RevealedText.Html(sent.Typed)</p>
+            }
+        }
+    </section>
+    return;
+}
+
+@if (Model.Result != null)
+{
+    <partial name="_RequestSection" model="Model.Result" />
+}
+
+@foreach (var banner in Model.Banners)
+{
+    <div class="notice notice-problem">
+        <p>@banner.Text <a href="@banner.Link">@banner.LinkText</a></p>
+    </div>
+}
+
+<section aria-labelledby="now">
+    <h2 id="now">MinerBot now</h2>
+    <div data-refresh="@StatusBoxes.Address" data-fragment="@StatusBoxes.Fragment">
+        <partial name="_StatusBox" model="Model.Box" />
+    </div>
+    <p class="muted" role="status" data-refresh-stopped="Not updating: reload the page."></p>
+</section>
+
+@if (Model.IsOwner)
+{
+    @* While requests are off no control works, as banner 2 says, and a sign-in sends no message, so there's no sign-in to offer *@
+    if (Model.RequestsOn)
+    {
+        <section aria-labelledby="sign-in">
+            <h2 id="sign-in">Your sign-in</h2>
+            @if (Model.Fresh && Model.SignedInAt is { } at && Model.FreshUntil is { } until)
+            {
+                <p>@ControlWords.Fresh(at, until)</p>
+            }
+            else
+            {
+                <p>@ControlWords.NotFresh(Model.SignedInAt)</p>
+                <p><a href="@Model.SignInAgainLink">@ControlWords.SignInAgain</a></p>
+                <p class="muted">@ControlWords.SignInAgainNote</p>
+            }
+        </section>
+    }
+
+    <section aria-labelledby="posts">
+        <h2 id="posts">Posts</h2>
+        <p class="settings-line">@Model.PauseLine</p>
+        @if (Model.Paused)
+        {
+            var resume = Model.Control(ControlWords.Resume, "posts");
+            <div class="control">
+                <partial name="_Control" model="resume" />
+                @if (resume.Form == ControlForm.Offered)
+                {
+                    <partial name="_ControlForm" model="resume" />
+                }
+            </div>
+        }
+        else
+        {
+            var pause = Model.Control(ControlWords.Pause, "posts");
+            <div class="control">
+                <partial name="_Control" model="pause" />
+                @if (pause.Form == ControlForm.Offered)
+                {
+                    <form method="post" asp-page-handler="@ControlWords.Pause">
+                        <input type="hidden" name="formkey" value="@pause.FormKey" />
+                        <div class="fields">
+                            <div class="field">
+                                <label for="pause-reason">@ControlWords.ReasonLabel</label>
+                                <input type="text" id="pause-reason" name="reason" value="@Model.Kept(ControlWords.Pause)" maxlength="@RequestRules.ReasonLimit" required
+                                       aria-describedby="pause-reason-hint" />
+                                <p id="pause-reason-hint" class="muted">@ControlWords.ReasonHint</p>
+                            </div>
+                            <div class="field">
+                                <label for="confirm-@ControlWords.Pause">@ControlWords.TypeToConfirm(pause.Word!)</label>
+                                <input type="text" id="confirm-@ControlWords.Pause" name="confirm" autocomplete="off" spellcheck="false" required />
+                            </div>
+                        </div>
+                        <button type="submit" class="button" aria-describedby="@pause.HelpId">@pause.Label</button>
+                    </form>
+                }
+            </div>
+        }
+    </section>
+
+    <section aria-labelledby="status-text">
+        <h2 id="status-text">Status text</h2>
+        <p class="settings-line">@Model.StatusLine.Start@if (Model.StatusLine.Text != null) {@RevealedText.Html(Model.StatusLine.Text)}@Model.StatusLine.End</p>
+        @{
+            var set = Model.Control(ControlWords.SetStatus, "status-text");
+            var reset = Model.Control(ControlWords.DefaultStatus, "status-text");
+        }
+        <div class="control">
+            <partial name="_Control" model="set" />
+            @if (set.Form == ControlForm.Offered)
+            {
+                <form method="post" asp-page-handler="@ControlWords.SetStatus">
+                    <input type="hidden" name="formkey" value="@set.FormKey" />
+                    <div class="field">
+                        <label for="new-status-text">@ControlWords.StatusTextLabel</label>
+                        <input type="text" id="new-status-text" name="text" value="@Model.Kept(ControlWords.SetStatus)" maxlength="@RequestRules.StatusTextLimit" required
+                               aria-describedby="new-status-text-hint" />
+                        <p id="new-status-text-hint" class="muted">@ControlWords.StatusTextHint</p>
+                    </div>
+                    <button type="submit" class="button" aria-describedby="@set.HelpId">@set.Label</button>
+                </form>
+            }
+            @if (reset.Form == ControlForm.Offered)
+            {
+                <form method="post" asp-page-handler="@ControlWords.DefaultStatus">
+                    <input type="hidden" name="formkey" value="@reset.FormKey" />
+                    <button type="submit" class="button button-quiet" aria-describedby="@reset.HelpId">@reset.Label</button>
+                    <p id="@reset.HelpId" class="muted">@reset.Help</p>
+                </form>
+            }
+        </div>
+    </section>
+}
+
+<section aria-labelledby="jobs">
+    <h2 id="jobs">Jobs</h2>
+    @{
+        var notifications = Model.Control(ControlWords.RunNotifications, "jobs");
+    }
+    <div class="control">
+        <partial name="_Control" model="notifications" />
+        @if (notifications.Form == ControlForm.Offered)
+        {
+            <partial name="_ControlForm" model="notifications" />
+        }
+    </div>
+    @if (Model.IsOwner)
+    {
+        var colors = Model.Control(ControlWords.RunColors, "jobs");
+        <div class="control">
+            <partial name="_Control" model="colors" />
+            @if (colors.Form == ControlForm.Offered)
+            {
+                <partial name="_ControlForm" model="colors" />
+            }
+        </div>
+    }
+</section>
+
+<section aria-labelledby="caches">
+    <h2 id="caches">Caches</h2>
+    @{
+        var caches = Model.Control(ControlWords.ClearCaches, "caches");
+    }
+    <div class="control">
+        <partial name="_Control" model="caches" />
+        @if (caches.Form == ControlForm.Offered)
+        {
+            <partial name="_ControlForm" model="caches" />
+        }
+    </div>
+</section>
+
+@if (Model.IsOwner)
+{
+    <section aria-labelledby="steam">
+        <h2 id="steam">Steam</h2>
+        <p>@Model.SteamState</p>
+        @foreach (var handler in new[] { ControlWords.ReconnectSteam, ControlWords.RenewToken })
+        {
+            var steam = Model.Control(handler, "steam");
+            <div class="control">
+                <partial name="_Control" model="steam" />
+                @if (steam.Form == ControlForm.Offered)
+                {
+                    <partial name="_ControlForm" model="steam" />
+                }
+            </div>
+        }
+    </section>
+
+    <section aria-labelledby="restart">
+        <h2 id="restart">Restart</h2>
+        <p>@Model.RestartWhen</p>
+        @{
+            var restart = Model.Control(ControlWords.Restart, "restart");
+        }
+        <div class="control">
+            <partial name="_Control" model="restart" />
+            @if (restart.Form == ControlForm.Offered)
+            {
+                <partial name="_ControlForm" model="restart" />
+            }
+        </div>
+    </section>
+}

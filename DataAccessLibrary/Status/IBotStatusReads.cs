@@ -13,6 +13,7 @@ namespace DataAccessLibrary.Status
         Task<UptimeStartRow> FirstRecord();
         Task<BotStatusRow?> GetStatus();
         Task<BotEventRow?> LatestEvent(string kind);
+        Task<BotEventRow?> LatestEventWith(string kind, IReadOnlyCollection<string> phrases, DateTime since);
         Task<Page<BotEventRow>> ListEvents(EventQuery query);
         Task<IReadOnlyList<JobRunRow>> ListJobRuns(IReadOnlyCollection<string> jobs, int perJob);
         Task<IReadOnlyList<JobStatusRow>> ListJobs();

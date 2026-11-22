@@ -82,6 +82,8 @@ namespace DataAccessLibrary.Audit
             DateTime? to = query.To is { } end ? RequireUtc(end, nameof(query.To)) : null;
             var ip = query.IncludeIp ? "ip" : "NULL AS ip";
 
+            var excluded = query.ExcludeActions ?? [];
+
             string where = @"WHERE (@actorId IS NULL OR actor_id = @actorId)
                             AND (@action IS NULL OR action = @action)
                             AND (@guildId IS NULL OR guild_id = @guildId)
@@ -89,6 +91,11 @@ namespace DataAccessLibrary.Audit
                             AND (@targetId IS NULL OR target_id = @targetId)
                             AND (@from IS NULL OR at >= @from)
                             AND (@to IS NULL OR at < @to)";
+
+            // Only when some are named. MariaDB takes the empty list Dapper writes, but there's nothing to leave out.
+            if (excluded.Count > 0)
+                where += @"
+                            AND action NOT IN @excluded";
 
             string sql = $@"SELECT id, at, actor_id, actor_name, actor_role, action, outcome, guild_id, target_type, target_id,
                             before_json, after_json, detail, {ip}, request_id
@@ -109,6 +116,7 @@ namespace DataAccessLibrary.Audit
                 targetId = query.TargetId,
                 from,
                 to,
+                excluded,
                 take,
                 skip
             });

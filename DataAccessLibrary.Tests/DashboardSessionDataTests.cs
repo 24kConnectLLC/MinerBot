@@ -12,6 +12,7 @@ namespace DataAccessLibrary.Tests
     public class DashboardSessionDataTests(MariaDbFixture fixture)
     {
         static readonly DateTime Noon = new(2026, 11, 4, 12, 0, 0, DateTimeKind.Utc);
+        static readonly TimeSpan WaitLimit = TimeSpan.FromSeconds(10);
 
         async Task<MariaDbFixture> StartAsync()
         {
@@ -91,6 +92,7 @@ namespace DataAccessLibrary.Tests
 
             var hash = Assert.Single(await db.RootQueryAsync<byte[]>($"SELECT id_hash FROM {MariaDbFixture.SessionTable}"));
             Assert.Equal(SHA256.HashData(Encoding.UTF8.GetBytes(key)), hash);
+            Assert.Equal(hash, DashboardSessionData.HashOf(key));
 
             var row = Assert.Single(await db.RootQueryAsync<dynamic>($"SELECT * FROM {MariaDbFixture.SessionTable}"));
             var keyBytes = Encoding.UTF8.GetBytes(key);
@@ -315,6 +317,197 @@ namespace DataAccessLibrary.Tests
 
             var left = await db.RootQueryAsync<DateTime>($"SELECT last_seen_at FROM {MariaDbFixture.SessionTable} ORDER BY last_seen_at");
             Assert.Equal([cutoff, cutoff.AddMilliseconds(1)], left);
+        }
+
+        // The Sessions page's list: everyone's sessions that haven't ended and were used in the last 30 minutes, most
+        // recently used first, with every column but the ticket, and at most ListLimit of them
+        [Fact]
+        public async Task ListSessionsLeavesOutTicketsAndEndedSessions()
+        {
+            var db = await StartAsync();
+            var sessions = db.Sessions();
+            var unusedBefore = Noon.AddMinutes(-30);
+            var (owner, admin, atTheEdge, ended, idle) = (NewKey(), NewKey(), NewKey(), NewKey(), NewKey());
+
+            await sessions.CreateSession(owner, Session(userId: 1, lastSeenAt: Noon.AddMinutes(-1)));
+            await sessions.CreateSession(admin, Session(userId: 2, lastSeenAt: Noon.AddMinutes(-10), ticket: RandomNumberGenerator.GetBytes(1024)));
+            await sessions.CreateSession(atTheEdge, Session(userId: 2, lastSeenAt: unusedBefore));
+            await sessions.CreateSession(ended, Session(userId: 3, expiresAt: Noon));
+            await sessions.CreateSession(idle, Session(userId: 3, lastSeenAt: unusedBefore.AddMilliseconds(-1)));
+
+            var listed = await sessions.ListSessions(Noon, unusedBefore);
+
+            Assert.Equal([DashboardSessionData.HashOf(owner), DashboardSessionData.HashOf(admin), DashboardSessionData.HashOf(atTheEdge)], listed.Select(row => row.id_hash));
+            var row = listed[1];
+            Assert.Equal((2UL, "Test Admin", Noon, Noon.AddMinutes(-10), Noon.AddHours(12), "203.0.113.7", "Test Browser/1.0"),
+                (row.user_id, row.user_name, row.created_at, row.last_seen_at, row.expires_at, row.ip, row.user_agent));
+            Assert.All(listed, session => Assert.Equal((DateTimeKind.Utc, DateTimeKind.Utc, DateTimeKind.Utc),
+                (session.created_at.Kind, session.last_seen_at.Kind, session.expires_at.Kind)));
+            Assert.DoesNotContain(typeof(SessionListRow).GetProperties(), property => property.Name == "ticket");
+
+            // Two used at the same moment are listed newest sign-in first, and no more than ListLimit in all
+            await db.RootExecuteAsync($@"INSERT INTO {MariaDbFixture.SessionTable} (id_hash, user_id, user_name, created_at, last_seen_at, expires_at, ticket)
+                                         SELECT UNHEX(SHA2(CONCAT('listed-', seq), 256)), 4, 'Test Admin', @signedIn - INTERVAL seq SECOND, @noon, @ends, x'01'
+                                         FROM {MariaDbFixture.BotDatabase}.seq_1_to_{DashboardSessionData.ListLimit}", new { noon = Noon, signedIn = Noon.AddMinutes(-5), ends = Noon.AddHours(1) });
+
+            listed = await sessions.ListSessions(Noon, unusedBefore);
+
+            Assert.Equal(DashboardSessionData.ListLimit, listed.Count);
+            Assert.Equal(Enumerable.Range(1, DashboardSessionData.ListLimit).Select(second => Noon.AddMinutes(-5).AddSeconds(-second)), listed.Select(session => session.created_at));
+            await Assert.ThrowsAsync<ArgumentException>(() => sessions.ListSessions(DateTime.Now, unusedBefore));
+        }
+
+        // Ending one session by its hash, as the Sessions page does: that one alone, while the same person's others and
+        // everyone else's stay, and it gives the session as it was. In the caller's transaction, so a rollback keeps it.
+        [Fact]
+        public async Task DeleteSessionByHashEndsOnlyThatOne()
+        {
+            var db = await StartAsync();
+            var sessions = db.Sessions();
+            var (target, sameUser, otherUser) = (NewKey(), NewKey(), NewKey());
+            var hash = DashboardSessionData.HashOf(target);
+
+            await sessions.CreateSession(target, Session(userId: 1, lastSeenAt: Noon.AddMinutes(1)));
+            await sessions.CreateSession(sameUser, Session(userId: 1));
+            await sessions.CreateSession(otherUser, Session(userId: 2));
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() => sessions.RunInTransaction<bool>(async transaction =>
+            {
+                Assert.NotNull(await sessions.DeleteSessionByHash(hash, transaction));
+                throw new InvalidOperationException("The page stopped halfway");
+            }));
+            Assert.NotNull(await sessions.GetSession(target, Noon));
+
+            var ended = await sessions.RunInTransaction(transaction => sessions.DeleteSessionByHash(hash, transaction));
+
+            Assert.NotNull(ended);
+            Assert.Equal(hash, ended.id_hash);
+            Assert.Equal((1UL, "Test Admin", Noon, Noon.AddMinutes(1), "203.0.113.7", "Test Browser/1.0"),
+                (ended.user_id, ended.user_name, ended.created_at, ended.last_seen_at, ended.ip, ended.user_agent));
+            Assert.Null(await sessions.GetSession(target, Noon));
+            Assert.NotNull(await sessions.GetSession(sameUser, Noon));
+            Assert.NotNull(await sessions.GetSession(otherUser, Noon));
+
+            // Gone already, so nothing more goes
+            Assert.Null(await sessions.RunInTransaction(transaction => sessions.DeleteSessionByHash(hash, transaction)));
+            Assert.Equal(2, (await db.RootQueryAsync<long>($"SELECT COUNT(*) FROM {MariaDbFixture.SessionTable}")).Single());
+
+            await Assert.ThrowsAsync<ArgumentException>(() => sessions.RunInTransaction(transaction => sessions.DeleteSessionByHash(hash[..31], transaction)));
+            await Assert.ThrowsAsync<ArgumentException>(() => sessions.RunInTransaction(transaction => sessions.DeleteSessionByHash(null!, transaction)));
+        }
+
+        // Ending every other session, as the Sessions page does: everyone's, the same person's other ones included, never the
+        // one named, and it gives each as it was
+        [Fact]
+        public async Task DeleteSessionsButKeepsTheOneNamed()
+        {
+            var db = await StartAsync();
+            var sessions = db.Sessions();
+            var (kept, sameUser, admin, ended) = (NewKey(), NewKey(), NewKey(), NewKey());
+
+            await sessions.CreateSession(kept, Session(userId: 1));
+            await sessions.CreateSession(sameUser, Session(userId: 1));
+            await sessions.CreateSession(admin, Session(userId: 2));
+            await sessions.CreateSession(ended, Session(userId: 3, expiresAt: Noon.AddMinutes(-1)));
+
+            var deleted = await sessions.RunInTransaction(transaction => sessions.DeleteSessionsBut(kept, transaction));
+
+            Assert.Equal([1UL, 2UL, 3UL], deleted.Select(row => row.user_id).Order());
+            Assert.DoesNotContain(deleted, row => row.id_hash.AsSpan().SequenceEqual(DashboardSessionData.HashOf(kept)));
+            Assert.All(deleted, row => Assert.Equal(("Test Admin", "203.0.113.7"), (row.user_name, row.ip)));
+            Assert.NotNull(await sessions.GetSession(kept, Noon));
+            Assert.Equal(DashboardSessionData.HashOf(kept), Assert.Single(await db.RootQueryAsync<byte[]>($"SELECT id_hash FROM {MariaDbFixture.SessionTable}")));
+
+            // Nothing left to end
+            Assert.Empty(await sessions.RunInTransaction(transaction => sessions.DeleteSessionsBut(kept, transaction)));
+            Assert.NotNull(await sessions.GetSession(kept, Noon));
+
+            await Assert.ThrowsAsync<ArgumentException>(() => sessions.RunInTransaction(transaction => sessions.DeleteSessionsBut("short", transaction)));
+        }
+
+        // A sign-in that lands while every other session is being ended: the ending waits for its new row, then ends it with
+        // the rest and gives it with them, so the audit row names every session that went. Fails if the read before the
+        // delete doesn't lock, when it gives the sessions as they were before the sign-in and the delete takes the new one too.
+        [Fact]
+        public async Task DeleteSessionsButGivesASignInThatLandsMeanwhile()
+        {
+            var db = await StartAsync();
+            var sessions = db.Sessions();
+            var (kept, admin, signedIn) = (NewKey(), NewKey(), NewKey());
+            await sessions.CreateSession(kept, Session(userId: 1));
+            await sessions.CreateSession(admin, Session(userId: 2));
+            var added = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            // The sign-in has added its session and not committed yet
+            var signingIn = sessions.RunInTransaction(async transaction =>
+            {
+                await sessions.CreateSession(signedIn, Session(userId: 3), transaction);
+                added.TrySetResult();
+                await release.Task;
+                return true;
+            });
+
+            try
+            {
+                await added.Task.WaitAsync(WaitLimit, TestContext.Current.CancellationToken);
+                var ending = sessions.RunInTransaction(transaction => sessions.DeleteSessionsBut(kept, transaction));
+
+                Assert.Equal(1, await fixture.LockWaitsAsync("dashboard_sessions", 1, WaitLimit));
+                release.SetResult();
+
+                Assert.True(await signingIn.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
+                var ended = await ending.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+
+                Assert.Equal([2UL, 3UL], ended.Select(row => row.user_id).Order());
+            }
+            finally
+            {
+                release.TrySetResult();
+            }
+
+            Assert.Equal(DashboardSessionData.HashOf(kept), Assert.Single(await db.RootQueryAsync<byte[]>($"SELECT id_hash FROM {MariaDbFixture.SessionTable}")));
+        }
+
+        // The Owner ends a session while its own browser signs out of it: the ending waits for the sign-out, then finds the
+        // session gone and gives none, so the page says it had already ended and writes no audit row beside the sign-out's.
+        // Fails if the read before the delete doesn't lock, when it gives the session as it was and the delete finds nothing.
+        [Fact]
+        public async Task DeleteSessionByHashFindsASessionEndedMeanwhileGone()
+        {
+            var db = await StartAsync();
+            var sessions = db.Sessions();
+            var target = NewKey();
+            await sessions.CreateSession(target, Session(userId: 2));
+            var deleted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            // The sign-out has deleted the session and not committed yet
+            var signingOut = sessions.RunInTransaction(async transaction =>
+            {
+                var found = await sessions.DeleteSession(target, transaction);
+                deleted.TrySetResult();
+                await release.Task;
+                return found;
+            });
+
+            try
+            {
+                await deleted.Task.WaitAsync(WaitLimit, TestContext.Current.CancellationToken);
+                var ending = sessions.RunInTransaction(transaction => sessions.DeleteSessionByHash(DashboardSessionData.HashOf(target), transaction));
+
+                Assert.Equal(1, await fixture.LockWaitsAsync("dashboard_sessions", 1, WaitLimit));
+                release.SetResult();
+
+                Assert.True(await signingOut.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
+                Assert.Null(await ending.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
+            }
+            finally
+            {
+                release.TrySetResult();
+            }
+
+            Assert.Empty(await db.RootQueryAsync<byte[]>($"SELECT id_hash FROM {MariaDbFixture.SessionTable}"));
         }
 
         // The browser sends the user agent, so it can be any length, and strict mode would fail the sign-in over it

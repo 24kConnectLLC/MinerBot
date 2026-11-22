@@ -1,0 +1,27 @@
+@model RequestSection
+@using MinerBot.Dashboard.Requests
+@*
+    The box for a request, at #result, which a form's redirect leads to. While what it shows can change, refresh.js gets it
+    again from the request's Result handler, every 2 seconds while the request is young and every 5 after that, until the
+    answer says it's final, and stops with the note on anything else; Check again, the page's own address, is the next look
+    without it, on every page but one drawn again after its form, where pressing it again is. A page that draws a box that
+    isn't final loads refresh.js. Once final, the box is drawn alone.
+*@
+<section id="result" aria-labelledby="result-heading">
+    <h2 id="result-heading">@Model.Heading</h2>
+    @if (Model.View.Final)
+    {
+        <partial name="_RequestResult" model="Model.View" />
+    }
+    else
+    {
+        <div data-refresh="@Model.View.FragmentAddress" data-fragment="@RequestViews.Fragment" data-refresh-every="@Model.View.Next">
+            <partial name="_RequestResult" model="Model.View" />
+        </div>
+        <p class="muted" role="status" data-refresh-stopped="Not updating: reload the page."></p>
+        @if (Model.CheckAgain != null)
+        {
+            <p><a href="@Model.CheckAgain">Check again</a></p>
+        }
+    }
+</section>

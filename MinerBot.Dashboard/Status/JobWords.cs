@@ -1,5 +1,6 @@
 using System.Globalization;
 using DataAccessLibrary.Status;
+using DataAccessLibrary.Status.Models;
 
 namespace MinerBot.Dashboard.Status
 {
@@ -34,6 +35,15 @@ namespace MinerBot.Dashboard.Status
         // A run that needs a look: one that failed, one the time limit cut off, and one skipped because the run that was cut
         // off still runs, which is the only reason the bot skips
         public static bool IsProblem(string? result) => result is JobResult.Failed or JobResult.CutOff or JobResult.Skipped;
+
+        // Whether a run that started at the time given, with no end recorded, as the bot records a run the time limit cut off,
+        // ended with the bot: one that started before the bot's current run, which a restart ended, or before a clean stop
+        // the bot hasn't started again since. Otherwise it may still run in the background.
+        public static bool EndedWithTheBot(DateTime started, BotStatusRow? status) => status != null && (started < status.started_at || StoppedSince(started, status));
+
+        // Whether the bot stopped cleanly once a run had started: a clean stop sets stopped_at, which the row keeps until the
+        // next run's first write, and no job runs while the bot is stopped
+        public static bool StoppedSince(DateTime started, BotStatusRow status) => status.stopped_at is { } stopped && started <= stopped;
 
         // The forms the bot's jobs use, in words: every minute, every N minutes, every hour at a minute, and every day at a
         // time. Null for any other form, which the page shows as the cron alone.

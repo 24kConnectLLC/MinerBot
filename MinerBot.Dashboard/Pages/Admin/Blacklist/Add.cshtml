@@ -1,14 +1,23 @@
 @page
 @model BlacklistAddModel
+@using System.Globalization
 @using MinerBot.Dashboard.Blacklist
 @*
     The form posts to this page through asp-page, never an action attribute, so the form tag helper adds its token, and an
     address that brought a SteamID into the box isn't sent again. A refused form comes back with what was typed in the
-    boxes, encoded, and a message by each field it was refused for.
+    boxes, encoded, and a message by each field it was refused for. A custom profile link's lookup comes back the same way,
+    with the lookup's box, which refreshes itself through refresh.js until it's final, and the request's number in a hidden
+    field, the only thing of it the form carries; pressing Add to the blacklist again is the next look without the script.
 *@
 @{
     ViewData["Title"] = Model.Unsure ? "Not sure it was saved" : "Add to the blacklist";
     var steamIdProblem = Model.Form.Problem(BlacklistField.SteamId);
+}
+@section Scripts {
+    @if (Model.LookupBox is { View.Final: false })
+    {
+        <script src="~/js/refresh.js" asp-append-version="true" defer></script>
+    }
 }
 @if (Model.Unsure)
 {
@@ -30,14 +39,34 @@ else
             <p>@Model.Notice <a href="@Model.EntryLink">Open its entry to change it</a>.</p>
         </div>
     }
+    else if (Model.LookupProblem != null)
+    {
+        <div class="notice notice-problem" role="alert">
+            <p>@Model.LookupProblem @if (Model.LookupProblemRequest is { } named) {<a href="@("/admin/requests/" + named.ToString(CultureInfo.InvariantCulture))">That request</a>}</p>
+        </div>
+    }
     else if (Model.Form.Problems.Count > 0)
     {
         <div class="notice notice-problem" role="alert">
             <p>@BlacklistWords.NotAdded</p>
         </div>
     }
+    else if (Model.LookupNotice != null)
+    {
+        <div class="notice" role="status">
+            <p>@Model.LookupNotice</p>
+        </div>
+    }
+
+    @if (Model.LookupBox != null)
+    {
+        <partial name="_RequestSection" model="Model.LookupBox" />
+        <p class="muted">@BlacklistWords.LookupThen</p>
+    }
 
     <form method="post" asp-page="/Admin/Blacklist/Add" class="action">
+        <input type="hidden" name="formkey" value="@Model.FormKey" />
+        <input type="hidden" name="lookup" value="@Model.LookupText" />
         <div class="fields">
             <div class="field">
                 <label for="steamid">SteamID</label>

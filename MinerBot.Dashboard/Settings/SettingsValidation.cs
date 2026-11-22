@@ -155,7 +155,8 @@ namespace MinerBot.Dashboard.Settings
                 problems.Add("An ID is in both Dashboard:Owners and Dashboard:Admins. Put each person in one list only.");
         }
 
-        static string? KeysFolderProblem(string? folder)
+        // The Sessions page's check of the keys folder calls this too, while the dashboard runs
+        internal static string? KeysFolderProblem(string? folder)
         {
             if (string.IsNullOrWhiteSpace(folder))
                 return "Dashboard:KeysFolder isn't set. Give the folder that keeps the sign-in keys between restarts, such as /app/keys, or every restart signs everyone out.";

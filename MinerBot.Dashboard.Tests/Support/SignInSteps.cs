@@ -53,6 +53,28 @@ namespace MinerBot.Dashboard.Tests.Support
             return browser.SessionKey ?? throw new InvalidOperationException("The sign-in set no session cookie");
         }
 
+        // Where a sign-in again starts: the link the controls that need a sign-in from the last 15 minutes draw, which goes
+        // to Discord even for a browser that's signed in
+        public static async Task<Authorize> StartAgainAsync(DashboardFactory factory, TestBrowser browser, string returnUrl)
+        {
+            var response = await browser.Client.GetAsync(FreshSignIn.SignInAgainLink(returnUrl), Token);
+
+            Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
+            var location = response.Headers.Location!;
+            Assert.Equal(factory.Discord.AuthorizeEndpoint, location.GetLeftPart(UriPartial.Path));
+
+            return new Authorize(location, QueryHelpers.ParseQuery(location.Query).ToDictionary(field => field.Key, field => field.Value.ToString()));
+        }
+
+        // A sign-in again, the whole round trip, ending with the callback's answer
+        public static async Task<HttpResponseMessage> SignInAgainAsync(DashboardFactory factory, TestBrowser browser, TestUser user, string returnUrl)
+        {
+            var authorize = await StartAgainAsync(factory, browser, returnUrl);
+            var code = factory.Discord.Expect(authorize.CodeChallenge, user);
+
+            return await CallbackAsync(browser, code, authorize.State);
+        }
+
         // The antiforgery token from a page's form
         public static async Task<string> FormTokenAsync(TestBrowser browser, string page = ReturnUrls.Default)
         {

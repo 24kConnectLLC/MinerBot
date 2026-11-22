@@ -51,19 +51,24 @@ namespace MinerBot.Dashboard.Blacklist
         public const string NumberAlreadyRemoved = "That row was already removed, so nothing more was done: your earlier try was saved, or someone removed it first.";
         public const string NumberUnsure = "The dashboard lost touch with its database while it was removing that row, so it can't tell whether it was removed. Wait a minute, then open the blacklist again to see. Trying again is safe: a row is only removed while it's as you saw it.";
 
-        // Where to get a custom profile link's number: MinerBot's own command, which takes the link only written exactly
-        // this way, since it cuts https://steamcommunity.com/id/ off the front to find the name
-        public const string CustomLinkLookup = "MinerBot's /more steam_id command in Discord gives the SteamID64 of a custom link written as https://steamcommunity.com/id/ and the name.";
+        // A custom profile link, which only Steam can turn into an account, so the add page asks the bot to look it up, and
+        // adds the account the bot's answer names once it's there. The name is never repeated.
+        public const string LookupSent = "MinerBot is asking Steam which account this custom profile link is. Once the answer below names the account, press Add to the blacklist again to add it.";
+        public const string LookupWaiting = "The lookup hasn't finished yet, so nothing was added. Press Add to the blacklist again in a few seconds.";
+        public const string LookupNoProfile = "Steam has no profile with that custom link. Check the link, or enter the profile's number link or SteamID64 instead.";
 
-        // A custom profile link, which only Steam can turn into an account. The name is never repeated.
-        public const string CustomLink = "Custom profile links, steamcommunity.com/id/ and a name, can't be looked up here yet. Enter the profile's number link instead, steamcommunity.com/profiles/ and 17 digits, or its SteamID64. " + CustomLinkLookup;
+        // Under the lookup's box, which can't offer to check again without losing the form
+        public const string LookupThen = "Once the box says which account the link is, press Add to the blacklist again to add it.";
+
+        // A custom profile link while requests to the bot are off, when it can't be looked up
+        public const string CustomLinkOff = "Custom profile links are looked up by the bot, and requests to the bot are off, so this one can't be. Enter the profile's number link, steamcommunity.com/profiles/ and 17 digits, or its SteamID64, instead.";
 
         // The list's search for a custom link, which looks for it in names only
-        public const string CustomLinkSearch = "Custom profile links can't be looked up here yet, so this searched for it in names only. " + CustomLinkLookup + " Search for that instead.";
+        public const string CustomLinkSearch = "Custom profile links can't be searched for directly, so this searched names only. Add to the blacklist looks a custom link up first, and says if its account is on the blacklist already.";
 
         public const string UnreadableDate = "The stored end date isn't a real date. Saving the form replaces it with what's in the date box, and an empty box means no end.";
 
-        public const string SteamIdHint = "A SteamID64, a profile link with its number, [U:1:n], STEAM_0:y:z, or the account number.";
+        public const string SteamIdHint = "A SteamID64, a profile link, [U:1:n], STEAM_0:y:z, or the account number. A custom profile link, steamcommunity.com/id/ and a name, is looked up by the bot first.";
         public const string ExpiresHint = "In UTC. From 00:00 UTC that day the entry no longer applies. Leave it empty for no end.";
         public static readonly string NameHint = $"Optional, at most {BlacklistData.UsernameLimit} characters.";
         public static readonly string ReasonHint = $"Optional, at most {BlacklistData.ReasonLimit} characters.";
