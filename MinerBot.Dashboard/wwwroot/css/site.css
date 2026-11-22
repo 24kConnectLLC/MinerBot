@@ -513,6 +513,13 @@ mark {
     color: var(--accent);
 }
 
+/* The one button nothing can take back but a new invite: leaving a server */
+.button-danger {
+    border-color: var(--danger);
+    background: var(--danger);
+    color: var(--accent-text);
+}
+
 .notice {
     margin: 0 0 1.5rem;
     padding: 0.75rem 1rem;
@@ -522,8 +529,11 @@ mark {
     background: var(--surface);
 }
 
+/* A banner can hold what someone typed, such as who paused posts and why, which can be one long word or a link, so it
+   breaks where it must: it would otherwise widen a phone's page */
 .notice p {
     margin: 0;
+    overflow-wrap: anywhere;
 }
 
 .notice-done {
@@ -780,6 +790,59 @@ td.address {
 /* The status box's explanations, each on a line of its own under its state */
 .status-box dd .muted {
     display: block;
+}
+
+/* A request's result box: what was asked, where it stands and the bot's answer, framed so it reads as one thing */
+.request-box {
+    margin: 0 0 0.75rem;
+    padding: 0.75rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+
+.request-box p {
+    margin: 0 0 0.5rem;
+    overflow-wrap: anywhere;
+}
+
+.request-box p:last-child {
+    margin-bottom: 0;
+}
+
+/* One of the bot's controls: what it does, its last use, whether it's available, and its form, framed as one thing */
+.control {
+    margin: 0 0 1.25rem;
+    padding: 1rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+
+.control h3 {
+    margin-top: 0;
+}
+
+.control p {
+    margin: 0 0 0.5rem;
+    overflow-wrap: anywhere;
+}
+
+.control form {
+    margin-top: 0.75rem;
+}
+
+.control-help {
+    max-width: 40rem;
+}
+
+/* The controls page's lines about the pause and the status text, outside any control, which hold a reason and a status
+   text someone typed, so they break where they must, as a control's lines do */
+.settings-line {
+    overflow-wrap: anywhere;
+}
+
+/* A notice's second line, such as what an armor review did next */
+.notice p + p {
+    margin-top: 0.5rem;
 }
 
 /* A tick box with its label beside it, under a form's other fields */

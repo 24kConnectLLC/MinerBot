@@ -294,18 +294,24 @@ namespace MinerBot.Dashboard.Tests
             Assert.Contains("href=\"/admin/armor/30?list=approved&amp;q=frost%20knight\"", list);
         }
 
-        // Approved armor offers Take down and Back to pending, rejected armor Approve and Back to pending, and armor with
-        // no status only Back to pending
+        // Approved armor offers Take down and Back to pending, and Announce now too while its latest review is the approval and
+        // no notification run has started since; rejected armor Approve and Back to pending; and armor with no status only
+        // Back to pending. Cleared of the bot's rows, since Announce now reads its notification job.
         [Fact]
         public async Task EachStatusOffersItsOwnActions()
         {
-            var db = await fixture.ReadyAsync();
-            await db.AddAsync(Submission(22, ArmorStatus.Approved, "Test Armor 22"), Submission(23, ArmorStatus.NotApproved, "Test Armor 23"), Submission(24, null, "Test Armor 24"));
+            var db = await fixture.ReadyBotAsync();
+            await db.AddAsync(Submission(21, ArmorStatus.Approved, "Test Armor 21"), Submission(22, ArmorStatus.Approved, "Test Armor 22"),
+                Submission(23, ArmorStatus.NotApproved, "Test Armor 23"), Submission(24, null, "Test Armor 24"));
+            await db.RootExecuteAsync($"INSERT INTO {MariaDbFixture.ReviewTable} (armor_id, from_status, to_status, reviewed_by, reviewer_name, reviewed_at) " +
+                "VALUES (21, 'Pending Approval', 'Approved', 1000000000000000002, 'Test Admin', UTC_TIMESTAMP(3))");
             await using var factory = new DashboardFactory(db);
             var admin = await ReviewerAsync(factory, "203.0.113.127");
 
             static IEnumerable<string> Handlers(string html) =>
-                new[] { "Approve", "Reject", "TakeDown", "BackToPending" }.Where(handler => html.Contains($"?handler={handler}\"", StringComparison.Ordinal));
+                new[] { "Approve", "Reject", "TakeDown", "BackToPending", "Announce" }.Where(handler => html.Contains($"?handler={handler}\"", StringComparison.Ordinal));
+
+            Assert.Equal(["TakeDown", "BackToPending", "Announce"], Handlers((await OpenAsync(admin, 21)).Html));
 
             var approved = await OpenAsync(admin, 22);
             Assert.Equal(["TakeDown", "BackToPending"], Handlers(approved.Html));

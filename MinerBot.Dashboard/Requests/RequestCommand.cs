@@ -454,22 +454,10 @@ namespace MinerBot.Dashboard.Requests
 
                 var what = string.Join(", ", needs.Where(need => need.Length > 0));
                 list.Append(CultureInfo.InvariantCulture,
-                    $"  {kind.Word,-20} {kind.Label}. {char.ToUpperInvariant(kind.WhoMayAsk[0])}{kind.WhoMayAsk[1..]}. {Limit(kind)}. Expires after {kind.Expiry.TotalMinutes:0} minutes.{(what.Length > 0 ? " Needs " + what + "." : "")}\n");
+                    $"  {kind.Word,-20} {kind.Label}. {char.ToUpperInvariant(kind.WhoMayAsk[0])}{kind.WhoMayAsk[1..]}. {RequestWords.Limit(kind)}. Expires after {kind.Expiry.TotalMinutes:0} minutes.{(what.Length > 0 ? " Needs " + what + "." : "")}\n");
             }
 
             return list.ToString();
-        }
-
-        // As in "At most 10 times an hour, with posts.resume"
-        static string Limit(RequestKind kind)
-        {
-            var window = kind.Window == TimeSpan.FromHours(1) ? "an hour"
-                : kind.Window == TimeSpan.FromMinutes(1) ? "a minute"
-                : string.Create(CultureInfo.InvariantCulture, $"every {kind.Window.TotalMinutes:0} minutes");
-            var times = kind.Limit == 1 ? "once" : kind.Limit.ToString(CultureInfo.InvariantCulture) + " times";
-            var others = kind.CountedWith.Where(word => word != kind.Word).ToList();
-
-            return $"At most {times} {window}{(kind.PerServer ? ", for each server" : "")}{(others.Count > 0 ? ", with " + string.Join(" and ", others) : "")}";
         }
 
         // The state's word as the line that ends a request starts with it, which request.sh reads

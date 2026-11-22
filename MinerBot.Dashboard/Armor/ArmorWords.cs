@@ -51,15 +51,59 @@ namespace MinerBot.Dashboard.Armor
         // every armor it has seen approved until it stops, taken down or not
         const string PostedOnce = "it posts an armor only the first time it sees it approved since it last started, and this one was approved before, or may have been";
 
+        // When a first approval brings no post either: the bot's first check since it started only notes the approved armor it
+        // finds, as Announce now's line then says, so each promise of a post allows for it
+        const string NotAtTheFirstCheck = "; if that's the bot's first check since it started, it won't post this one";
+
         // What the page says after an action, while the armor still has the status the action gave it. What the bot does
-        // next comes from its five-minute post, its name cache and the lookup, which the dashboard can't change or see.
-        public const string Approved = "Approved. The bot posts new armor at its next five-minute check, in every server with armor posts turned on, together with any other armor approved by then; if the bot is restarting then, it won't post this one. /armor lookup finds it by its exact name now, and /armor list and the name suggestions catch up within 5 minutes.";
-        public const string ApprovedAgain = "Approved. /armor lookup finds it by its exact name now, and /armor list and the name suggestions catch up within 5 minutes. The bot may not post it: " + PostedOnce + ".";
+        // next comes from its five-minute post, its name cache and the lookup. An approval, a take-down and a move back from
+        // Approved ask the bot to clear its name cache, and the line after these says how that went.
+        public const string Approved = "Approved. The bot posts new armor at its next five-minute check, in every server with armor posts turned on, together with any other armor approved by then" + NotAtTheFirstCheck + ". /armor lookup finds it by its exact name now.";
+        public const string ApprovedAgain = "Approved. /armor lookup finds it by its exact name now. The bot may not post it: " + PostedOnce + ".";
         public const string Rejected = "Rejected. The bot doesn't show it.";
         public const string RejectedWithReason = "Rejected. The bot doesn't show it, and the reason is kept in the history below.";
-        public const string TakenDown = "Taken down. /armor lookup stops finding it now, though its name can stay among the suggestions for up to 5 minutes. A post the bot already made stays in Discord.";
+        public const string TakenDown = "Taken down. /armor lookup stops finding it now. A post the bot already made stays in Discord.";
         public const string MovedBackToPending = "Moved back to Pending. If the bot already posted it, that post stays in Discord, and approving it again may not post it again.";
-        public const string MovedBackFromApproved = "Moved back to Pending, so the bot stops showing it, as after Take down: /armor lookup stops finding it now, though its name can stay in /armor list and the suggestions for up to 5 minutes. A post the bot already made stays in Discord, and approving it again may not post it again.";
+        public const string MovedBackFromApproved = "Moved back to Pending, so the bot stops showing it, as after Take down: /armor lookup stops finding it now. A post the bot already made stays in Discord, and approving it again may not post it again.";
+
+        // The line after an approval, a take-down or a move back from Approved: the bot was asked to clear its name cache,
+        // followed by the request's box, or why it wasn't, by the word the redirect carries. A word this version doesn't
+        // know says nothing.
+        public const string CacheClearing = "The bot was asked to clear its armor-name cache, so /armor list and the name suggestions follow as soon as it has:";
+
+        public const string UnsentOff = "off";
+        public const string UnsentLimit = "limit";
+        public const string UnsentUnavailable = "unavailable";
+        public const string UnsentUnsure = "unsure";
+
+        const string CatchUp = "so /armor list and the name suggestions catch up within 5 minutes.";
+
+        public static string? CacheNotCleared(string? unsent) => unsent switch
+        {
+            UnsentOff => "The bot's armor-name cache wasn't cleared, because requests to the bot are off, " + CatchUp,
+            UnsentLimit => "The bot's armor-name cache wasn't cleared, because it has been cleared as often as the limits allow this hour, " + CatchUp,
+            UnsentUnavailable => "The bot's armor-name cache wasn't cleared, because MinerBot's database didn't answer, " + CatchUp,
+            UnsentUnsure => "MinerBot's database didn't confirm the request to clear the bot's caches, so it may or may not have gone. Either way /armor list and the name suggestions catch up within 5 minutes.",
+            _ => null
+        };
+
+        // Announce now, which runs the bot's notification job for approved armor the bot hasn't seen yet, and what stands in
+        // its place when it isn't offered. What a pause holds lives only in the bot's memory, as the pause's own words say.
+        public const string AnnounceHelp = "Runs the bot's notification job now instead of at its next five-minute check, so this armor goes out with any other new armor, maps and lobbies, in every server with those posts turned on. The bot takes this at most once a minute, and not while a run is under way.";
+        public const string AnnouncePaused = "Posts are paused, so the bot posts this armor once they're resumed, unless the bot restarts first, which loses it. Announce now isn't offered while they are.";
+        public const string AnnounceOff = "Requests to the bot are off, so the bot posts it at its next five-minute check.";
+        public static string AnnounceRunning(string since) => $"The notification job is running now, since {since}, and may post this armor, unless the bot restarts or stops first, which loses it. Announce now isn't offered while it runs.";
+
+        // In its place when the bot's next notification run is its first since a start, which only notes the approved armor
+        // it finds: what the bot has seen lives only in its memory, so a restart loses this armor if it wasn't posted before,
+        // and Announce now would only make that run sooner. The status row can't tell whether it was posted, since it keeps
+        // only the last run, nor whether that first run is under way, since a run is recorded as it ends, and armor approved
+        // during that run is posted by the next, so neither line claims more.
+        public static string AnnounceRestarted(string since) =>
+            $"MinerBot started at {since}, and no notification run since is recorded yet. Its first run after a start only notes the approved armor it finds, without posting any, so if the bot hasn't posted this armor yet, it won't, unless the armor was approved during that run. Announce now isn't offered.";
+        public const string AnnounceStopped = "MinerBot is stopped. Its first notification run once it starts again only notes the approved armor it finds, without posting any, so if the bot hasn't posted this armor yet, it won't. Announce now isn't offered.";
+        public const string AnnounceNotNow = "Announce now isn't offered any more, for the reason below, so nothing was sent.";
+        public const string NotApprovedNow = "This armor isn't approved now, so nothing was sent.";
 
         public const string Changed = "This armor changed after you opened it, so nothing was done. The page now shows it as it is: look it over again before you choose.";
         public const string Blocked = "This armor can't be approved, so nothing was done. What stops it is listed under Rules, and what you can do about it under Decide.";
@@ -78,7 +122,7 @@ namespace MinerBot.Dashboard.Armor
         public static string SpeltDifferently(string status) =>
             $"Its status is stored spelt differently from the website's {status}, which the website's table doesn't tell apart, so the bot and the list treat the armor as {status}, and so does this page. An action here saves the website's own word.";
 
-        public const string ApproveHelp = "The bot shows it in /armor list and /armor lookup, and posts it at its next five-minute check in every server with armor posts turned on.";
+        public const string ApproveHelp = "The bot shows it in /armor list and /armor lookup, and posts it at its next five-minute check in every server with armor posts turned on, or sooner with Announce now" + NotAtTheFirstCheck + ".";
         public const string ApproveAgainHelp = "The bot shows it in /armor list and /armor lookup, but may not post it: " + PostedOnce + ".";
         public const string RejectHelp = "The bot doesn't show it. The reason is optional, kept in the history and shown only on the dashboard.";
         public const string TakeDownHelp = "The bot stops showing it. A post it already made stays in Discord.";
@@ -86,7 +130,7 @@ namespace MinerBot.Dashboard.Armor
         public const string BackToPendingFromApprovedHelp = "Puts the armor back in the queue, undoing the approval, so the bot stops showing it, as after Take down: /armor lookup at once, and /armor list and the name suggestions within 5 minutes. The dashboard can't tell whether the bot already posted it, and a post stays in Discord.";
 
         // The previews' note on the new-armor post
-        public const string PostNote = "The bot posts it at its next five-minute check after an approval, in every server with armor posts turned on. Other armor approved by then shares the message.";
+        public const string PostNote = "The bot posts it at its next five-minute check after an approval, or sooner with Announce now, in every server with armor posts turned on" + NotAtTheFirstCheck + ". Other armor approved by then shares the message.";
         public const string PostMayNotComeNote = "The bot posts new armor at its next five-minute check after an approval, in every server with armor posts turned on, but may not post this one: " + PostedOnce + ".";
 
         // What the screenshot section says when it doesn't load the address, which depends on whether the bot fetches it

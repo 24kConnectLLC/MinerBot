@@ -46,13 +46,15 @@ builder.Services.AddDataAccessServices(builder.Configuration)
                 .AddBotStatusReads()
                 .AddBotGuildReads()
                 .AddGuildSettingsReads()
-                .AddBotRequestQueue();
+                .AddBotRequestQueue()
+                .AddDashboardChecks();
 
 builder.Services.AddDashboardSignIn();
 builder.Services.AddArmorReview();
 builder.Services.AddBlacklistChanges();
 builder.Services.AddStatusPages();
 builder.Services.AddBotRequests();
+builder.Services.AddSelfChecks();
 
 // No fallback policy: it would also apply to addresses that match no page and turn every 404 into a sign-in. Deny by
 // default is the endpoint test's job instead.

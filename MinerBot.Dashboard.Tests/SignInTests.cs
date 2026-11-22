@@ -87,8 +87,8 @@ namespace MinerBot.Dashboard.Tests
             Assert.Equal("access_token", revoke.Form["token_type_hint"]);
             Assert.True(factory.Discord.IsRevoked(accessToken));
 
-            var signedIn = Assert.Single(await db.AuditAsync());
-            Assert.Equal("auth.signin", signedIn.action);
+            // Beside the row of the owner's message about it, which SignInAlertTests covers
+            var signedIn = Assert.Single(await db.AuditAsync(), row => row.action == "auth.signin");
             Assert.Equal(AuditRole.Owner, signedIn.actor_role);
         }
 
@@ -104,7 +104,7 @@ namespace MinerBot.Dashboard.Tests
             var html = await admin.Client.GetStringAsync("/admin", Token);
             Assert.Contains("with the Admin role", html);
             Assert.Contains("Test Admin", html);
-            Assert.Equal(AuditRole.Admin, Assert.Single(await db.AuditAsync()).actor_role);
+            Assert.Equal(AuditRole.Admin, Assert.Single(await db.AuditAsync(), row => row.action == "auth.signin").actor_role);
         }
 
         [Fact]

@@ -116,8 +116,13 @@ namespace MinerBot.Dashboard.Tests
 
             foreach (var page in new[] { "/", "/admin", "/signout", "/admin/armor", "/admin/armor?status=all", "/admin/armor?q=nothing", "/admin/armor?page=9",
                 "/admin/armor/1", "/admin/armor/1?done=rejected", "/admin/armor/1?list=all&q=test", "/admin/armor/2", "/admin/armor/3", "/admin/armor/4",
-                "/admin/armor/5", "/admin/armor/6" })
+                "/admin/armor/5", "/admin/armor/6", "/admin/bot/controls", "/admin/bot/controls?request=1" })
                 AssertAccessible("owner " + page, await owner.Client.GetStringAsync(page, Token));
+
+            // A take-down leads to its page with the cache clear's box, which refreshes itself
+            var takenDown = await ArmorSteps.PostAsync(owner, 5, "TakeDown", await ArmorSteps.OpenAsync(owner, 5));
+            Assert.Equal(HttpStatusCode.Redirect, takenDown.StatusCode);
+            AssertAccessible("a take-down with the cache clear's box", await owner.Client.GetStringAsync(SignInSteps.PathOf(takenDown.Headers.Location), Token));
 
             // The page a refused action answers with. ArmorActionTests checks the one for a save that may not have landed.
             var refused = await ArmorSteps.PostAsync(owner, 2, "Approve", await ArmorSteps.OpenAsync(owner, 2), false);
@@ -159,10 +164,12 @@ namespace MinerBot.Dashboard.Tests
                 AssertAccessible("owner " + page, await owner.Client.GetStringAsync(page, Token));
 
             // The pages a refused action answers with: a field refused, an account already listed, a stale edit, and a stale
-            // removal of a row no account number can be
+            // removal of a row no account number can be; and the page a custom link's lookup answers with
             var refusals = new (string What, Func<Task<HttpResponseMessage>> Send, HttpStatusCode Status)[]
             {
-                ("an add refused for its SteamID", () => BlacklistSteps.AddAsync(owner, ("steamid", "https://steamcommunity.com/id/someone"), ("name", "x")), HttpStatusCode.BadRequest),
+                ("an add refused for its SteamID", () => BlacklistSteps.AddAsync(owner, ("steamid", "not an id"), ("name", "x")), HttpStatusCode.BadRequest),
+                ("an add whose custom link is looked up", () => BlacklistSteps.AddAsync(owner, ("steamid", "https://steamcommunity.com/id/someone"), ("name", "x"),
+                    ("formkey", Shared.Requests.RequestFields.NewKey())), HttpStatusCode.OK),
                 ("an add refused for its fields", () => BlacklistSteps.AddAsync(owner, ("steamid", "54321"), ("name", new string('n', 61)), ("expires", "1999-01-01")), HttpStatusCode.BadRequest),
                 ("an add of an account already listed", () => BlacklistSteps.AddAsync(owner, ("steamid", "12345")), HttpStatusCode.Conflict),
                 ("a stale edit", () => BlacklistSteps.EditAsync(owner, 12345, page12345, ("reason", "Stale again")), HttpStatusCode.Conflict),
@@ -270,12 +277,17 @@ namespace MinerBot.Dashboard.Tests
             AssertAccessible("the Overview with a made-up name", html);
         }
 
-        // The status pages' script, as JavaScript, which nosniff needs before a browser runs it, in ASCII, since it's served
-        // without a charset, and sending the headers the dashboard checks. Only the pages whose status box refreshes load it.
+        // The pages' one script, as JavaScript, which nosniff needs before a browser runs it, in ASCII, since it's served
+        // without a charset, and sending the headers the dashboard checks. A box looks every 30 seconds, or at a pace of its
+        // own, until its fragment names the next wait or the end, and one with a pace of its own stops 15 minutes after the
+        // page loaded. Only the pages with a box that refreshes load it: the status pages, and a request's box until it's
+        // final. Fails if a box keeps its first pace whatever its fragment says, or the cap stops a box without a pace of its
+        // own, or spares one with.
         [Fact]
         public async Task RefreshScriptIsServedAndOnlyWhereItsUsed()
         {
-            await using var factory = new DashboardFactory(await fixture.ReadyBotAsync());
+            var db = await fixture.ReadyBotAsync();
+            await using var factory = new DashboardFactory(db);
 
             var response = await factory.Visitor().Client.GetAsync("/js/refresh.js", Token);
             var js = await response.Content.ReadAsStringAsync(Token);
@@ -285,30 +297,55 @@ namespace MinerBot.Dashboard.Tests
             Assert.All(js, c => Assert.True(c < 128, $"refresh.js holds {(int)c}, which isn't ASCII"));
             Assert.Contains($"'{Auth.BackgroundRefresh.Header}': '{Auth.BackgroundRefresh.Value}'", js);
             Assert.Contains($"response.headers.get('{Auth.BackgroundRefresh.FragmentHeader}') !== fragment", js);
+            Assert.Contains($"var next = response.headers.get('{Auth.BackgroundRefresh.NextHeader}');", js);
             Assert.Contains("redirect: 'manual'", js);
             Assert.Contains("cache: 'no-store'", js);
             Assert.DoesNotContain("innerHTML", js.Replace("box.innerHTML = html;", ""));
 
-            // Every 30 seconds, only while the page is visible, and only from the dashboard's own address
+            // Every 30 seconds unless a box or its fragment names a wait from 2 to 30 seconds, only while the page is visible,
+            // and only from the dashboard's own address
             Assert.Contains("var every = 30000;", js);
+            Assert.Contains("value >= 2 && value <= 30", js);
             Assert.Contains("if (stopped || document.visibilityState !== 'visible') {", js);
             Assert.Contains("if (address.origin !== window.location.origin || !fragment) {", js);
 
-            // Coming back to a page hidden for longer than the wait refreshes at once and starts the 30 seconds again, since
-            // the interval keeps its own count while the page is hidden and its next tick could follow a moment later
+            // A box's own pace is its first wait, and the wait its fragment names is the one before the next look, so a
+            // request's box goes from every 2 seconds to every 5 when the server says, as the address's limit allows for
+            Assert.Contains("var wait = seconds(box.getAttribute('data-refresh-every')) || every;", js);
+            Assert.Matches(NextWaitIsTheFragments(), js);
+
+            // The one quiet stop is the fragment's end. A failure stops with the note that asks for a reload, and so does a box
+            // with a pace of its own 15 minutes after the page loaded, and only such a box: the status box looks for as long
+            // as the page is open.
+            Assert.Matches(EndStopsQuietly(), js);
+            Assert.Equal(1, Regex.Count(js, Regex.Escape("stop(true)")));
+            Assert.Matches(FailureStopsWithTheNote(), js);
+            Assert.Contains("var limit = 900000;", js);
+            Assert.Contains("var capped = box.hasAttribute('data-refresh-every');", js);
+            Assert.Matches(CapStopsWithTheNote(), js);
+
+            // Coming back to a page hidden for longer than the wait looks at once, which starts the waits again
             var visible = VisibleHandler().Match(js);
             Assert.True(visible.Success, "refresh.js has no visible() handler");
+            Assert.Contains("Date.now() - last >= wait", visible.Value);
             Assert.Contains("refresh();", visible.Value);
-            Assert.Contains("window.clearInterval(timer);", visible.Value);
-            Assert.Contains("timer = window.setInterval(refresh, every);", visible.Value);
 
             var owner = factory.Visitor("203.0.113.75");
             await SignInSteps.SignedInAsync(factory, owner, TestUsers.Owner);
 
-            foreach (var page in new[] { "/admin", "/admin/bot" })
+            // The sign-in's message to the owner waits for the bot, so its page's box refreshes, until the bot has answered it
+            var alert = Assert.Single(await db.RequestsAsync()).id;
+            var request = "/admin/requests/" + alert;
+
+            foreach (var page in new[] { "/admin", "/admin/bot", "/admin/bot/controls", request })
                 Assert.True(LoadsRefreshScript(await owner.Client.GetStringAsync(page, Token)), $"{page} doesn't load refresh.js");
 
-            foreach (var page in new[] { "/admin/servers", "/admin/armor", "/admin/blacklist", "/admin/audit", "/" })
+            var now = factory.Clock.GetUtcNow().UtcDateTime;
+            await RequestSteps.ClaimAsync(db, alert, now.AddSeconds(1));
+            await RequestSteps.FinishAsync(db, alert, Shared.Requests.RequestStates.Done, "Told the owner.", now.AddSeconds(2));
+            await RequestSteps.DmAsync(db, alert, Shared.Requests.RequestDmStates.Sent);
+
+            foreach (var page in new[] { "/admin/servers", "/admin/armor", "/admin/blacklist", "/admin/blacklist/add", "/admin/audit", "/admin/sessions", "/", request })
                 Assert.False(LoadsRefreshScript(await owner.Client.GetStringAsync(page, Token)), $"{page} loads refresh.js");
         }
 
@@ -346,6 +383,21 @@ namespace MinerBot.Dashboard.Tests
         // refresh.js's visibilitychange handler, up to the brace that closes it at its own indent
         [GeneratedRegex("function visible\\(\\) \\{.*?\\n        \\}", RegexOptions.Singleline)]
         private static partial Regex VisibleHandler();
+
+        // The fragment's end, the only stop that writes no note
+        [GeneratedRegex("if \\(next === 'end'\\) \\{\\s*stop\\(true\\);")]
+        private static partial Regex EndStopsQuietly();
+
+        // Any other answer that names a wait sets it, then waits it
+        [GeneratedRegex("wait = seconds\\(next\\) \\|\\| wait;\\s*later\\(\\);")]
+        private static partial Regex NextWaitIsTheFragments();
+
+        // A failed look, and a box with a pace of its own past the cap, each stop with the note
+        [GeneratedRegex("\\.catch\\(function \\(\\) \\{\\s*stop\\(false\\);")]
+        private static partial Regex FailureStopsWithTheNote();
+
+        [GeneratedRegex("if \\(capped && Date\\.now\\(\\) - loaded >= limit\\) \\{\\s*stop\\(false\\);")]
+        private static partial Regex CapStopsWithTheNote();
 
         [GeneratedRegex("<div class=\"table-wrap\"[^>]*>")]
         private static partial Regex TableWrap();

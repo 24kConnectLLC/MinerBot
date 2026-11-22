@@ -387,9 +387,10 @@ namespace MinerBot.Dashboard.Tests
         public async Task LinksToAdminPagesAndTheWayBackAreLowercase()
         {
             var access = new FakeCloudflareAccess(keys);
-            var db = await fixture.ReadyAsync();
+            var db = await fixture.ReadyBotAsync();
             await db.AddArmorAsync(ArmorSteps.Submission(1));
             await db.AddEntriesAsync(BlacklistSteps.Entry(1));
+            await StatusSteps.ServersAsync(db);
             await using var factory = Factory(db, access, on: false);
 
             // Each admin page's address, as the app makes it, with a value for each part of its route, such as an armor's ID
@@ -420,8 +421,29 @@ namespace MinerBot.Dashboard.Tests
             var anonymous = factory.Visitor("203.0.113.89");
             Assert.Equal("/signin?returnUrl=%2Fadmin", SignInSteps.PathOf((await anonymous.Client.GetAsync("/admin", Token)).Headers.Location));
 
+            // The Owner's controls page while the sign-in isn't fresh, whose controls link to a sign-in again with their way back,
+            // and so do the leave page and the Sessions page; a server's page with its forms and its link to the leave page
+            var owner = factory.Visitor("203.0.113.90");
+            await SignInSteps.SignedInAsync(factory, owner, TestUsers.Owner);
+            factory.Clock.Advance(TimeSpan.FromMinutes(16));
+            var stale = await owner.Client.GetStringAsync("/admin/bot/controls", Token);
+            Assert.Contains("fresh=1", stale);
+
+            var leave = await owner.Client.GetStringAsync($"/admin/servers/{StatusSteps.ServerId}/leave", Token);
+            var sessions = await owner.Client.GetStringAsync("/admin/sessions", Token);
+            var server = await owner.Client.GetStringAsync($"/admin/servers/{StatusSteps.ServerId}", Token);
+            Assert.Contains("fresh=1", leave);
+            Assert.Contains("fresh=1", sessions);
+            Assert.Contains("?handler=TestMessage", server);
+            Assert.Contains("/leave", server);
+
             // Every link and form on the pages, signed in and not, that leads to an admin page, directly or as the way back
             var html = string.Join('\n',
+                stale,
+                leave,
+                sessions,
+                server,
+                await admin.Client.GetStringAsync("/admin/bot/controls", Token),
                 await anonymous.Client.GetStringAsync("/", Token),
                 await anonymous.Client.GetStringAsync("/denied?reason=mfa", Token),
                 await anonymous.Client.GetStringAsync("/signout", Token),

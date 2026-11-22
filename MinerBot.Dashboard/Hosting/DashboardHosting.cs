@@ -19,8 +19,9 @@ namespace MinerBot.Dashboard.Hosting
         public const string ApplicationName = "MinerBot.Dashboard";
 
         // The forms are sign-out, the armor review's actions, whose biggest is a reason of 500 characters and a tick for each
-        // warning, and the blacklist's, whose biggest is the add form: the SteamID box's 100 characters and an entry's four
-        // fields, 250 more (name 60, reason 60, end date 10, notes 120), which are all an edit sends. Each character a box's
+        // warning, the blacklist's, whose biggest is the add form: the SteamID box's 100 characters and an entry's four
+        // fields, 250 more (name 60, reason 60, end date 10, notes 120), which are all an edit sends, and the bot's controls,
+        // whose biggest is a pause's reason of 200 characters with its typed word and the form's key. Each character a box's
         // maxlength counts is at most 9 bytes once the form encodes it, so that's a few kilobytes at most. nginx caps bodies
         // at 256 KB, four times this, so a body in between gets this app's own page. A later page that needs more can raise
         // it.

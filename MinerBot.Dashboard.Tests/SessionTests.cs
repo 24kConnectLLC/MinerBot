@@ -16,6 +16,7 @@ using Microsoft.Extensions.Options;
 using MinerBot.Dashboard.Auth;
 using MinerBot.Dashboard.Hosting;
 using MinerBot.Dashboard.Tests.Support;
+using MinerBot.Shared.Requests;
 
 namespace MinerBot.Dashboard.Tests
 {
@@ -205,6 +206,67 @@ namespace MinerBot.Dashboard.Tests
             Assert.Equal(2, (await db.AuditAsync()).Count(row => row.action == "auth.signin"));
         }
 
+        // A sign-in again that fails, here because the owner's message about it can't be written, leaves the browser signed
+        // in as it was: the session it would replace ends only in the new one's own transaction, so it goes on working, and
+        // the next sign-in again that works ends it. Fails if the old session ends before the new one is made.
+        [Fact]
+        public async Task ASignInAgainThatFailsKeepsTheSessionItWouldReplace()
+        {
+            var db = await fixture.ReadyAsync();
+            var failures = new Failures();
+            await using var factory = Failing(db, failures);
+            var owner = factory.Visitor();
+            var key = await SignInSteps.SignedInAsync(factory, owner, TestUsers.Owner);
+
+            factory.Clock.Advance(TimeSpan.FromMinutes(20));
+            failures.AuditAction = RequestKinds.OwnerSigninAlert;
+            var failed = await SignInSteps.SignInAgainAsync(factory, owner, TestUsers.Owner, "/admin/bot/controls#restart");
+
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, failed.StatusCode);
+            Assert.Equal(key, owner.SessionKey);
+            Assert.NotNull(await db.SessionAsync(key));
+            Assert.Single(await db.SessionsAsync());
+            Assert.Equal(HttpStatusCode.OK, await AdminAsync(owner));
+
+            failures.AuditAction = null;
+            Assert.Equal(HttpStatusCode.Redirect, (await SignInSteps.SignInAgainAsync(factory, owner, TestUsers.Owner, "/admin")).StatusCode);
+            Assert.NotEqual(key, owner.SessionKey);
+            Assert.Null(await db.SessionAsync(key));
+            Assert.NotNull(await db.SessionAsync(owner.SessionKey!));
+            Assert.Single(await db.SessionsAsync());
+        }
+
+        // A sign-in again from one of someone's five sessions ends only that one: it goes before the cap counts, so their
+        // oldest session stays. Fails if the replaced session ends after the cap, which would end the oldest too.
+        [Fact]
+        public async Task ASignInAgainEndsOnlyTheSessionItReplaces()
+        {
+            var db = await fixture.ReadyAsync();
+            await using var factory = new DashboardFactory(db);
+            var browsers = new List<TestBrowser>();
+
+            // Each from its own address, as in FiveSessionsAtMost
+            for (var i = 0; i < DbTicketStore.MaxSessionsPerPerson; i++)
+            {
+                factory.Clock.Advance(TimeSpan.FromMinutes(1));
+                var browser = factory.Visitor($"203.0.113.{80 + i}");
+                await SignInSteps.SignedInAsync(factory, browser, TestUsers.Admin);
+                browsers.Add(browser);
+            }
+
+            // The newest signs in again, so a cap that counted the session it replaces would take the oldest
+            var newest = browsers[^1];
+            var replaced = newest.SessionKey!;
+            factory.Clock.Advance(TimeSpan.FromMinutes(1));
+            Assert.Equal(HttpStatusCode.Redirect, (await SignInSteps.SignInAgainAsync(factory, newest, TestUsers.Admin, "/admin")).StatusCode);
+
+            Assert.Null(await db.SessionAsync(replaced));
+            Assert.Equal(DbTicketStore.MaxSessionsPerPerson, (await db.SessionsAsync()).Count);
+
+            foreach (var browser in browsers)
+                Assert.Equal(HttpStatusCode.OK, await AdminAsync(browser));
+        }
+
         // Past its 12 hours, or unused for longer than the idle limit, which would be refused anyway. Fails if either kind
         // stays, with its address and browser, until the other one's time comes.
         [Fact]
@@ -250,8 +312,8 @@ namespace MinerBot.Dashboard.Tests
 
             await SignInSteps.SignedInAsync(factory, factory.Visitor("203.0.113.12"), TestUsers.Admin);
 
-            var signedIn = Assert.Single(await db.AuditAsync());
-            Assert.Equal("auth.signin", signedIn.action);
+            // Beside the row of the owner's message about it, which SignInAlertTests covers
+            var signedIn = Assert.Single(await db.AuditAsync(), row => row.action == "auth.signin");
             Assert.Equal(AuditOutcome.Ok, signedIn.outcome);
             Assert.Equal(AuditRole.Admin, signedIn.actor_role);
             Assert.Equal(TestUsers.Admin.Id, signedIn.actor_id);
@@ -442,7 +504,10 @@ namespace MinerBot.Dashboard.Tests
             public Task CreateSession(string key, DashboardSession session, DataTransaction? transaction = null) => real.CreateSession(key, session, transaction);
             public Task<int> DeleteExpiredSessions(DateTime expiredBefore, DateTime unusedBefore) => real.DeleteExpiredSessions(expiredBefore, unusedBefore);
             public Task<int> DeleteOtherSessions(ulong userId, string keepKey, DataTransaction? transaction = null) => real.DeleteOtherSessions(userId, keepKey, transaction);
+            public Task<SessionListRow?> DeleteSessionByHash(byte[] hash, DataTransaction transaction) => real.DeleteSessionByHash(hash, transaction);
+            public Task<IReadOnlyList<SessionListRow>> DeleteSessionsBut(string keepKey, DataTransaction transaction) => real.DeleteSessionsBut(keepKey, transaction);
             public Task<DashboardSession?> GetSession(string key, DateTime now) => real.GetSession(key, now);
+            public Task<IReadOnlyList<SessionListRow>> ListSessions(DateTime now, DateTime unusedBefore) => real.ListSessions(now, unusedBefore);
             public Task<bool> RenewSession(string key, byte[] ticket) => real.RenewSession(key, ticket);
             public Task<T> RunInTransaction<T>(Func<DataTransaction, Task<T>> work) => real.RunInTransaction(work);
             public Task<bool> TouchSession(string key, DateTime lastSeenAt) => real.TouchSession(key, lastSeenAt);

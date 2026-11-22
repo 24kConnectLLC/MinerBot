@@ -35,6 +35,7 @@ namespace MinerBot.Dashboard.Status
         public static IServiceCollection AddStatusPages(this IServiceCollection services)
         {
             services.AddTransient<StatusBoxes>();
+            services.AddTransient<BannerReads>();
             return services;
         }
     }

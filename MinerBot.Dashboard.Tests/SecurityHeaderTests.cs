@@ -1,9 +1,11 @@
 using System.Net;
 using DataAccessLibrary.Tests.Database;
 using MinerBot.Dashboard.Auth;
+using MinerBot.Dashboard.Requests;
 using MinerBot.Dashboard.Security;
 using MinerBot.Dashboard.Status;
 using MinerBot.Dashboard.Tests.Support;
+using MinerBot.Shared.Requests;
 
 namespace MinerBot.Dashboard.Tests
 {
@@ -103,6 +105,24 @@ namespace MinerBot.Dashboard.Tests
             await Add("overview", admin.Client.GetAsync("/admin", Token), HttpStatusCode.OK);
             await Add("status fragment", admin.Client.GetAsync("/admin?handler=status", Token), HttpStatusCode.OK);
 
+            // The message to the owner the sign-in left, which waits for the bot: its page, and its box alone
+            var alert = Assert.Single(await db.RequestsAsync()).id;
+            await Add("request page", admin.Client.GetAsync($"/admin/requests/{alert}", Token), HttpStatusCode.OK);
+            await Add("request fragment", admin.Client.GetAsync($"/admin/requests/{alert}?handler=result", Token), HttpStatusCode.OK);
+            await Add("controls page", admin.Client.GetAsync("/admin/bot/controls", Token), HttpStatusCode.OK);
+
+            // The controls page drawn again for a person's limit, with Retry-After, and for a sign-in too old for the control
+            var now = factory.Clock.GetUtcNow().UtcDateTime;
+            await RequestSteps.AddRefusedAsync(db, RequestKinds.CachesClear, TestUsers.Admin, Enumerable.Range(1, 20).Select(minute => now.AddMinutes(-minute)));
+            await Add("person limit", RequestSteps.PostControlAsync(admin, await RequestSteps.ControlsAsync(admin), ControlWords.ClearCaches), HttpStatusCode.TooManyRequests);
+
+            var owner = factory.Visitor("203.0.113.79");
+            await SignInSteps.SignedInAsync(factory, owner, TestUsers.Owner);
+            var ownerControls = await RequestSteps.ControlsAsync(owner);
+            factory.Clock.Advance(TimeSpan.FromMinutes(16));
+            await Add("old sign-in", RequestSteps.PostControlAsync(owner, ownerControls, ControlWords.Restart, ("confirm", "restart")), HttpStatusCode.Forbidden);
+            Assert.NotEmpty(Values(responses.Single(response => response.What == "person limit").Response, "Retry-After"));
+
             // A database that's down, behind a cookie that has to be looked up
             var dead = new DeadDatabase();
             await using var deadFactory = new DashboardFactory(db, new DashboardFactoryOptions { SiteConnection = dead.SiteConnection, BotConnection = dead.BotConnection });
@@ -127,11 +147,15 @@ namespace MinerBot.Dashboard.Tests
             Assert.Equal(["max-age=604800", "no-transform", "public"], Directives(responses.Single(response => response.What == "stylesheet").Response).Order(StringComparer.Ordinal));
             Assert.Equal(["max-age=604800", "no-transform", "public"], Directives(responses.Single(response => response.What == "script").Response).Order(StringComparer.Ordinal));
 
-            // Only the fragment carries its marker, set on the response itself, so the 503 page, written on a cleared
-            // response, never does
+            // Only the two fragments carry their markers, and only the request's when to look next, set on the response itself,
+            // so the 503 page, written on a cleared response, never does
             Assert.Equal([StatusBoxes.Fragment], Values(responses.Single(response => response.What == "status fragment").Response, BackgroundRefresh.FragmentHeader));
-            Assert.All(responses.Where(response => response.What != "status fragment"),
+            Assert.Equal([RequestViews.Fragment], Values(responses.Single(response => response.What == "request fragment").Response, BackgroundRefresh.FragmentHeader));
+            Assert.Equal(["2"], Values(responses.Single(response => response.What == "request fragment").Response, BackgroundRefresh.NextHeader));
+            Assert.All(responses.Where(response => response.What is not ("status fragment" or "request fragment")),
                 response => Assert.True(Values(response.Response, BackgroundRefresh.FragmentHeader).Count == 0, $"{response.What} carries the fragment's marker"));
+            Assert.All(responses.Where(response => response.What != "request fragment"),
+                response => Assert.True(Values(response.Response, BackgroundRefresh.NextHeader).Count == 0, $"{response.What} says when to look next"));
         }
     }
 }

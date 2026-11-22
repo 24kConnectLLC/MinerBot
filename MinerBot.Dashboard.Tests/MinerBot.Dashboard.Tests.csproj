@@ -25,12 +25,20 @@
     <!-- A deadlock as MySql.Data reports one, for the armor review's transaction that runs again -->
     <Compile Include="..\DataAccessLibrary.Tests\MySqlErrors.cs" Link="Database\MySqlErrors.cs" />
     <None Include="..\docs\schema\wordpress-tables.sql" Link="schema\wordpress-tables.sql" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The dashboard's own database login, made with the rights deploy gives it, for the Sessions page's checks as that login -->
+    <Compile Include="..\DataAccessLibrary.Tests\Database\DashboardLogin.cs" Link="Database\DashboardLogin.cs" />
+    <None Include="..\deploy\dashboard-rights.sql" Link="deploy\dashboard-rights.sql" CopyToOutputDirectory="PreserveNewest" />
+    <!-- nginx's site, whose wait for a page bounds how long one person's send waits for their last: PersonLimitTests reads it -->
+    <None Include="..\deploy\minerbot-dashboard.conf" Link="deploy\minerbot-dashboard.conf" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
-  <!-- The dashboard's own code, which AuditWordsTests reads for an audit action written anywhere but AuditWords -->
+  <!-- The dashboard's own code, which AuditWordsTests reads for an audit action written anywhere but AuditWords, and
+       DataAccessLibrary's beside it, which CodeTests reads for SQL that must never be there -->
   <ItemGroup>
     <None Include="..\MinerBot.Dashboard\**\*.cs" Exclude="..\MinerBot.Dashboard\bin\**;..\MinerBot.Dashboard\obj\**"
           Link="dashboard-source\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    <None Include="..\DataAccessLibrary\**\*.cs" Exclude="..\DataAccessLibrary\bin\**;..\DataAccessLibrary\obj\**"
+          Link="data-source\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Visible="false" />
   </ItemGroup>
 
   <!-- The bot's two lists of its event kinds, read as text by StatusRulesTests and AuditWordsTests, so a kind the bot gains
@@ -39,6 +47,11 @@
   <ItemGroup>
     <None Include="..\MinerBot 2.0\Status\BotEvents.cs" Link="bot-source\BotEvents.cs" CopyToOutputDirectory="PreserveNewest" Visible="false" />
     <None Include="..\SteamWebAPIAccess\SteamStatus.cs" Link="bot-source\SteamStatus.cs" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    <!-- The bot's request actions, whose restart rule the controls page states: ControlsPageTests reads it -->
+    <None Include="..\MinerBot 2.0\Requests\RequestActions.cs" Link="bot-source\RequestActions.cs" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    <!-- The bot's words for the requests it refuses, whose two for a row the dashboard didn't sign banner 4 looks for:
+         RequestBannerTests reads it -->
+    <None Include="..\MinerBot 2.0\Requests\RequestTexts.cs" Link="bot-source\RequestTexts.cs" CopyToOutputDirectory="PreserveNewest" Visible="false" />
   </ItemGroup>
 
   <ItemGroup>

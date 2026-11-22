@@ -489,6 +489,7 @@ namespace MinerBot.Dashboard.Tests
             public Task<UptimeStartRow> FirstRecord() => throw Dropped();
             public Task<BotStatusRow?> GetStatus() => throw Dropped();
             public Task<BotEventRow?> LatestEvent(string kind) => throw Dropped();
+            public Task<BotEventRow?> LatestEventWith(string kind, IReadOnlyCollection<string> phrases, DateTime since) => throw Dropped();
             public Task<DataAccessLibrary.Page<BotEventRow>> ListEvents(EventQuery query) => throw Dropped();
             public Task<IReadOnlyList<JobRunRow>> ListJobRuns(IReadOnlyCollection<string> jobs, int perJob) => throw Dropped();
             public Task<IReadOnlyList<JobStatusRow>> ListJobs() => throw Dropped();
@@ -559,7 +560,7 @@ namespace MinerBot.Dashboard.Tests
 
         // The version and starts, uptime from the days the clean-up totalled and the samples after them, the jobs with
         // their schedules in words and their last 50 runs, and the events, 50 to a page, without routine reconnects unless
-        // asked
+        // asked, and under the status the way to the bot's controls
         [Fact]
         public async Task BotPageShowsVersionUptimeJobsAndEvents()
         {
@@ -620,6 +621,7 @@ namespace MinerBot.Dashboard.Tests
             PageTests.AssertTimesStayWhole("the Bot status page", html);
 
             Assert.Contains($"<a href=\"https://github.com/24kConnectLLC/MinerBot/commit/{StatusSteps.Commit}\" class=\"address\">5a62c9f</a>", html);
+            Assert.Contains("<a href=\"/admin/bot/controls\">Bot controls</a>", html);
             Assert.Contains("Starts 2 starts in the last 7 days, 3 starts in the last 30", text);
             Assert.Contains("Ends without a clean stop 0 in the last 7 days, 1 in the last 30", text);
 

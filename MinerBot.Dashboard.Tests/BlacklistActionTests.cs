@@ -132,7 +132,8 @@ namespace MinerBot.Dashboard.Tests
         }
 
         // Each refusal is the form again, with what was typed kept and a fixed message, and nothing written, not even an
-        // audit row: these are typing mistakes, as PR 4's 400s are. A custom link's name is never repeated.
+        // audit row: these are typing mistakes, as PR 4's 400s are. A custom link is looked up instead, which
+        // BlacklistLookupTests checks, and its name is never repeated.
         [Theory]
         [InlineData("", "Enter a SteamID, an account number or a Steam profile link")]
         [InlineData("not an id", "That isn't a SteamID, an account number or a Steam profile link")]
@@ -140,8 +141,6 @@ namespace MinerBot.Dashboard.Tests
         [InlineData("[U:1:0]", "Account number 0 isn't a Steam account")]
         [InlineData("76561197960265728", "That SteamID64 is account 0, which isn't a Steam account")]
         [InlineData("[U:1:4294967296]", "That account number is out of range")]
-        [InlineData("https://steamcommunity.com/id/sneakyname", BlacklistWords.CustomLink)]
-        [InlineData("steamcommunity.com/id/sneakyname/", BlacklistWords.CustomLink)]
         public async Task AddRefusesWhatIsntASteamAccount(string steamId, string message)
         {
             var db = await fixture.ReadyAsync();
@@ -157,15 +156,6 @@ namespace MinerBot.Dashboard.Tests
             Assert.Equal("2027-01-02", BoxValue(html, "expires"));
             Assert.Contains("aria-invalid=\"true\"", html);
             PageTests.AssertAccessible("a refused add", html);
-
-            // Only in the box, where it was typed, and in no log line. The message says where to get the account's number.
-            if (steamId.Contains("sneakyname", StringComparison.Ordinal))
-            {
-                Assert.Equal(1, System.Text.RegularExpressions.Regex.Count(html, "sneakyname"));
-                Assert.Contains("MinerBot's /more steam_id command in Discord gives the SteamID64 of a custom link written as https://steamcommunity.com/id/ and the name.",
-                    WebUtility.HtmlDecode(html));
-                AssertNotLogged(factory, "sneakyname");
-            }
 
             Assert.Equal(0, await db.EntryCountAsync());
             Assert.Empty(await db.BlacklistAuditAsync());

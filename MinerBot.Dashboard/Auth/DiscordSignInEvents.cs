@@ -99,7 +99,8 @@ namespace MinerBot.Dashboard.Auth
             context.ReturnUri = ReturnUrls.Pick(context.ReturnUri);
             context.Properties!.IsPersistent = false;
 
-            await store.ForgetCurrentAsync(httpContext);
+            // A session the browser already has ends with the new one's commit, never before it
+            store.ReplaceCurrent(httpContext);
         }
 
         // The visitor pressed Cancel at Discord, after the state and the correlation cookie had passed

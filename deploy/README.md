@@ -502,7 +502,9 @@ setup when the certificate changes), `status.sh` shows the days left, and the ni
 
 The dashboard leaves the bot signed requests in MinerBot's own database, in `bot_commands`, and the bot takes each one
 within seconds and writes how it ended on the same row. The repository's README lists them ("Requests to the bot").
-The dashboard's page for them comes in PR 10; until then `request.sh` sends one from the server.
+Since PR 10 the dashboard's pages send them: Bot controls (`/admin/bot/controls`), the cache clear and Announce now after
+an armor review, a server's test message, refresh and leave, the blacklist's custom-link lookup, and the message about
+each sign-in. `request.sh` sends one from the server too, for when the pages can't be reached.
 
 ### The request-signing key
 
@@ -534,11 +536,14 @@ The dashboard's page for them comes in PR 10; until then `request.sh` sends one 
 - `./status.sh` shows one line for the key, and `./status.sh --check` reports a key missing or malformed in either
   file, the two files apart, and a container on another key than its file holds, each line saying what to run. The
   keys are only compared, never printed.
-- To rotate it: `./setup-dashboard.sh --no-questions --rotate-request-key`. A request signed with the old key in the
-  seconds between the two recreates is refused. The bot can't tell another key from a forged row, so its refusal and
-  its direct message about a signature that didn't match, at most one an hour, name both causes, and
-  `./status.sh --check` says which. A bot restarted by a request keeps its container, so it never picks up a changed
-  `bot.env`: only setup's recreate, or a deploy that swaps the bot, does.
+- To rotate it: `./setup-dashboard.sh --no-questions --rotate-request-key`, at a quiet hour. Setup recreates the
+  dashboard with the new key before the bot, so in the seconds between the two recreates the bot, still on the old key,
+  refuses what the dashboard signs with the new one: since PR 10, the message about a sign-in in those seconds, or a
+  request sent from a page. The bot can't tell another key from a forged row, so its refusal and its direct message
+  about a signature that didn't match, at most one an hour, name both causes. The Overview's banners show such a
+  refusal for a day, and the Sessions page a refused sign-in message. One at the time of a rotation is the rotation's;
+  at any other time, `./status.sh --check` says which. A bot restarted by a request keeps its container, so it never
+  picks up a changed `bot.env`: only setup's recreate, or a deploy that swaps the bot, does.
 - `fill-secrets.sh`, `move-database.sh` and the bootstrap leave `REQUEST_SIGNING_KEY` as it is and never print it:
   they change other lines of `bot.env` with `write_env`, which keeps every other line, or only read it. The backup
   never reads `bot.env`.
@@ -618,6 +623,46 @@ what shows in Discord: the direct messages, the status text and the silent test 
 A leave deletes that server's channel settings, as a removal does, and only a new invite undoes it, so step 16 needs a
 server made for the check, with MinerBot invited before it. Without one, skip it: the tests cover the leave.
 
+### PR 10's deploy
+
+PR 10 adds the dashboard's pages that send requests, and the Sessions page. The bot doesn't change.
+
+1. `./deploy.sh <commit> --only dashboard`, with the owner's go-ahead, at a quiet hour. It installs the deploy files, the
+   rights file with its one new right among them, runs no migration, so it takes no dump, builds the dashboard, checks
+   its settings (there's no new one, so `dashboard.env` stays as it is), applies the rights after their rehearsal, and
+   swaps the dashboard. The bot isn't built or touched.
+2. `./status.sh --check` is clean.
+
+The new right is `SELECT` on `schema_version`, which the Sessions page reads to compare the migrations MinerBot's
+database has run with the ones built into the dashboard. To undo the deploy, `./rollback.sh dashboard` puts PR 9's
+dashboard back; the right stays, unused and harmless, as a deploy keeps a previous image's rights. PR 9's dashboard
+sends no message about a sign-in, and the requests PR 10's pages left are taken or expire as usual.
+
+### PR 10's live check
+
+In the owner's browser, through Cloudflare Access, with `./status.sh` over SSH, read-only, before and after. Steps 7 to
+11 need a sign-in from the last 15 minutes, all but Resume posts and Back to the default status, and the page offers one
+when it's older.
+
+| # | In the browser | Look for |
+|---|---|---|
+| 0 | `./status.sh --check` | clean |
+| 1 | Sign in at https://bot.murderminershub.com/admin, signing out first if the browser is still signed in from before the deploy: a session outlasts the swap, and only a new sign-in sends the message | within about 10 seconds, a direct message "Dashboard sign-in: ... signed in as Owner ..."; no banner saying requests are off |
+| 2 | Sessions | this session, with its address and browser, marked as this one; each check OK or a note: the rights match with 15 connections and 20 seconds, the keys folder and the temporary folder writable, the structure up to date (migrations 1 to 4), Access on with fresh keys, requests on with no refusal, the last direct message sent (step 1's), the sign-in messages counted |
+| 3 | Controls | "Posts aren't paused."; "Discord shows the default status, ..."; each control's last use from PR 9's live check, by "request.sh on the server"; each one "Available now." |
+| 4 | Clear the caches | Queued, then "Done at ...: Cleared the armor-name and latest-maps caches." within about 5 seconds |
+| 5 | Servers, the 24kConnect server: Rewrite the copy, then Send a test message | the copy rewritten, with its count of text and announcement channels; then, to a channel the picker offers, which is one of the channels 24kConnect chose for MinerBot's posts with `/admin set_channels`, never one it didn't, so not #bot-testing unless that's one of them: done, with "Open the test message in Discord", which opens the silent "MinerBot test message" embed |
+| 6 | Blacklist, Add, with https://steamcommunity.com/id/gabelogannewell, the name "Live check" and the reason "PR 10 live check" | the page back with the boxes kept and the lookup's box saying "That link is account [U:1:22202]."; Add to the blacklist again makes entry [U:1:22202]; Remove takes it away; the audit log shows the lookup, the add and the removal |
+| 7 | Restart, the plan's check | once the sign-in is 15 minutes old, the restart section offers a sign-in again, and Sign in again with Discord brings a second sign-in message and the page back (before then the form shows at once, and Your sign-in says until when); typing `restart` and pressing Restart the bot shows Queued, "Done ...: The bot is restarting ...", then "Back on Discord at ..., N s after the request" within 2 minutes, or up to 6 when a notification run had just started, which the restart lets end; a direct message "Restart the bot, asked for on the MinerBot dashboard by ..."; Stopping and Started on the Bot page. If the bot refuses because a notification run is under way, press it again a minute later |
+| 8 | Restart again at once, typing `restart` | refused before sending: "The bot takes this at most once every 10 minutes, and last took one at ..., so nothing was sent. Try again after ...", and no new request in the audit log |
+| 9 | Pause posts with a reason, typing `pause`; once its box says to reload the page, reload it, then Resume posts | each done, with its direct message and "Reload the page to see the new settings."; the Overview's paused banner comes and goes |
+| 10 | Optional: set a status text, then Back to the default status | Discord shows each |
+| 11 | Optional: sign in from a second browser or a phone, then on the first, Sessions, End it | the second browser's next click goes to the sign-in page; Changes to sessions shows "Ended a session" |
+| 12 | Audit log | each request reads "Sent to the bot", with a "Bot request N" link to its page and the bot's answer there |
+| 13 | Optional, only if a pending armor should be approved, and only once the Bot page shows a notification run that started after step 7's Started event, not one the restart let end, since the bot's first run after a start only notes the approved armor it finds, and armor approved before that run is never posted: Approve it | the page says the bot was asked to clear its armor-name cache, and its box says done; Announce now posts the armor within seconds |
+| 14 | Leave | skipped unless there's a throwaway server, as in PR 9's |
+| 15 | `./status.sh --check` | clean |
+
 ### What to know
 
 - **One bot per database.** The bot counts a limit from `bot_commands`, then takes the request in a second statement,
@@ -629,6 +674,11 @@ server made for the check, with MinerBot invited before it. Without one, skip it
   restart sent from the dashboard's page during that check moves the bot's restart count, which fails the deploy.
   Nothing is put back, since the image is the same, and the next deploy goes through: rare, and harmless. `request.sh`
   holds the lock, so it can't do this.
+- **A sign-in that can't leave its message to the owner doesn't happen.** The request for the message is written in
+  the sign-in's own transaction, so while the dashboard's login can't add a row to `bot_commands`, every sign-in ends
+  on the page that says the database can't be reached, though `./status.sh` shows MinerBot's database up. The
+  dashboard's log names MariaDB's error (`docker logs --tail 50 minerbot-dashboard`): 1142 or 1143 is a right the login
+  lacks, and `./setup-dashboard.sh --no-questions` applies again the rights the last apply used.
 - The nightly clean-up deletes a request 90 days after it was made, or after the bot ended it if that came first, so
   a row dated years ahead by a writer without the key, which the bot refuses, still goes. The dumps hold the requests,
   so a restore brings them back as they were dumped, which only each one's expiry keeps from being acted on.
@@ -844,6 +894,7 @@ How the file grows. The approved plan's list is the ceiling:
 | PR 8, status and servers pages | `SELECT` on `bot_status`, `uptime_samples`, `uptime_daily`, `bot_events`, `job_status`, `job_runs`, `guilds`, `guild_channels`, `guild_events` and `guild_daily`, which only the bot writes; `SELECT` on `ihvph_discord_servers`, each server's ID and four channel IDs |
 | The server channels page | `INSERT, UPDATE (armor_channel_id, map_channel_id, lobby_channel_id, announcements_channel_id)` on `ihvph_discord_servers`, whose `SELECT` PR 8 gave |
 | PR 9, the bot's requests | `SELECT` and an `INSERT` of the eleven request columns on `bot_commands`, so a request's state, run, times, result and direct message start empty and only the bot's own login writes them; `SELECT` on `bot_settings`, which only the bot writes |
+| PR 10, the controls and the Sessions page | `SELECT` on `schema_version`, each migration's number, name, checksum and time, which only the migrations write, for the Sessions page's check of MinerBot's database structure |
 | The dashboard's switch and note tables | `SELECT, INSERT, UPDATE, DELETE` on the dashboard's switches and notes, each in the PR that creates the table |
 
 ## The settings rule

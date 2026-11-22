@@ -19,6 +19,7 @@ using MinerBot.Dashboard.Security;
 using MinerBot.Dashboard.Servers;
 using MinerBot.Dashboard.Status;
 using MinerBot.Shared.Armor;
+using MinerBot.Shared.Requests;
 using StatusBanners = MinerBot.Dashboard.Status.Banners;
 
 namespace MinerBot.Dashboard.Pages.Admin
@@ -107,11 +108,21 @@ namespace MinerBot.Dashboard.Pages.Admin
                     .Count(row => row.IsIn && row.Settings.Any(setting => SettingStatuses.IsProblem(setting.State)));
             }
 
-            var changes = await DatabaseCalls.Guard(() => audit.ListAudit(new AuditQuery { PageSize = ChangesShown, IncludeIp = ShowsAddresses }), logger);
+            // A sign-in's message to the owner isn't a change, and every sign-in has one beside its own row, so they're left
+            // out here; the audit page lists them
+            var changes = await DatabaseCalls.Guard(() => audit.ListAudit(new AuditQuery
+            {
+                PageSize = ChangesShown,
+                IncludeIp = ShowsAddresses,
+                ExcludeActions = [RequestKinds.OwnerSigninAlert]
+            }), logger);
+
             // Named by the section's heading, for when the rows hold no link, such as sign-ins refused for their scope
             Changes = AuditRows.Table(changes.Rows, ShowsAddresses, labelledBy: "changes");
 
-            Banners = StatusBanners.Of(Box, jobs, Armor, serversCantPost, FailedReads);
+            // The requests' banners after the bot's own, from MinerBot's database alone
+            var facts = await HttpContext.RequestServices.GetRequiredService<BannerReads>().LoadAsync(Box.Status);
+            Banners = [.. StatusBanners.Of(Box, jobs, Armor, serversCantPost, FailedReads), .. RequestBanners.Of(facts, RoleClaims.RoleOf(User), Box.Now)];
         }
 
         // The status box alone, marked as the status fragment on the response itself, so an error page, which the

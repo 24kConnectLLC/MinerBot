@@ -74,7 +74,8 @@ namespace DataAccessLibrary.Tests
                 .AddBotGuildReads()
                 .AddGuildSettingsReads()
                 .AddBotRequestAccess()
-                .AddBotRequestQueue();
+                .AddBotRequestQueue()
+                .AddDashboardChecks();
 
             if (factory != null)
                 services.AddSingleton(factory);
@@ -127,6 +128,8 @@ namespace DataAccessLibrary.Tests
             var guildReads = provider.GetRequiredService<IBotGuildReads>();
             var requests = provider.GetRequiredService<IBotRequestData>();
             var queue = provider.GetRequiredService<IBotRequestQueue>();
+            var reads = provider.GetRequiredService<IBotRequestReads>();
+            var checks = provider.GetRequiredService<IDashboardChecks>();
             provider.GetRequiredService<IGuildSettingsReads>();
             Assert.IsType<DatabaseHealthData>(provider.GetRequiredService<IDatabaseHealthData>());
 
@@ -158,6 +161,7 @@ namespace DataAccessLibrary.Tests
                 () => statusReads.GetStatus(),
                 () => statusReads.ListEvents(new EventQuery()),
                 () => statusReads.LatestEvent("discord.connected"),
+                () => statusReads.LatestEventWith("request.rejected", ["signature didn't match"], now.AddDays(-1)),
                 () => statusReads.FirstEventAfter("discord.disconnected", null),
                 () => statusReads.CountEvents(["bot.started"], now.AddDays(-30), now.AddDays(-7)),
                 () => statusReads.ListJobs(),
@@ -182,6 +186,10 @@ namespace DataAccessLibrary.Tests
                 () => sessions.CreateSession(new string('k', 43), new DashboardSession { user_name = "Test User", ticket = [1] }),
                 () => sessions.DeleteOldestSessions(1, 5),
                 () => sessions.RunInTransaction(_ => Task.FromResult(0)),
+                () => sessions.ListSessions(now, now.AddMinutes(-30)),
+                // Each stops before its first statement, so a transaction with no connection is enough
+                () => sessions.DeleteSessionByHash(new byte[DashboardSessionData.HashLength], NoTransaction()),
+                () => sessions.DeleteSessionsBut(new string('k', 43), NoTransaction()),
                 () => requests.ListOpenIds(1, 20, restartOnly: false),
                 () => requests.GetRequest(1),
                 () => requests.Decide(1, 1, RequestStates.Refused, "Refused", now),
@@ -200,7 +208,17 @@ namespace DataAccessLibrary.Tests
                 () => queue.GetSettings(),
                 () => queue.RunInTransaction(_ => Task.FromResult(0)),
                 // A request that passes every check gets as far as its SQL, which names the database
-                () => queue.AddRequest(Request(now), new byte[RequestSigning.SignatureLength], NoTransaction())
+                () => queue.AddRequest(Request(now), new byte[RequestSigning.SignatureLength], NoTransaction()),
+                () => reads.GetRequestView(1),
+                () => reads.ListLatest([RequestKinds.CachesClear], 1),
+                () => reads.ListClaimsSince(now.AddHours(-1)),
+                () => reads.ListWaiting(now),
+                () => reads.ListAskedBy(1, now.AddHours(-1)),
+                () => reads.LatestDm(),
+                () => reads.LatestRefusedAlert(),
+                () => reads.CountAlertsSince(now.AddHours(-1)),
+                () => checks.ListOwnRights(),
+                () => checks.ListMigrations()
             };
 
             foreach (var call in calls)
@@ -306,7 +324,8 @@ namespace DataAccessLibrary.Tests
                 new BotGuildReads(factory, names),
                 new GuildSettingsReads(factory),
                 new BotRequestData(factory, names),
-                new BotRequestQueue(factory, names)
+                new BotRequestQueue(factory, names),
+                new DashboardChecks(factory, names)
             }, repository => Assert.Equal("utf8mb4", CharacterSet(repository, factory)));
 
             var configured = new MySqlConnectionStringBuilder(Site + setting).CharacterSet;

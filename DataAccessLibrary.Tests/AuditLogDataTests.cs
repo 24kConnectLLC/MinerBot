@@ -108,6 +108,37 @@ namespace DataAccessLibrary.Tests
             Assert.Equal(1, both.Total);
         }
 
+        // The Overview's latest changes leave out the sign-in alerts, which aren't changes: rows with an action named are
+        // left out of the page and its total, together with the other filters, and naming none leaves out nothing
+        [Fact]
+        public async Task ExcludedActionsAreLeftOut()
+        {
+            var db = await StartAsync();
+            var audit = db.Audit();
+
+            await audit.AddAudit(Entry(Noon, "armor.approve", actor: 1));
+            await audit.AddAudit(Entry(Noon.AddMinutes(1), "owner.signin_alert", actor: 1, targetType: "request", targetId: "41"));
+            await audit.AddAudit(Entry(Noon.AddMinutes(2), "auth.signin", actor: 2, targetType: "session", targetId: null));
+            await audit.AddAudit(Entry(Noon.AddMinutes(3), "owner.signin_alert", actor: 2, targetType: "request", targetId: "42"));
+            await audit.AddAudit(Entry(Noon.AddMinutes(4), "blacklist.add", actor: 2, targetType: "player", targetId: "12345"));
+
+            var left = await audit.ListAudit(new AuditQuery { ExcludeActions = ["owner.signin_alert"] });
+            Assert.Equal(["blacklist.add", "auth.signin", "armor.approve"], Actions(left));
+            Assert.Equal(3, left.Total);
+
+            var paged = await audit.ListAudit(new AuditQuery { ExcludeActions = ["owner.signin_alert", "auth.signin"], PageSize = 1 });
+            Assert.Equal(["blacklist.add"], Actions(paged));
+            Assert.Equal(2, paged.Total);
+
+            var withAFilter = await audit.ListAudit(new AuditQuery { ActorId = 2, ExcludeActions = ["owner.signin_alert"] });
+            Assert.Equal(["blacklist.add", "auth.signin"], Actions(withAFilter));
+            Assert.Equal(2, withAFilter.Total);
+
+            Assert.Equal(5, (await audit.ListAudit(new AuditQuery { ExcludeActions = [] })).Total);
+            Assert.Equal(5, (await audit.ListAudit(new AuditQuery())).Total);
+            Assert.Equal(["owner.signin_alert", "owner.signin_alert"], Actions(await audit.ListAudit(new AuditQuery { Action = "owner.signin_alert" })));
+        }
+
         // From is included and To isn't, so days next to each other don't share a row
         [Fact]
         public async Task DateRangeIncludesItsStartOnly()

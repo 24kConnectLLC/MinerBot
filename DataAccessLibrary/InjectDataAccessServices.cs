@@ -137,10 +137,19 @@ namespace DataAccessLibrary
         }
 
         // The dashboard's side of its requests to the bot: adding one with its audit row, and reading them back, without
-        // the bot's writes
+        // the bot's writes. Its pages' reads come from the same class, on an interface of their own.
         public static IServiceCollection AddBotRequestQueue(this IServiceCollection services)
         {
             services.AddTransient<IBotRequestQueue, BotRequestQueue>();
+            services.AddTransient<IBotRequestReads, BotRequestQueue>();
+            return services;
+        }
+
+        // The Sessions and security page's reads of the dashboard's own database login and of the migrations MinerBot's
+        // database has run
+        public static IServiceCollection AddDashboardChecks(this IServiceCollection services)
+        {
+            services.AddTransient<IDashboardChecks, DashboardChecks>();
             return services;
         }
     }

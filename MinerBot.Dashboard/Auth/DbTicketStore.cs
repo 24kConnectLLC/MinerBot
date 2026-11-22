@@ -9,6 +9,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
 using MinerBot.Dashboard.Audit;
+using MinerBot.Dashboard.Requests;
 using MinerBot.Dashboard.Security;
 
 namespace MinerBot.Dashboard.Auth
@@ -16,8 +17,9 @@ namespace MinerBot.Dashboard.Auth
     // The sessions behind the cookie, in MinerBot's own database. The cookie holds only a random key, and the row holds
     // the key's hash and the ticket, encrypted with Data Protection under a purpose that includes the key, so a ticket
     // opens only for its own cookie. Every limit is enforced here, on the server, from the row: 30 minutes unused, 12 hours
-    // in all, at most 5 sessions a person, and only for someone on the lists right now.
-    internal sealed class DbTicketStore(IDashboardSessionData sessions, IAuditLogData audit, IDataProtectionProvider protection,
+    // in all, at most 5 sessions a person, and only for someone on the lists right now. Each new session asks the bot to
+    // tell the owner about it, and ends the one the browser had, in the same transaction.
+    internal sealed class DbTicketStore(IDashboardSessionData sessions, IAuditLogData audit, BotRequests requests, IDataProtectionProvider protection,
         RoleLists roles, TimeProvider time, ILogger<DbTicketStore> logger) : ITicketStore
     {
         public static readonly TimeSpan IdleLimit = TimeSpan.FromMinutes(30);
@@ -28,6 +30,9 @@ namespace MinerBot.Dashboard.Auth
 
         public const int MaxSessionsPerPerson = 5;
         public const string TicketPurpose = "MinerBot.Dashboard.SessionTicket.v1";
+
+        // In the request's items: the key of the session this request's sign-in replaces (ReplaceCurrent)
+        const string ReplacedItem = "mb:replaced-session";
 
         readonly IDataProtector tickets = protection.CreateProtector(TicketPurpose);
 
@@ -58,13 +63,27 @@ namespace MinerBot.Dashboard.Auth
             };
 
             var signedIn = Entry(httpContext, now, user.Id, user.Name, role.Word(), AuditWords.SignIn, AuditOutcome.Ok, null);
+            var alert = SigninAlert(user, role, now);
+            var replaced = httpContext.Items[ReplacedItem] as string;
 
-            // The session, the cap on how many one person has, and the audit row commit together, or none of them does
+            // The end of the browser's old session, the new session, the cap on how many one person has, the audit row, and
+            // the request for the owner's message with its own audit row commit together, or none of them does: a sign-in
+            // that can't leave its alert doesn't happen, and one that doesn't happen leaves the browser's session as it was.
+            // The old session goes first, so the cap doesn't count it. The sessions and the requests are both on MinerBot's
+            // own connection. A run after a deadlock writes the alert's same fields again, the first run having rolled back,
+            // and the alert is dated as the session is.
             await DatabaseCalls.Guard(() => sessions.RunInTransaction(async transaction =>
             {
+                if (replaced != null)
+                    await sessions.DeleteSession(replaced, transaction);
+
                 await sessions.CreateSession(key, row, transaction);
                 await sessions.DeleteOldestSessions(user.Id, MaxSessionsPerPerson, transaction);
                 await audit.AddAudit(signedIn, transaction);
+
+                if (alert != null)
+                    await requests.WriteAsync(alert, transaction, signedIn.ip, signedIn.request_id);
+
                 return true;
             }), logger);
 
@@ -83,11 +102,41 @@ namespace MinerBot.Dashboard.Auth
             return key;
         }
 
+        // The request that asks the bot to tell the owner about this sign-in, worked out before the transaction. Null while
+        // requests are off, when the sign-in goes ahead without one, so nobody is kept out before setup makes the key, and
+        // only SSH can turn requests off. A refusal by the shared rules is logged and thrown on, never passed over: nothing
+        // a visitor sends can cause one, since the name is cleaned and the role is a listed one, so it's a bug, and the
+        // sign-in fails rather than happen without its alert.
+        PreparedRequest? SigninAlert(SignedInUser user, DashboardRole role, DateTimeOffset now)
+        {
+            PreparedRequest? alert;
+
+            try
+            {
+                alert = requests.PrepareSigninAlert(user, role, now.UtcDateTime);
+            }
+            catch (RequestRefusedException e)
+            {
+                logger.LogWarning("A sign-in was stopped, because the bot would refuse its message to the owner: {Problem}", e.Problem);
+                throw;
+            }
+
+            if (alert == null)
+                logger.LogInformation("Requests to the bot are off, so this sign-in sends the owner no message");
+
+            return alert;
+        }
+
         // Called once for each request that carries the cookie
         public async Task<AuthenticationTicket?> RetrieveAsync(string key, HttpContext httpContext, CancellationToken cancellationToken)
         {
             // A made-up or broken cookie never reaches the database
             if (!SessionKeys.IsWellFormed(key))
+                return null;
+
+            // The session this request's sign-in replaces is none here, so the cookie handler stores a new one rather than
+            // renew it in place, and StoreAsync ends it
+            if (string.Equals(httpContext.Items[ReplacedItem] as string, key, StringComparison.Ordinal))
                 return null;
 
             var now = time.GetUtcNow();
@@ -170,14 +219,16 @@ namespace MinerBot.Dashboard.Auth
             }), logger);
         }
 
-        // A browser that's already signed in and signs in again gets a new key. The cookie handler would otherwise keep
-        // the old key and renew its session in place, so its session ends here, before the handler looks for it.
-        public async Task ForgetCurrentAsync(HttpContext httpContext)
+        // A browser that's already signed in and signs in again gets a new key. The cookie handler would otherwise find the
+        // old key's session and renew it in place, so for the rest of this request RetrieveAsync finds no session for that
+        // key, and StoreAsync ends the old one in the new one's own transaction. Until the new one commits, the old one
+        // works, so a sign-in again that fails leaves the browser signed in as it was.
+        public void ReplaceCurrent(HttpContext httpContext)
         {
             var key = httpContext.Request.Cookies[DashboardAuth.SessionCookie];
 
             if (SessionKeys.IsWellFormed(key))
-                await DatabaseCalls.Guard(() => sessions.DeleteSession(key!), logger);
+                httpContext.Items[ReplacedItem] = key;
         }
 
         async Task EndForUnlistedAsync(DashboardSession session, HttpContext httpContext, DateTimeOffset now)

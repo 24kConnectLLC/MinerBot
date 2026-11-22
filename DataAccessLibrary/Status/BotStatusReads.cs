@@ -84,6 +84,37 @@ namespace DataAccessLibrary.Status
             return LoadFirstData<BotEventRow?, object>(sql, new { kind });
         }
 
+        // The most phrases one search of the events' details takes
+        public const int PhraseLimit = 5;
+
+        // The newest event of a kind since the time given whose detail holds any of the phrases given, as they're written,
+        // null when there's none: the bot's refusals for some reasons, which a later refusal for another mustn't hide. The
+        // phrases are the caller's own words, never a pattern.
+        public Task<BotEventRow?> LatestEventWith(string kind, IReadOnlyCollection<string> phrases, DateTime since)
+        {
+            RequireKind(kind);
+            ArgumentNullException.ThrowIfNull(phrases);
+            RequireUtc(since, nameof(since));
+
+            if (phrases.Count is < 1 or > PhraseLimit || phrases.Any(string.IsNullOrEmpty))
+                throw new ArgumentException($"A search takes from 1 to {PhraseLimit} phrases, none of them empty", nameof(phrases));
+
+            var parameters = new DynamicParameters(new { kind, since });
+            var matches = phrases.Select((phrase, i) =>
+            {
+                parameters.Add($"phrase{i}", "%" + EscapeLike(phrase) + "%");
+                return $"detail LIKE @phrase{i} ESCAPE '!'";
+            }).ToList();
+
+            string sql = $@"SELECT id, at, kind, level, detail
+                            FROM {_names.Bot}.bot_events
+                            WHERE kind = @kind AND at >= @since AND ({string.Join(" OR ", matches)})
+                            ORDER BY at DESC, id DESC
+                            LIMIT 1";
+
+            return LoadFirstData<BotEventRow?, DynamicParameters>(sql, parameters);
+        }
+
         // The oldest event of a kind that comes after the one given, in the list's order, or the oldest of all when none
         // is given, such as the first drop from Discord since the last connection. The one given is a row read here, whose
         // time is UTC.

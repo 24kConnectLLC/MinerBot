@@ -1,0 +1,93 @@
+@page "/Admin/Servers/{id:long}/Leave"
+@model LeaveServerModel
+@using System.Globalization
+@using MinerBot.Dashboard.Armor
+@using MinerBot.Dashboard.Requests
+@using MinerBot.Dashboard.Servers
+@using MinerBot.Dashboard.Status
+@*
+    The Owner's page for asking MinerBot to leave a server. The server's name is Discord's, which anyone in it can set, so
+    it goes through RevealedText, inside a bdi, and the title never holds it. The form posts to this page through asp-page,
+    never an action attribute, so the form tag helper adds its token, with a key of its own; the typed box starts empty on
+    every render, and the server compares what's typed, whatever the box allowed. While the sign-in isn't from the last 15
+    minutes, the way to sign in again stands in place of the form: a link, never a form, since browsers apply form-action
+    to the redirect after a form, and Discord isn't 'self'.
+*@
+@{
+    ViewData["Title"] = "Leave server " + Model.IdText;
+    var server = Model.Server;
+}
+<p><a href="@Model.ServerLink">Back to the server</a></p>
+<h1>Leave server @Model.IdText</h1>
+
+@if (Model.Problem != null)
+{
+    <div class="notice notice-problem" role="alert">
+        <p>@Model.Problem @if (Model.ProblemRequest is { } named) {<a href="@("/admin/requests/" + named.ToString(CultureInfo.InvariantCulture))">That request</a>}</p>
+    </div>
+}
+
+@if (server == null || !Model.IsIn)
+{
+    <p>@ServerActions.NothingToLeave</p>
+}
+else
+{
+    <p>MinerBot leaves this server: @RevealedText.Html(server.name), ID <span class="address">@Model.IdText</span>@(server.member_count is { } members ? ", " + TimeWords.Count(members, "member") : "").</p>
+    <p>@ServerActions.WhatALeaveDoes</p>
+
+    @* While requests are off no leave is offered, and a sign-in sends no message, so there's no sign-in to offer, as on the
+       controls page *@
+    if (Model.RequestsOn)
+    {
+        <section aria-labelledby="sign-in">
+            <h2 id="sign-in">Your sign-in</h2>
+            @if (Model.Fresh && Model.SignedInAt is { } at && Model.FreshUntil is { } until)
+            {
+                <p>@ControlWords.Fresh(at, until)</p>
+            }
+            else
+            {
+                <p>@ControlWords.NotFresh(Model.SignedInAt)</p>
+                <p><a href="@Model.SignInAgainLink">@ControlWords.SignInAgain</a></p>
+                <p class="muted">@ControlWords.SignInAgainNote</p>
+            }
+        </section>
+    }
+
+    <section aria-labelledby="leave">
+        <h2 id="leave">@ServerActions.LeaveButton</h2>
+        @if (!Model.RequestsOn)
+        {
+            <p>@ServerActions.LeaveOff</p>
+        }
+        else
+        {
+            <partial name="_RequestLine" model="Model.Last" />
+            @if (Model.Availability is { Waiting: { } waiting } waits)
+            {
+                var number = waiting.ToString(CultureInfo.InvariantCulture);
+                <p>@waits.Words <a href="@("/admin/requests/" + number)">request @number</a>.</p>
+            }
+            else if (Model.Availability is { } availability)
+            {
+                <p>@availability.Words</p>
+            }
+            @if (Model.Form == ControlForm.Offered)
+            {
+                <form method="post" asp-page="/Admin/Servers/Leave" asp-route-id="@Model.IdText">
+                    <input type="hidden" name="formkey" value="@Model.FormKey" />
+                    <div class="field">
+                        <label for="confirm-leave">@ServerActions.TypeTheServer(Model.IdText)</label>
+                        <input type="text" id="confirm-leave" name="confirm" autocomplete="off" spellcheck="false" required />
+                    </div>
+                    <button type="submit" class="button button-danger">@ServerActions.LeaveButton</button>
+                </form>
+            }
+            else
+            {
+                <p>@ControlWords.NeedsFresh(Model.SignedInAt) <a href="@Model.SignInAgainLink">@ControlWords.SignInAgain</a></p>
+            }
+        }
+    </section>
+}

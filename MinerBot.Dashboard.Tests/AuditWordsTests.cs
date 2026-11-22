@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Text.RegularExpressions;
 using DataAccessLibrary.Audit;
+using DataAccessLibrary.Audit.Models;
 using MinerBot.Dashboard.Armor;
 using MinerBot.Dashboard.Audit;
 using MinerBot.Dashboard.Blacklist;
@@ -27,10 +28,13 @@ namespace MinerBot.Dashboard.Tests
             Assert.All(AuditWords.Actions, action => Assert.Equal(action.Label, AuditWords.ActionLabel(action.Word)));
 
             // Written out, because rows already written use them and the filter matches them exactly
-            Assert.Equal(["armor.approve", "armor.pending", "armor.reject", "armor.takedown", "auth.refused", "auth.signin", "auth.signout",
+            Assert.Equal(["armor.approve", "armor.pending", "armor.reject", "armor.takedown", "auth.ended", "auth.ended_others", "auth.refused", "auth.signin", "auth.signout",
                 "blacklist.add", "blacklist.edit", "blacklist.remove", "bot.restart", "caches.clear", "guild.leave", "guild.refresh", "guild.test_message",
                 "job.colors", "job.notifications", "owner.signin_alert", "posts.pause", "posts.resume", "status.set", "steam.lookup", "steam.reconnect",
                 "steam.renew"], Listed.Order(StringComparer.Ordinal));
+
+            // The Sessions page's endings, beside the sign-ins and sign-outs
+            Assert.Equal(("Ended a session", "Ended every other session"), (AuditWords.ActionLabel("auth.ended"), AuditWords.ActionLabel("auth.ended_others")));
         }
 
         // Every word the code can write: each constant, each action of the armor and blacklist pages, and each kind of request
@@ -76,7 +80,29 @@ namespace MinerBot.Dashboard.Tests
 
             Assert.Equal("request", AuditWords.RequestTarget);
             Assert.Equal("Bot request", AuditWords.TargetLabel(AuditWords.RequestTarget));
-            Assert.Equal(new AuditTarget("Bot request 41", null), AuditRows.Target(AuditWords.RequestTarget, "41"));
+            Assert.Equal(new AuditTarget("Bot request 41", "/admin/requests/41"), AuditRows.Target(AuditWords.RequestTarget, "41"));
+        }
+
+        // A request's row records the asking, not what the bot did with it, which the request's page shows: it reads Sent to
+        // the bot, or Not sure it was sent when the commit wasn't confirmed, and a refusal before one was written stays
+        // Refused. Every other row keeps its words. Fails if a request's row reads Done.
+        [Fact]
+        public void ARequestsRowSaysItWasSent()
+        {
+            Assert.Equal("Sent to the bot", AuditWords.OutcomeLabel(AuditOutcome.Ok, AuditWords.RequestTarget));
+            Assert.Equal("Not sure it was sent", AuditWords.OutcomeLabel(AuditOutcome.Unknown, AuditWords.RequestTarget));
+            Assert.Equal("Refused", AuditWords.OutcomeLabel(AuditOutcome.Refused, AuditWords.RequestTarget));
+            Assert.Equal("Failed", AuditWords.OutcomeLabel(AuditOutcome.Failed, AuditWords.RequestTarget));
+
+            foreach (var other in new[] { AuditWords.ArmorTarget, AuditWords.BlacklistTarget, AuditWords.SessionTarget, null })
+            {
+                Assert.Equal("Done", AuditWords.OutcomeLabel(AuditOutcome.Ok, other));
+                Assert.Equal("Not sure it was saved", AuditWords.OutcomeLabel(AuditOutcome.Unknown, other));
+            }
+
+            var row = AuditRows.Row(new AuditEntry { at = DateTime.UtcNow, actor_role = AuditRole.Owner, action = RequestKinds.CachesClear, outcome = AuditOutcome.Ok,
+                target_type = AuditWords.RequestTarget, target_id = "41" }, showIp: false);
+            Assert.Equal(("Sent to the bot", new AuditTarget("Bot request 41", "/admin/requests/41")), (row.Outcome, row.Target));
         }
 
         // No other file of the dashboard writes an action word as a bare string, which the list could miss. The test's
@@ -131,6 +157,16 @@ namespace MinerBot.Dashboard.Tests
         [InlineData("blacklist", "-1", "Blacklist entry -1", null)]
         [InlineData("blacklist", "+12345", "Blacklist entry +12345", null)]
         [InlineData("blacklist", "0012345", "Blacklist entry [U:1:12345]", "/admin/blacklist/12345")]
+        [InlineData("request", "41", "Bot request 41", "/admin/requests/41")]
+        [InlineData("request", "0041", "Bot request 41", "/admin/requests/41")]
+        [InlineData("request", "18446744073709551615", "Bot request 18446744073709551615", "/admin/requests/18446744073709551615")]
+        [InlineData("request", "18446744073709551616", "Bot request 18446744073709551616", null)]
+        [InlineData("request", "41x", "Bot request 41x", null)]
+        [InlineData("request", "0", "Bot request 0", null)]
+        [InlineData("request", "-1", "Bot request -1", null)]
+        [InlineData("request", "+41", "Bot request +41", null)]
+        [InlineData("request", " 41", "Bot request  41", null)]
+        [InlineData("request", null, "Bot request", null)]
         [InlineData("session", null, "Session", null)]
         [InlineData("guild", "5", "guild 5", null)]
         [InlineData(null, "5", "5", null)]

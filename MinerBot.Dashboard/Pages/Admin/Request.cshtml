@@ -1,0 +1,90 @@
+@page "/Admin/Requests/{id:long}"
+@model BotRequestPageModel
+@using System.Globalization
+@using MinerBot.Dashboard.Armor
+@using MinerBot.Dashboard.Requests
+@using MinerBot.Dashboard.Status
+@using MinerBot.Shared.Requests
+@*
+    One request to the bot and what became of it. Its box refreshes itself through refresh.js while it can change, and the
+    page works without it: Check again is the next look. The name is Discord's, which anyone can set, and the text is what
+    someone typed, so both go through RevealedText; a stored status text the rules now refuse is never shown. No address,
+    key or signature: the reads never give them. IDs are text, as everywhere. A request MinerBot's database doesn't have,
+    once the nightly clean-up deleted it or when its save never landed, is a 404 that says so and where what was asked is
+    still kept.
+*@
+@if (Model.Gone is { } gone)
+{
+    var goneId = gone.ToString(CultureInfo.InvariantCulture);
+    ViewData["Title"] = "Bot request " + goneId;
+    <p><a href="/admin/audit">Back to the audit log</a></p>
+    <h1>Bot request @goneId</h1>
+    <p>@RequestWords.Gone(gone)</p>
+    <p><a href="@($"/admin/audit?type=request&id={goneId}")">Its row in the audit log</a></p>
+    return;
+}
+@{
+    var row = Model.Row;
+    var view = Model.View;
+    ViewData["Title"] = "Bot request " + view.IdText;
+
+    string Time(DateTime? time, string none) => time is { } at ? TimeWords.Utc(at) : none;
+
+    var notYet = row.state is null or RequestStates.Running ? "Not yet" : RequestWords.UnreadableTime;
+    var taken = row.state is null ? "Not yet"
+        : row.state is RequestStates.Refused or RequestStates.Expired ? "Never: the bot didn't take it"
+        : RequestWords.UnreadableTime;
+
+    var box = new RequestSection(view, view.Address, "What the bot did");
+}
+@section Scripts {
+    @if (!view.Final)
+    {
+        <script src="~/js/refresh.js" asp-append-version="true" defer></script>
+    }
+}
+<p><a href="@Model.BackLink">@Model.BackText</a></p>
+<h1>Bot request @view.IdText</h1>
+
+<partial name="_RequestSection" model="box" />
+
+<section aria-labelledby="asked">
+    <h2 id="asked">What was asked</h2>
+    <dl class="details">
+        <dt>What</dt>
+        <dd>@view.Label</dd>
+        <dt>Asked for by</dt>
+        <dd>@RevealedText.Html(row.actor_name) (@view.Role), Discord ID <a href="@($"/admin/audit?person={view.ActorIdText}")">@view.ActorIdText</a></dd>
+        <dt>Asked for at</dt>
+        <dd>@view.AskedAtUtc</dd>
+        <dt>Waits until</dt>
+        <dd>@Time(row.expires_at, RequestWords.UnreadableTime)</dd>
+        @if (row.guild_id is { } guild)
+        {
+            <dt>Server</dt>
+            <dd><a href="@("/admin/servers/" + guild.ToString(CultureInfo.InvariantCulture))">@guild.ToString(CultureInfo.InvariantCulture)</a></dd>
+        }
+        @if (row.channel_id is { } channel)
+        {
+            <dt>Channel</dt>
+            <dd>@if (Model.ChannelName != null) {<text>#@RevealedText.Html(Model.ChannelName), </text>}ID @channel.ToString(CultureInfo.InvariantCulture)</dd>
+        }
+        @if (Model.Text != null)
+        {
+            <dt>Text</dt>
+            <dd>@RevealedText.Html(Model.Text)</dd>
+        }
+        else if (Model.TextRefused != null)
+        {
+            <dt>Text</dt>
+            <dd>A status text the rules now refuse (@Model.TextRefused), which the bot doesn't show and this page doesn't either.</dd>
+        }
+        <dt>The bot's run</dt>
+        <dd>@(row.run_id is { } run ? run.ToString(CultureInfo.InvariantCulture) : "Not yet")</dd>
+        <dt>Taken at</dt>
+        <dd>@Time(row.claimed_at, taken)</dd>
+        <dt>Ended at</dt>
+        <dd>@Time(row.ended_at, notYet)</dd>
+    </dl>
+    <p><a href="@($"/admin/audit?type=request&id={view.IdText}")">Its row in the audit log</a></p>
+</section>

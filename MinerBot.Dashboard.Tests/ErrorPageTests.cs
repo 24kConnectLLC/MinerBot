@@ -95,6 +95,9 @@ namespace MinerBot.Dashboard.Tests
             public Task<int> DeleteOldestSessions(ulong userId, int keep, DataTransaction? transaction = null) => throw new InvalidOperationException(marker);
             public Task<int> DeleteOtherSessions(ulong userId, string keepKey, DataTransaction? transaction = null) => throw new InvalidOperationException(marker);
             public Task<bool> DeleteSession(string key, DataTransaction? transaction = null) => throw new InvalidOperationException(marker);
+            public Task<SessionListRow?> DeleteSessionByHash(byte[] hash, DataTransaction transaction) => throw new InvalidOperationException(marker);
+            public Task<IReadOnlyList<SessionListRow>> DeleteSessionsBut(string keepKey, DataTransaction transaction) => throw new InvalidOperationException(marker);
+            public Task<IReadOnlyList<SessionListRow>> ListSessions(DateTime now, DateTime unusedBefore) => throw new InvalidOperationException(marker);
             public Task<bool> RenewSession(string key, byte[] ticket) => throw new InvalidOperationException(marker);
             public Task<T> RunInTransaction<T>(Func<DataTransaction, Task<T>> work) => throw new InvalidOperationException(marker);
             public Task<bool> TouchSession(string key, DateTime lastSeenAt) => throw new InvalidOperationException(marker);

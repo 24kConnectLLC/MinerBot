@@ -464,9 +464,9 @@ namespace DataAccessLibrary.Tests
             var before = await AddAsync(db, Request());
             ulong zero = 0;
 
-            await DashboardRightsTests.AsDashboardAsync(db, async password =>
+            await DashboardLogin.AsDashboardAsync(db, async password =>
             {
-                await using var connection = new MySqlConnection(DashboardRightsTests.ConnectionAs(db, password, MariaDbFixture.BotDatabase));
+                await using var connection = new MySqlConnection(DashboardLogin.ConnectionAs(db, password, MariaDbFixture.BotDatabase));
                 await connection.OpenAsync(Token);
                 await connection.ExecuteAsync(new CommandDefinition(
                     $@"INSERT INTO {MariaDbFixture.RequestTable} (request_key, kind, actor_id, actor_name, actor_role, created_at, expires_at, signature)

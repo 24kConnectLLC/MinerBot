@@ -1,0 +1,18 @@
+@model RequestLine
+@using MinerBot.Dashboard.Armor
+@using MinerBot.Dashboard.Requests
+@*
+    A control's last use: who asked for it last, when, where it stands, the bot's own words for how it ended, what it led to,
+    such as a test message in Discord, and a link to the request's page. The name is Discord's, which anyone can set, so it
+    goes through RevealedText; request.sh's requests read "request.sh on the server". Never the request's text: a status
+    text's result is the bot's own words. With none, not that it never was: the nightly clean-up deletes a request after
+    90 days, while the audit log keeps it.
+*@
+@if (Model.Last is not { } last)
+{
+    <p class="muted">@RequestWords.NotAskedFor</p>
+}
+else
+{
+    <p class="muted">Last asked for by @RevealedText.Html(last.AskedBy) (@last.Role) at @last.AskedAtUtc: @last.StageLabel. @if (last.Result != null) {<text>@last.Result </text>}@if (last.Link != null) {<a href="@last.Link">@last.LinkText</a><text>. </text>}<a href="@last.Address">Request @last.IdText</a>.</p>
+}

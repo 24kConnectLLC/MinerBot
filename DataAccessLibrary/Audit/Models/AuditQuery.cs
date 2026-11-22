@@ -11,6 +11,10 @@ namespace DataAccessLibrary.Audit.Models
         public DateTime? From { get; set; }
         public DateTime? To { get; set; }
 
+        // Actions left out of the rows and the total, such as the sign-in alerts on the Overview's latest changes, which
+        // aren't changes. Null or empty leaves none out.
+        public IReadOnlyCollection<string>? ExcludeActions { get; set; }
+
         // From 0
         public int Page { get; set; }
         public int PageSize { get; set; } = 25;

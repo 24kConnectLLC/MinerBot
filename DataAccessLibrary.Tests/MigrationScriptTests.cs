@@ -100,6 +100,19 @@ namespace DataAccessLibrary.Tests
             Assert.Equal(Checksums.Keys.Order(), migrations.Select(migration => migration.Name).Order());
         }
 
+        // What the Sessions page compares MinerBot's database with: every file built in, in the order they run, by its
+        // number, name and checksum, which are the ones above
+        [Fact]
+        public void ExpectedIsTheEmbeddedFiles()
+        {
+            var expected = DatabaseMigrations.Expected();
+
+            Assert.Equal(MigrationScript.Embedded().Select(migration => new MigrationInfo(migration.Version, migration.Name, migration.Checksum)), expected);
+            Assert.Equal(Enumerable.Range(1, Checksums.Count), expected.Select(migration => migration.Version));
+            Assert.Equal(Checksums.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => (pair.Key, pair.Value)),
+                expected.Select(migration => (migration.Name, migration.Checksum)));
+        }
+
         // The project builds in every file of the Migrations folder, so one named the wrong way is refused rather than
         // shipped and never run
         [Theory]

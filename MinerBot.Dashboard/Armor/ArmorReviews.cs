@@ -146,8 +146,10 @@ namespace MinerBot.Dashboard.Armor
             logger.LogInformation("Armor {ArmorId}'s {Action} ended {Outcome} (request {RequestId})", request.Id, action.AuditAction(), outcome, httpContext.TraceIdentifier);
 
             // Anything that reaches outside the database after a change, such as announcing it in Discord or clearing the
-            // bot's name cache, belongs here, after the commit: the work can run more than once, and holds the armor
-            // table's locks while it runs, which keeps the website from saving new submissions
+            // bot's name cache, belongs after the commit, never in the work: the work can run more than once, and holds
+            // the armor table's locks while it runs, which keeps the website from saving new submissions. So the review
+            // page asks the bot to clear its caches once this has returned (ArmorFollowUps), and the review stands
+            // whatever becomes of that.
             return outcome;
 
             async Task<ArmorReviewOutcome> Work(DataTransaction transaction)

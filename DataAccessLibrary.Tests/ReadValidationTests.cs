@@ -49,6 +49,12 @@ namespace DataAccessLibrary.Tests
             await RefusedAsync(() => Status().ListEvents(new EventQuery { Kind = "discord." + new string('c', 33) }));
             await RefusedAsync(() => Status().LatestEvent("Discord.Connected"));
             await RefusedAsync(() => Status().LatestEvent(null!));
+            await RefusedAsync(() => Status().LatestEventWith("Request.Rejected", ["signature didn't match"], Day));
+            await RefusedAsync(() => Status().LatestEventWith("request.rejected", null!, Day));
+            await RefusedAsync(() => Status().LatestEventWith("request.rejected", [], Day));
+            await RefusedAsync(() => Status().LatestEventWith("request.rejected", ["signature didn't match", ""], Day));
+            await RefusedAsync(() => Status().LatestEventWith("request.rejected", Enumerable.Repeat("didn't match", BotStatusReads.PhraseLimit + 1).ToList(), Day));
+            await RefusedAsync(() => Status().LatestEventWith("request.rejected", ["signature didn't match"], DateTime.Now));
             await RefusedAsync(() => Status().FirstEventAfter("discord", null));
             await RefusedAsync(() => Status().CountEvents([], Day, Day));
             await RefusedAsync(() => Status().CountEvents(Enumerable.Repeat("bot.started", 21).ToList(), Day, Day));
@@ -109,6 +115,7 @@ namespace DataAccessLibrary.Tests
 
             await Assert.ThrowsAsync<InvalidOperationException>(() => status.ListEvents(new EventQuery { Page = int.MaxValue, PageSize = 100, Level = EventLevel.Error, Kind = kind }));
             await Assert.ThrowsAsync<InvalidOperationException>(() => status.LatestEvent(kind));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => status.LatestEventWith(kind, Enumerable.Repeat("didn't match", BotStatusReads.PhraseLimit).ToList(), Day));
             await Assert.ThrowsAsync<InvalidOperationException>(() => status.CountEvents(Enumerable.Repeat(kind, 20).ToList(), Day, Day.AddDays(1)));
             await Assert.ThrowsAsync<InvalidOperationException>(() => status.ListJobRuns(Enumerable.Repeat("ArmorJob.AddColorArrays", 100).ToList(), 100));
             await Assert.ThrowsAsync<InvalidOperationException>(() => status.ListUptimeDays(Day, Day.AddDays(100)));

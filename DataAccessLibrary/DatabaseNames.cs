@@ -19,7 +19,11 @@ namespace DataAccessLibrary
         // Worked out on first use, so the bot runs without BotConnection, and only records nothing
         internal string Bot => bot ??= Of(DBConnectionName.Bot);
 
-        internal string Of(DBConnectionName name)
+        internal string Of(DBConnectionName name) => QuoteIdentifier(Unquoted(name));
+
+        // The name as the connection string gives it, for comparing with the names MariaDB reports, such as a login's rights
+        // in information_schema. Never for SQL text, which takes only Of's.
+        internal string Unquoted(DBConnectionName name)
         {
             var setting = name == DBConnectionName.Bot ? "BotConnection" : "DefaultConnection";
             var database = name == DBConnectionName.Bot ? "MinerBot's own database" : "the website's database";
@@ -33,7 +37,7 @@ namespace DataAccessLibrary
             if (string.IsNullOrEmpty(databaseName))
                 throw new InvalidOperationException($"ConnectionStrings:{setting} names no database, so {database} can't be used");
 
-            return QuoteIdentifier(databaseName);
+            return databaseName;
         }
 
         // What stops a connection string from being used, for the dashboard's start-up check and the bot's status

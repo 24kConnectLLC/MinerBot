@@ -108,6 +108,10 @@ namespace MinerBot.Dashboard.Security
             return usable.Keys.TryGetValue(kid, out var found) ? (KeyLookup.Found, found) : (KeyLookup.Unknown, null);
         }
 
+        // How many keys are held now, and when the fetch that got them finished, or null before any fetch worked: the
+        // Sessions page's check, which never sees a key
+        internal (int Count, DateTimeOffset FetchedAt)? Held() => keys is { } set ? (set.Keys.Count, set.FetchedAt) : null;
+
         KeySet? Fresh(KeySet? set) => set != null && time.GetUtcNow() - set.FetchedAt < limits.FreshFor ? set : null;
 
         KeySet? Usable(KeySet? set) => set != null && time.GetUtcNow() - set.FetchedAt < limits.UsableFor ? set : null;

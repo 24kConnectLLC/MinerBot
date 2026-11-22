@@ -28,6 +28,10 @@ namespace MinerBot.Dashboard.Auth
             // The handler makes a verifier, keeps it in the protected state and sends Discord an S256 challenge
             options.UsePkce = true;
 
+            // Discord's own Authorize screen on every sign-in, a sign-in again included, so each is a deliberate press. Discord
+            // documents consent as its default; saying so keeps it if that ever changes.
+            options.AdditionalAuthorizationParameters["prompt"] = "consent";
+
             // The access token is revoked as soon as the user has been read, so it's never kept anywhere
             options.SaveTokens = false;
 

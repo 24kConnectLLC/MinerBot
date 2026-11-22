@@ -18,7 +18,7 @@
 }
 <h1>Audit log</h1>
 <p>Every change made on the dashboard, every sign-in and sign-out, and the changes and sign-ins it refused, newest first. Times are in UTC.</p>
-<p class="muted">A form sent back to correct a field, a form that had expired or was incomplete, an action on armor that had since been removed, a cancelled or failed sign-in, and a request turned away before it reached its page, such as one from another site or one over the rate limit, aren't recorded, but the request that ends the sessions of someone taken off the lists is.</p>
+<p class="muted">A form sent back to correct a field, a typed confirmation included, a request to the bot held back by the bot's own limit, a form that had expired or was incomplete, an action on armor that had since been removed, a cancelled or failed sign-in, and a request turned away before it reached its page, such as one from another site or one over the rate limit, aren't recorded, but the request that ends the sessions of someone taken off the lists is. A request to the bot reads Sent to the bot: its page shows what the bot did with it for the 90 days MinerBot's database keeps requests.</p>
 
 <form method="get" action="/admin/audit" class="filters" role="search" aria-label="Filter the audit log">
     @if (filters.Type.Length > 0)

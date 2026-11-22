@@ -9,9 +9,9 @@
 # MariaDB runs in a throwaway container without a network, with latin1 as the server's default character set and root
 # reached through /root/.my.cnf, as on the server. It gets the website's three tables from
 # docs/schema/wordpress-tables.sql and MinerBot's migrations, DataAccessLibrary/Migrations/0001_core.sql,
-# 0002_bot_status.sql, 0003_guilds.sql and 0004_bot_requests.sql, under the test names website_db and minerbot_db,
-# since the file gives rights on tables from each. The checks compare the dashboard's login with a login they give the
-# file's rights themselves, without common.sh.
+# 0002_bot_status.sql, 0003_guilds.sql and 0004_bot_requests.sql, with schema_version as the migration runner makes it,
+# under the test names website_db and minerbot_db, since the file gives rights on tables from each. The checks compare
+# the dashboard's login with a login they give the file's rights themselves, without common.sh.
 #
 # Run it from Git Bash or Linux: bash deploy/tests/rights-test.sh. It needs Docker. It prints one line per check, then
 # "N of M passed", and exits 1 if any check failed. Its container is named mbtest-rights-<its PID>, ends by itself after
@@ -37,6 +37,14 @@ bot=minerbot_db
 login=minerbot-dashboard
 password=""
 expected=""
+
+# schema_version as DataAccessLibrary/Migrations/MigrationRunner.cs makes it before any migration. Piping the migration
+# files makes only their own tables, and the rights file gives a right on this one, which MariaDB refuses on a table
+# that doesn't exist (1146).
+# shellcheck disable=SC2016 # the backticks are MariaDB's quotes
+schema_version='CREATE TABLE IF NOT EXISTS schema_version (`version` INT NOT NULL, `name` VARCHAR(100) NOT NULL,
+    `checksum` CHAR(64) NOT NULL, applied_at DATETIME(3) NOT NULL, PRIMARY KEY (`version`))
+    ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_520_ci'
 
 # ---------- Reporting, as in nginx-test.sh
 
@@ -417,6 +425,9 @@ moved_login() {
         out=$(tr -d '\r' < "/work/$migration.sql" | timeout -k 5 60 mariadb --defaults-file=/tmp/bot.cnf minerbot 2>&1) \
             || problem "the migration $migration didn't run with the bot's login" "$out"
     done
+    # moved_rights applies the rights file here too
+    out=$(timeout -k 5 30 mariadb --defaults-file=/tmp/bot.cnf minerbot 2>&1 <<< "$schema_version") \
+        || problem "the bot's login couldn't make schema_version in minerbot as the migration runner makes it" "$out"
     [ "$(sql "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'minerbot' AND TABLE_NAME IN ('audit_log', 'dashboard_sessions', 'bot_status', 'guilds')")" = 4 ] \
         || problem "the migrations didn't make the dashboard's and the bot's tables in minerbot"
     for kind in "CREATE VIEW v AS SELECT 1" "CREATE FUNCTION f() RETURNS INT RETURN 1" \
@@ -471,6 +482,8 @@ inside_container() {
         out=$(tr -d '\r' < "/work/$migration.sql" | timeout -k 5 60 mariadb "$bot" 2>&1) \
             || stop "Couldn't run MinerBot's migration $migration: $out"
     done
+    out=$(timeout -k 5 30 mariadb "$bot" 2>&1 <<< "$schema_version") \
+        || stop "Couldn't make schema_version as the migration runner makes it: $out"
 
     # The dashboard's login, made as setup-dashboard.sh makes it: a 40-character password, on stdin
     password=$(head -c 600 /dev/urandom | tr -dc 'A-Za-z0-9' | cut -c 1-40)
