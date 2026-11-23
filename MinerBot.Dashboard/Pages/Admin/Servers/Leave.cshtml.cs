@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Mvc.Filters;
 using Microsoft.AspNetCore.Mvc.RazorPages;
 using Microsoft.Extensions.Options;
 using MinerBot.Dashboard.Auth;
+using MinerBot.Dashboard.Hosting;
 using MinerBot.Dashboard.Requests;
 using MinerBot.Dashboard.Security;
 using MinerBot.Dashboard.Servers;
@@ -20,7 +21,8 @@ namespace MinerBot.Dashboard.Pages.Admin.Servers
     // of its own, so an Admin is refused by the framework before any handler. It says in full what a leave deletes, and takes
     // the server's name as MinerBot's copy has it at the POST, or its ID, typed to confirm, with a sign-in from the last 15
     // minutes, which the sender checks again whatever the form held. Sent leads back to the server's page, whose box follows
-    // the request.
+    // the request; anything else is kept as a form's notice, without the typed name, and redirects here with ?notice=,
+    // whose GET draws why, never this page drawn on the POST, which a reload would send again.
     [Authorize(Policy = Policies.Owner)]
     public sealed class LeaveServerModel(IBotGuildReads guilds, IBotRequestReads reads, TimeProvider time, ILogger<LeaveServerModel> logger) : PageModel
     {
@@ -42,7 +44,8 @@ namespace MinerBot.Dashboard.Pages.Admin.Servers
         public RequestLine Last { get; private set; } = new(null);
         public AvailabilityLine? Availability { get; private set; }
 
-        // How the sender answered a form it didn't send on, why in its words, and the request those name
+        // A form sent and not sent on, from its notice: the key it keeps after a save the database didn't confirm, why in its
+        // words, and the request those name
         public SendOutcome? Outcome { get; private set; }
         public string? Problem { get; private set; }
         public ulong? ProblemRequest { get; private set; }
@@ -53,17 +56,41 @@ namespace MinerBot.Dashboard.Pages.Admin.Servers
         // The form, only for a server MinerBot is in while requests are on, and only once the sign-in is fresh
         public ControlForm Form => !IsIn || !RequestsOn ? ControlForm.NotOffered : Fresh ? ControlForm.Offered : ControlForm.NeedsFreshSignIn;
 
-        // A new key on every render, apart from the form sent when the database didn't confirm its save, which keeps the key
-        // it was sent with, so sending it again finds the first request
+        // A new key on every render, apart from the form a notice draws after a save the database didn't confirm, which
+        // keeps the key it was sent with, so sending it again finds the first request
         public string FormKey => FormKeys.For(Outcome);
 
-        public async Task<IActionResult> OnGetAsync(long id)
+        // The page's one form, as its notice names it
+        const string LeaveForm = "leave";
+
+        public async Task<IActionResult> OnGetAsync(long id, [FromQuery] string? notice)
         {
             // Every Discord ID is a positive long, which the route takes
             if (id <= 0)
                 return NotFound();
 
             await LoadAsync((ulong)id);
+
+            // A form's notice, which draws why nothing was sent, and the form's key after a save the database didn't confirm
+            if (HttpContext.RequestServices.GetRequiredService<FormNotices>().Find(this, notice, [LeaveForm]) is { } found)
+            {
+                Outcome = found.Key is { } key ? new SendOutcome.Unsure(key) : null;
+                Problem = found.Words;
+                ProblemRequest = found.Request;
+
+                // The form isn't drawn, so the words don't offer it: the sign-in passed its 15 minutes since the form was
+                // sent, or no leave is offered now, as once MinerBot has taken it and left, when the page has no last use to
+                // look at either
+                if (found.Unsure && Form != ControlForm.Offered)
+                    Problem = Form == ControlForm.NeedsFreshSignIn ? RequestWords.UnsureNotFresh : RequestWords.UnsureNotOffered;
+                // Nor does a name typed wrong send the person to a box this GET doesn't draw, as once MinerBot has taken the
+                // leave sent after it and left, when there's no name above either, or the sign-in has passed its 15 minutes
+                else if (found.Words == RequestWords.NotConfirmedServer && Form != ControlForm.Offered)
+                    Problem = RequestWords.NotConfirmedNotOffered;
+
+                RequestWords.Answer(Response, found, time.GetUtcNow().UtcDateTime);
+            }
+
             return Page();
         }
 
@@ -72,15 +99,12 @@ namespace MinerBot.Dashboard.Pages.Admin.Servers
             if (id <= 0)
                 return BadRequest();
 
-            // The copy as it is now, so a server renamed since the page was drawn is refused with its new name shown
+            // The copy as it is now, so a server renamed since the page was drawn is refused, and the notice's GET shows its
+            // new name
             await LoadAsync((ulong)id);
 
             if (!IsIn)
-            {
-                Problem = ServerActions.NothingToLeave + " Nothing was sent.";
-                Response.StatusCode = StatusCodes.Status409Conflict;
-                return Page();
-            }
+                return Keep(new FormNotice { Form = LeaveForm, Status = StatusCodes.Status409Conflict, Words = ServerActions.NothingToLeave + " Nothing was sent." });
 
             var outcome = await HttpContext.RequestServices.GetRequiredService<RequestSender>()
                 .SendAsync(new SendOrder(RequestKinds.GuildLeave, formkey, Id, Typed: new Confirmation.Server(confirm, Server!.name, Id)), HttpContext);
@@ -100,19 +124,12 @@ namespace MinerBot.Dashboard.Pages.Admin.Servers
                     return BadRequest();
             }
 
-            // The page again with why, the typed name never kept, and the form's key kept only after a save the database
-            // didn't confirm
-            Outcome = outcome;
-            (Problem, ProblemRequest) = outcome switch
-            {
-                SendOutcome.SentBefore before => (RequestWords.SentBefore(before.Id), before.Id),
-                SendOutcome.Refused refused => (refused.Words, refused.Waiting),
-                _ => (RequestWords.Unsure, (ulong?)null)
-            };
-
-            RequestWords.Answer(Response, outcome, time.GetUtcNow().UtcDateTime);
-            return Page();
+            // Anything else is a notice this page's GET draws, with the form's key after a save the database didn't confirm.
+            // The typed name is never kept.
+            return Keep(FormNotice.Of(LeaveForm, outcome));
         }
+
+        IActionResult Keep(FormNotice notice) => HttpContext.RequestServices.GetRequiredService<FormNotices>().Keep(this, notice, new { id = (long)Id });
 
         // A request no handler takes would otherwise get the page as if it were a GET
         public override void OnPageHandlerExecuting(PageHandlerExecutingContext context)

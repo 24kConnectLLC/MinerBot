@@ -73,6 +73,10 @@ namespace MinerBot.Dashboard.Servers
         // A form for a channel that could take it when the page was drawn, and can't now
         public static string ChannelNotNow(string why) => $"That channel can't take a test message now: {why}. Nothing was sent.";
 
+        // A form for a channel the server doesn't choose now, as after /admin set_channels changed its choices, which could
+        // choose it again later
+        public const string NotChosenNow = "That channel isn't one of the channels this server chose for MinerBot's posts now. Nothing was sent.";
+
         // A form sent for a server the page doesn't offer actions for, such as one the bot left since the page was drawn
         public static string NotOffered(ServerActionState state) => Line(state) + " Nothing was sent.";
 

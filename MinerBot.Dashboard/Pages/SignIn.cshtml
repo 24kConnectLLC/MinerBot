@@ -1,8 +1,23 @@
 @page
 @model SignInModel
+@using MinerBot.Dashboard.Requests
+@*
+    Drawn only for a form sent after its session ended, which the cookie handler sends here by GET with ended=1
+    (SessionEnded): nothing was done, what was typed isn't kept, and a link to sign in again, back to the page the form was
+    on. A link, never a form: browsers apply form-action 'self' to the redirect after a form, and discord.com isn't 'self'.
+    Every other GET goes on to Discord, or straight back for someone already signed in, so the rest is never shown.
+*@
+@if (Model.EndedLink != null)
+{
+    ViewData["Title"] = SessionWords.EndedTitle;
+    <h1>@SessionWords.EndedTitle</h1>
+    <p>@SessionWords.EndedNothingDone</p>
+    <p>@SessionWords.EndedTypedNotKept</p>
+    <p><a class="button" href="@Model.EndedLink">@ControlWords.SignInAgain</a></p>
+    return;
+}
 @{
     ViewData["Title"] = "Sign in";
 }
-@* Never shown: a GET always goes on to Discord, or straight back for someone already signed in *@
 <h1>Sign in</h1>
 <p><a class="button" href="/signin?returnUrl=%2Fadmin">Sign in with Discord</a></p>

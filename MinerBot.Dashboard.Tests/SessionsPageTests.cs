@@ -165,7 +165,8 @@ namespace MinerBot.Dashboard.Tests
             Assert.Equal("/signin?returnUrl=%2Fadmin", SignInSteps.PathOf(next.Headers.Location));
 
             var post = await RequestSteps.PostControlAsync(ended, controls, ControlWords.ClearCaches);
-            Assert.NotEqual(HttpStatusCode.OK, post.StatusCode);
+            Assert.Equal(HttpStatusCode.SeeOther, post.StatusCode);
+            Assert.Equal("/signin?ended=1&returnUrl=%2Fadmin%2Fbot%2Fcontrols", SignInSteps.PathOf(post.Headers.Location));
             Assert.Empty(await db.SentAsync());
 
             Assert.Equal(HttpStatusCode.OK, await AdminAsync(other));

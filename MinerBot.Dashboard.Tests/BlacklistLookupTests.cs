@@ -11,9 +11,10 @@ using static MinerBot.Dashboard.Tests.Support.BlacklistSteps;
 
 namespace MinerBot.Dashboard.Tests
 {
-    // A custom profile link on the blacklist's add page: the bot is asked which account it is, the page comes back with
-    // every box kept and the lookup's box, and the next press adds the account the bot's answer names, read on the server
-    // from this person's own lookup of that name from the last 30 minutes, never from anything the browser sends
+    // A custom profile link on the blacklist's add page: the bot is asked which account it is, the page comes back as a
+    // form's notice with every box kept and the lookup's box, and the next press adds the account the bot's answer names,
+    // read on the server from this person's own lookup of that name from the last 30 minutes, never from anything the
+    // browser sends
     [Collection("Database")]
     public class BlacklistLookupTests(MariaDbFixture fixture)
     {
@@ -52,12 +53,14 @@ namespace MinerBot.Dashboard.Tests
 
         static async Task<List<BotRequestRow>> LookupsAsync(MariaDbFixture db) => (await db.SentAsync()).Where(row => row.kind == RequestKinds.SteamLookup).ToList();
 
-        // The page a lookup answers with: 200, the boxes as typed, the lookup's number in its hidden field, and its box
-        static async Task<(string Html, ulong Lookup)> LookedUpAsync(HttpResponseMessage response, string words)
+        // The page a lookup answers with, as the browser follows the notice it's kept as: 200, the boxes as typed, the
+        // lookup's number in its hidden field, and its box
+        static async Task<(string Html, ulong Lookup)> LookedUpAsync(TestBrowser browser, HttpResponseMessage response, string words)
         {
-            var html = await response.Content.ReadAsStringAsync(Token);
+            var answer = await RequestSteps.AnsweredAsync(browser, response);
+            var html = await answer.Content.ReadAsStringAsync(Token);
 
-            Assert.True(response.StatusCode == HttpStatusCode.OK, $"The add answered {response.StatusCode}");
+            Assert.True(answer.StatusCode == HttpStatusCode.OK, $"The add's notice answered {answer.StatusCode}");
             Assert.Contains(words, Text(html));
             Assert.Equal("Kept Name", BoxValue(html, "name"));
             Assert.Equal("Kept Reason", BoxValue(html, "reason"));
@@ -86,7 +89,7 @@ namespace MinerBot.Dashboard.Tests
             await using var factory = new DashboardFactory(db);
             var admin = await SignedInAsync(factory, TestUsers.Admin, "198.51.100.160");
 
-            var (html, lookup) = await LookedUpAsync(await AddAsync(admin), BlacklistWords.LookupSent);
+            var (html, lookup) = await LookedUpAsync(admin, await AddAsync(admin), BlacklistWords.LookupSent);
 
             var row = Assert.Single(await LookupsAsync(db));
             Assert.Equal((row.id, Name, TestUsers.Admin.Id, RequestRoles.Admin, (ulong?)null), (lookup, row.argument, row.actor_id, row.actor_role, row.guild_id));
@@ -114,7 +117,7 @@ namespace MinerBot.Dashboard.Tests
             var admin = await SignedInAsync(factory, TestUsers.Admin, "198.51.100.161");
             var now = factory.Clock.GetUtcNow().UtcDateTime;
 
-            var (_, lookup) = await LookedUpAsync(await AddAsync(admin), BlacklistWords.LookupSent);
+            var (_, lookup) = await LookedUpAsync(admin, await AddAsync(admin), BlacklistWords.LookupSent);
             await AnsweredAsync(db, lookup, now);
 
             var added = await AddAsync(admin, lookup: lookup.ToString(CultureInfo.InvariantCulture), more: [("account", "12345"), ("result_number", "12345")]);
@@ -127,7 +130,7 @@ namespace MinerBot.Dashboard.Tests
             Assert.Single(await LookupsAsync(db));
 
             // Sent again, it's already there, and says so, adding nothing more
-            var again = await AddAsync(admin, lookup: lookup.ToString(CultureInfo.InvariantCulture));
+            var again = await RequestSteps.AnsweredAsync(admin, await AddAsync(admin, lookup: lookup.ToString(CultureInfo.InvariantCulture)));
             Assert.Equal(HttpStatusCode.Conflict, again.StatusCode);
             Assert.Contains(BlacklistWords.AlreadyAdded, Text(await again.Content.ReadAsStringAsync(Token)));
             Assert.Single(await db.BlacklistAuditAsync(), entry => entry.outcome == "ok");
@@ -144,7 +147,7 @@ namespace MinerBot.Dashboard.Tests
             var admin = await SignedInAsync(factory, TestUsers.Admin, "198.51.100.163");
             var now = factory.Clock.GetUtcNow().UtcDateTime;
 
-            var (_, lookup) = await LookedUpAsync(await AddAsync(owner), BlacklistWords.LookupSent);
+            var (_, lookup) = await LookedUpAsync(owner, await AddAsync(owner), BlacklistWords.LookupSent);
             await AnsweredAsync(db, lookup, now);
 
             Assert.Equal(HttpStatusCode.BadRequest, (await AddAsync(admin, lookup: lookup.ToString(CultureInfo.InvariantCulture))).StatusCode);
@@ -184,10 +187,10 @@ namespace MinerBot.Dashboard.Tests
             var admin = await SignedInAsync(factory, TestUsers.Admin, "198.51.100.165");
             var now = factory.Clock.GetUtcNow().UtcDateTime;
 
-            var (_, lookup) = await LookedUpAsync(await AddAsync(admin), BlacklistWords.LookupSent);
+            var (_, lookup) = await LookedUpAsync(admin, await AddAsync(admin), BlacklistWords.LookupSent);
             await AnsweredAsync(db, lookup, now);
 
-            var (_, other) = await LookedUpAsync(await AddAsync(admin, "https://steamcommunity.com/id/someone_else", lookup.ToString(CultureInfo.InvariantCulture)),
+            var (_, other) = await LookedUpAsync(admin, await AddAsync(admin, "https://steamcommunity.com/id/someone_else", lookup.ToString(CultureInfo.InvariantCulture)),
                 BlacklistWords.LookupSent);
 
             Assert.NotEqual(lookup, other);
@@ -205,14 +208,14 @@ namespace MinerBot.Dashboard.Tests
             var admin = await SignedInAsync(factory, TestUsers.Admin, "198.51.100.166");
             var now = factory.Clock.GetUtcNow().UtcDateTime;
 
-            var (_, lookup) = await LookedUpAsync(await AddAsync(admin), BlacklistWords.LookupSent);
+            var (_, lookup) = await LookedUpAsync(admin, await AddAsync(admin), BlacklistWords.LookupSent);
             await AnsweredAsync(db, lookup, now);
 
             factory.Clock.Advance(TimeSpan.FromMinutes(20));
             Assert.Equal(HttpStatusCode.OK, (await admin.Client.GetAsync("/admin/blacklist", Token)).StatusCode);
             factory.Clock.Advance(TimeSpan.FromMinutes(11));
 
-            var (_, again) = await LookedUpAsync(await AddAsync(admin, lookup: lookup.ToString(CultureInfo.InvariantCulture)), BlacklistWords.LookupSent);
+            var (_, again) = await LookedUpAsync(admin, await AddAsync(admin, lookup: lookup.ToString(CultureInfo.InvariantCulture)), BlacklistWords.LookupSent);
 
             Assert.NotEqual(lookup, again);
             Assert.Equal(2, (await LookupsAsync(db)).Count);
@@ -229,19 +232,58 @@ namespace MinerBot.Dashboard.Tests
             var admin = await SignedInAsync(factory, TestUsers.Admin, "198.51.100.167");
             var now = factory.Clock.GetUtcNow().UtcDateTime;
 
-            var (_, lookup) = await LookedUpAsync(await AddAsync(admin), BlacklistWords.LookupSent);
-            var (waitingHtml, waiting) = await LookedUpAsync(await AddAsync(admin, lookup: lookup.ToString(CultureInfo.InvariantCulture)), BlacklistWords.LookupWaiting);
+            var (_, lookup) = await LookedUpAsync(admin, await AddAsync(admin), BlacklistWords.LookupSent);
+            var (waitingHtml, waiting) = await LookedUpAsync(admin, await AddAsync(admin, lookup: lookup.ToString(CultureInfo.InvariantCulture)), BlacklistWords.LookupWaiting);
 
             Assert.Equal(lookup, waiting);
             Assert.Contains("Queued", Text(waitingHtml));
 
             await RequestSteps.ClaimAsync(db, lookup, now.AddSeconds(1));
-            var (runningHtml, running) = await LookedUpAsync(await AddAsync(admin, lookup: lookup.ToString(CultureInfo.InvariantCulture)), BlacklistWords.LookupWaiting);
+            var (runningHtml, running) = await LookedUpAsync(admin, await AddAsync(admin, lookup: lookup.ToString(CultureInfo.InvariantCulture)), BlacklistWords.LookupWaiting);
 
             Assert.Equal(lookup, running);
             Assert.Contains("Running", Text(runningHtml));
             Assert.Single(await LookupsAsync(db));
             Assert.Equal(0, await db.EntryCountAsync());
+        }
+
+        // A waiting lookup's notice draws the lookup's box as it is when its page is loaded, never as the press found it:
+        // once the bot has answered, the same address shows the answer, with the boxes still as typed, and sends nothing;
+        // the press after it adds the account the answer names. Fails if the notice's GET draws no box, or a box that
+        // doesn't follow the request.
+        [Fact]
+        public async Task AWaitingLookupsNoticeShowsItsBoxAsItIsNow()
+        {
+            var db = await fixture.ReadyAsync();
+            await using var factory = new DashboardFactory(db);
+            var admin = await SignedInAsync(factory, TestUsers.Admin, "198.51.100.173");
+            var now = factory.Clock.GetUtcNow().UtcDateTime;
+
+            var (_, lookup) = await LookedUpAsync(admin, await AddAsync(admin), BlacklistWords.LookupSent);
+            var waiting = await AddAsync(admin, lookup: lookup.ToString(CultureInfo.InvariantCulture));
+            var address = await RequestSteps.NoticeOfAsync(waiting);
+            var (queued, _) = await LookedUpAsync(admin, waiting, BlacklistWords.LookupWaiting);
+
+            Assert.Contains("Queued", Text(queued));
+            Assert.True(PageTests.LoadsRefreshScript(queued), "The page with a lookup's box that isn't final doesn't load refresh.js");
+
+            await AnsweredAsync(db, lookup, now);
+            var answered = await admin.Client.GetAsync(address, Token);
+            var html = await answered.Content.ReadAsStringAsync(Token);
+
+            Assert.Equal(HttpStatusCode.OK, answered.StatusCode);
+            Assert.Contains(BlacklistWords.LookupWaiting, Text(html));
+            Assert.Contains(Answer, Text(html));
+            Assert.DoesNotContain("Queued", Text(html));
+            Assert.False(PageTests.LoadsRefreshScript(html), "The page with a final lookup's box loads refresh.js");
+            Assert.Equal("Kept Name", BoxValue(html, "name"));
+            Assert.Equal(lookup.ToString(CultureInfo.InvariantCulture), BoxValue(html, "lookup"));
+            Assert.Single(await LookupsAsync(db));
+            Assert.Equal(0, await db.EntryCountAsync());
+
+            var added = await AddAsync(admin, lookup: BoxValue(html, "lookup"), key: BoxValue(html, "formkey"));
+            Assert.Equal($"/admin/blacklist/{Account}?done=added", SignInSteps.PathOf(added.Headers.Location));
+            Assert.Single(await LookupsAsync(db));
         }
 
         // A field to correct after the lookup, such as notes with a pasted tab, which the browser sends and the server refuses,
@@ -255,10 +297,10 @@ namespace MinerBot.Dashboard.Tests
             var admin = await SignedInAsync(factory, TestUsers.Admin, "198.51.100.172");
             var now = factory.Clock.GetUtcNow().UtcDateTime;
 
-            var (_, lookup) = await LookedUpAsync(await AddAsync(admin), BlacklistWords.LookupSent);
+            var (_, lookup) = await LookedUpAsync(admin, await AddAsync(admin), BlacklistWords.LookupSent);
             await AnsweredAsync(db, lookup, now);
 
-            var refused = await AddAsync(admin, lookup: lookup.ToString(CultureInfo.InvariantCulture), notes: "Seen in\tlobby");
+            var refused = await RequestSteps.AnsweredAsync(admin, await AddAsync(admin, lookup: lookup.ToString(CultureInfo.InvariantCulture), notes: "Seen in\tlobby"));
             var html = await refused.Content.ReadAsStringAsync(Token);
 
             Assert.Equal(HttpStatusCode.BadRequest, refused.StatusCode);
@@ -284,10 +326,10 @@ namespace MinerBot.Dashboard.Tests
             var admin = await SignedInAsync(factory, TestUsers.Admin, "198.51.100.168");
             var now = factory.Clock.GetUtcNow().UtcDateTime;
 
-            var (_, lookup) = await LookedUpAsync(await AddAsync(admin), BlacklistWords.LookupSent);
+            var (_, lookup) = await LookedUpAsync(admin, await AddAsync(admin), BlacklistWords.LookupSent);
             await AnsweredAsync(db, lookup, now, "Steam has no profile with that custom link.", null);
 
-            var none = await AddAsync(admin, lookup: lookup.ToString(CultureInfo.InvariantCulture));
+            var none = await RequestSteps.AnsweredAsync(admin, await AddAsync(admin, lookup: lookup.ToString(CultureInfo.InvariantCulture)));
             var html = await none.Content.ReadAsStringAsync(Token);
 
             Assert.Equal(HttpStatusCode.BadRequest, none.StatusCode);
@@ -308,38 +350,71 @@ namespace MinerBot.Dashboard.Tests
             var admin = await SignedInAsync(factory, TestUsers.Admin, "198.51.100.169");
             var now = factory.Clock.GetUtcNow().UtcDateTime;
 
-            var (_, failed) = await LookedUpAsync(await AddAsync(admin), BlacklistWords.LookupSent);
+            var (_, failed) = await LookedUpAsync(admin, await AddAsync(admin), BlacklistWords.LookupSent);
             await RequestSteps.ClaimAsync(db, failed, now.AddSeconds(1));
             await RequestSteps.FinishAsync(db, failed, RequestStates.Failed, "Steam didn't answer the lookup (TimeoutException).", now.AddSeconds(2));
 
-            var (_, second) = await LookedUpAsync(await AddAsync(admin, lookup: failed.ToString(CultureInfo.InvariantCulture)), BlacklistWords.LookupSent);
+            var (_, second) = await LookedUpAsync(admin, await AddAsync(admin, lookup: failed.ToString(CultureInfo.InvariantCulture)), BlacklistWords.LookupSent);
             Assert.NotEqual(failed, second);
 
             // Left waiting past its expiry and the grace after it
             factory.Clock.Advance(RequestKinds.UsualExpiry + RequestViews.Waits.QueuedGrace + TimeSpan.FromSeconds(1));
-            var (_, third) = await LookedUpAsync(await AddAsync(admin, lookup: second.ToString(CultureInfo.InvariantCulture)), BlacklistWords.LookupSent);
+            var (_, third) = await LookedUpAsync(admin, await AddAsync(admin, lookup: second.ToString(CultureInfo.InvariantCulture)), BlacklistWords.LookupSent);
 
             Assert.NotEqual(second, third);
             Assert.Equal(3, (await LookupsAsync(db)).Count);
             Assert.Equal(0, await db.EntryCountAsync());
         }
 
-        // The form sent twice with the same key, as a reload of the page sends it, finds the same request and writes no other
+        // The form sent twice with the same key, as a double click sends it, finds the same request and writes no other.
+        // Its notice's address, loaded again as a reload loads it, is a page that sends nothing, with a new key each time.
+        // Sent with the same key and another link, as the page from before the press sends it once Back restores it and the
+        // link is changed, it was sent already: the words name the first lookup, with a link to it, and the boxes are as
+        // typed. Fails if the lookup's refusal loses the request it names.
         [Fact]
-        public async Task ReloadingTheLookupWritesNoSecondRequest()
+        public async Task AFormSentTwiceWritesNoSecondLookup()
         {
             var db = await fixture.ReadyAsync();
             await using var factory = new DashboardFactory(db);
             var admin = await SignedInAsync(factory, TestUsers.Admin, "198.51.100.170");
             var key = RequestFields.NewKey();
 
-            var (firstHtml, first) = await LookedUpAsync(await AddAsync(admin, key: key), BlacklistWords.LookupSent);
-            var (secondHtml, second) = await LookedUpAsync(await AddAsync(admin, key: key), BlacklistWords.LookupSent);
+            var (firstHtml, first) = await LookedUpAsync(admin, await AddAsync(admin, key: key), BlacklistWords.LookupSent);
+            var sentAgain = await AddAsync(admin, key: key);
+            var address = await RequestSteps.NoticeOfAsync(sentAgain);
+            var (secondHtml, second) = await LookedUpAsync(admin, sentAgain, BlacklistWords.LookupSent);
 
             Assert.Equal(first, second);
             Assert.Single(await LookupsAsync(db));
             Assert.NotEqual(key, BoxValue(firstHtml, "formkey"));
             Assert.NotEqual(BoxValue(firstHtml, "formkey"), BoxValue(secondHtml, "formkey"));
+
+            var keys = new List<string?> { BoxValue(secondHtml, "formkey") };
+
+            for (var reloads = 0; reloads < 2; reloads++)
+            {
+                var reload = await admin.Client.GetAsync(address, Token);
+                var html = await reload.Content.ReadAsStringAsync(Token);
+
+                Assert.Equal(HttpStatusCode.OK, reload.StatusCode);
+                Assert.Contains(BlacklistWords.LookupSent, Text(html));
+                Assert.Equal(first.ToString(CultureInfo.InvariantCulture), BoxValue(html, "lookup"));
+                keys.Add(BoxValue(html, "formkey"));
+            }
+
+            const string other = "https://steamcommunity.com/id/someone_else";
+            var changed = await RequestSteps.AnsweredAsync(admin, await AddAsync(admin, other, key: key));
+            var changedHtml = await changed.Content.ReadAsStringAsync(Token);
+
+            Assert.Equal(HttpStatusCode.Conflict, changed.StatusCode);
+            Assert.Contains(RequestWords.SentBefore(first), Text(changedHtml));
+            Assert.Contains($"<a href=\"/admin/requests/{first}\">That request</a>", changedHtml);
+            Assert.Equal(other, BoxValue(changedHtml, "steamid"));
+            Assert.Equal("Kept Notes", BoxValue(changedHtml, "notes"));
+
+            Assert.Single(await LookupsAsync(db));
+            Assert.Equal(3, keys.Distinct().Count());
+            Assert.Equal(0, await db.EntryCountAsync());
         }
 
         // While requests to the bot are off, a custom link can't be looked up, and the page says so by the box, with what to
@@ -353,7 +428,7 @@ namespace MinerBot.Dashboard.Tests
 
             foreach (var link in new[] { Link, "steamcommunity.com/id/gabelogannewell/" })
             {
-                var off = await AddAsync(admin, link);
+                var off = await RequestSteps.AnsweredAsync(admin, await AddAsync(admin, link));
                 var html = await off.Content.ReadAsStringAsync(Token);
 
                 Assert.Equal(HttpStatusCode.BadRequest, off.StatusCode);

@@ -1,5 +1,6 @@
 using System.Globalization;
 using DataAccessLibrary.Requests.Models;
+using MinerBot.Dashboard.Hosting;
 using MinerBot.Shared.Requests;
 
 namespace MinerBot.Dashboard.Requests
@@ -22,7 +23,11 @@ namespace MinerBot.Dashboard.Requests
         // An empty box in the status text's form, which is never sent as no text: that's Back to the default's own form
         public const string NoStatusText = "Type the status text, or use Back to the default.";
 
-        public const string KeyTaken = "This form's key belongs to another request, so nothing was sent. Reload the page and send it again.";
+        public const string KeyTaken = "This form's key belongs to another request, so nothing was sent. The form below is new: send it again.";
+
+        // Above a page whose address names a form's notice that's gone: past its 30 minutes, from before a sign-in again, or
+        // replaced by a newer one
+        public const string NoticeGone = "The message this address showed after a form isn't kept any more, so this is the page as it is now.";
 
         public const string Unsure = "The dashboard lost touch with its database while it was saving this request, so it can't tell whether it was sent. "
             + "Sending it again from this form is safe: if the first one was saved, the dashboard shows it instead of sending another.";
@@ -38,6 +43,12 @@ namespace MinerBot.Dashboard.Requests
         public const string UnsurePostsLine = "The dashboard lost touch with its database while it was saving this request, so it can't tell whether it was sent. "
             + "The line under Posts shows posts as they are now and the request that last changed them: look there before you send another.";
 
+        // The same for a form whose page doesn't draw it again for another reason, as once MinerBot has left the server, a
+        // notification run has started since the approval, the dashboard has started again with requests off, or the lists
+        // no longer give the person a role that can ask for it: the audit log lists the request, if it was saved.
+        public const string UnsureNotOffered = "The dashboard lost touch with its database while it was saving this request, so it can't tell whether it was sent. "
+            + "The form isn't offered now, and the audit log shows whether it was: look there before you send another.";
+
         // The details of the refusals the audit log records: for an Admin's try at an Owner control, "Only the Owner can ask
         // for this"
         public static string ForbiddenDetail(RequestKind kind) => $"Only {kind.WhoMayAsk} can ask for this";
@@ -51,6 +62,10 @@ namespace MinerBot.Dashboard.Requests
             + " Sign in again with Discord, then send it again." + (typedText ? " What you typed is below, to copy." : "");
 
         public static string NotConfirmed(string word) => $"Type {word} in the box to confirm. Nothing was sent.";
+
+        // The same, and NotConfirmedServer, for a form whose page doesn't draw it again, so there's no box to type in: once
+        // the bot has taken the pause sent after it, or MinerBot has left the server, or the sign-in has passed its 15 minutes
+        public const string NotConfirmedNotOffered = "What was typed to confirm it didn't match, so nothing was sent.";
 
         public static string Rule(string problem) => $"The bot would refuse this, so nothing was sent: {problem}.";
 
@@ -79,13 +94,16 @@ namespace MinerBot.Dashboard.Requests
             $"A request like this is already waiting for the bot: request {waiting.id.ToString(CultureInfo.InvariantCulture)}, asked for at {When(waiting.created_at)}. "
             + $"The bot takes it within seconds while it's on Discord, or it expires at {When(waiting.expires_at)}. Nothing more was sent.";
 
-        public static string SentBefore(ulong id) =>
-            $"This form was sent already, as request {id.ToString(CultureInfo.InvariantCulture)}, with other details, so nothing more was sent. "
-            + "The form below is new: send it again to ask with these.";
+        public static string SentBefore(ulong id) => SentBeforeNotOffered(id) + " The form below is new: send it again to ask with these.";
 
-        // The status a page answers with when it draws itself again: 409 for what's refused as things stand, 400 for a field
-        // to correct, 403 for a sign-in that's too old, 429 for a person's limit, and 503 when it can't tell what happened.
-        // Sent is the page's redirect, Forbidden its Forbid() and MadeUp its BadRequest(), never a page drawn again.
+        // The same for a form whose page doesn't draw it again, as a pause's once the bot has taken the first, or a test
+        // message's once MinerBot has left the server: the request named, the page's own lines and banners say the rest
+        public static string SentBeforeNotOffered(ulong id) =>
+            $"This form was sent already, as request {id.ToString(CultureInfo.InvariantCulture)}, with other details, so nothing more was sent.";
+
+        // The status of the page that draws a form's notice: 409 for what's refused as things stand, 400 for a field to
+        // correct, 403 for a sign-in that's too old, 429 for a person's limit, and 503 when it can't tell what happened. Sent
+        // is the form's redirect, Forbidden its Forbid() and MadeUp its BadRequest(), never a notice.
         public static int Status(SendOutcome outcome) => outcome switch
         {
             SendOutcome.Unsure => StatusCodes.Status503ServiceUnavailable,
@@ -100,16 +118,17 @@ namespace MinerBot.Dashboard.Requests
 
         // Whole seconds until a person may ask again, at least 1, for the 429's Retry-After: the hour itself when the rows
         // hold no time that can be read
-        public static int RetryAfter(SendOutcome.Refused refused, DateTime now) =>
-            refused.After is { } after ? Math.Max(1, (int)Math.Ceiling((after - now).TotalSeconds)) : (int)PersonLimits.Window.TotalSeconds;
+        public static int RetryAfter(DateTime? after, DateTime now) =>
+            after is { } at ? Math.Max(1, (int)Math.Ceiling((at - now).TotalSeconds)) : (int)PersonLimits.Window.TotalSeconds;
 
-        // The page's answer to a request it drew itself again for: the status, and Retry-After for a person's limit
-        public static void Answer(HttpResponse response, SendOutcome outcome, DateTime now)
+        // The answer of the GET that draws a form's notice: the notice's status, and for a person's limit Retry-After,
+        // worked out now, when the page is drawn
+        public static void Answer(HttpResponse response, FormNotice notice, DateTime now)
         {
-            response.StatusCode = Status(outcome);
+            response.StatusCode = notice.Status;
 
-            if (outcome is SendOutcome.Refused { Why: SendRefusal.PersonLimit } refused)
-                response.Headers.RetryAfter = RetryAfter(refused, now).ToString(CultureInfo.InvariantCulture);
+            if (notice.Status == StatusCodes.Status429TooManyRequests)
+                response.Headers.RetryAfter = RetryAfter(notice.After, now).ToString(CultureInfo.InvariantCulture);
         }
 
         // As in "an hour", "a minute" or "every 10 minutes", the bot's own words for a kind's window

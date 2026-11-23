@@ -4,10 +4,11 @@
 @using MinerBot.Dashboard.Blacklist
 @*
     The form posts to this page through asp-page, never an action attribute, so the form tag helper adds its token, and an
-    address that brought a SteamID into the box isn't sent again. A refused form comes back with what was typed in the
-    boxes, encoded, and a message by each field it was refused for. A custom profile link's lookup comes back the same way,
-    with the lookup's box, which refreshes itself through refresh.js until it's final, and the request's number in a hidden
-    field, the only thing of it the form carries; pressing Add to the blacklist again is the next look without the script.
+    address that brought a SteamID into the box isn't sent again. A refused form comes back as its notice's GET, at an
+    address that names only the notice, with what was typed in the boxes, encoded, and a message by each field it was
+    refused for. A custom profile link's lookup comes back the same way, with the lookup's box as it stands, which
+    refreshes itself through refresh.js until it's final, and the request's number in a hidden field, the only thing of it
+    the form carries; pressing Add to the blacklist again is the next look without the script.
 *@
 @{
     ViewData["Title"] = Model.Unsure ? "Not sure it was saved" : "Add to the blacklist";

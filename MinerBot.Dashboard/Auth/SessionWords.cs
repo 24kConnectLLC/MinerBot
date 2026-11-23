@@ -62,6 +62,19 @@ namespace MinerBot.Dashboard.Auth
         // Under the way to sign in again while requests to the bot are off, when a sign-in sends the owner no message
         public const string SignInAgainNoMessage = "It brings you back here. With requests to the bot off, it sends no sign-in message.";
 
+        // The page a form sent after its session ended lands on, /signin?ended=1 (SessionEnded), whose link is
+        // ControlWords.SignInAgain. It names the ways a session ends, DbTicketStore's cap on sessions a person and the lists
+        // included, since the person may have done none of them, and offers the way back only to someone still on the lists:
+        // anyone else's sign-in is refused. SessionTests ties its 5 to MaxSessionsPerPerson.
+        public const string EndedTitle = "Your session ended";
+
+        public const string EndedNothingDone = "You aren't signed in any more, so the dashboard didn't act on what you sent: nothing was changed, and nothing was sent "
+            + "to the bot. A session ends after 30 minutes unused or 12 hours in all, at a sign-out, when it's ended from the Sessions page, when you sign in "
+            + "elsewhere with 5 sessions open, which ends the one used least recently, or when you're taken off the dashboard's lists.";
+
+        public const string EndedTypedNotKept = "What you typed into the form isn't kept. If you're still on the dashboard's lists, signing in again brings you back to "
+            + "that page, to fill it in and send it again.";
+
         public static string Role(DashboardRole role) => role switch
         {
             DashboardRole.Owner => "Owner",

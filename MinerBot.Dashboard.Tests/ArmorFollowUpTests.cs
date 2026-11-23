@@ -195,19 +195,20 @@ namespace MinerBot.Dashboard.Tests
             await using var factory = new DashboardFactory(db);
             var admin = await ReviewerAsync(factory, "198.51.100.133");
 
-            Assert.Equal(HttpStatusCode.Conflict, (await PostAsync(admin, 71, "Approve", await OpenAsync(admin, 71))).StatusCode);
-            Assert.Equal(HttpStatusCode.Conflict, (await PostAsync(admin, 72, "Approve", await OpenAsync(admin, 72), tickAll: false)).StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, (await RequestSteps.AnsweredAsync(admin, await PostAsync(admin, 71, "Approve", await OpenAsync(admin, 71)))).StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict,
+                (await RequestSteps.AnsweredAsync(admin, await PostAsync(admin, 72, "Approve", await OpenAsync(admin, 72), tickAll: false))).StatusCode);
 
             var stale = await OpenAsync(admin, 73);
             await db.RootExecuteAsync($"UPDATE {MariaDbFixture.ArmorTable} SET ArmorDescription = 'Changed after the page opened' WHERE ID = 73");
-            Assert.Equal(HttpStatusCode.Conflict, (await PostAsync(admin, 73, "Approve", stale)).StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, (await RequestSteps.AnsweredAsync(admin, await PostAsync(admin, 73, "Approve", stale))).StatusCode);
 
             Assert.Empty(await db.SentAsync());
 
             // Sent twice: the second finds the armor approved already, and sends no second clear
             var twice = await OpenAsync(admin, 74);
             Assert.Equal(HttpStatusCode.Redirect, (await PostAsync(admin, 74, "Approve", twice)).StatusCode);
-            var already = await PostAsync(admin, 74, "Approve", twice);
+            var already = await RequestSteps.AnsweredAsync(admin, await PostAsync(admin, 74, "Approve", twice));
             Assert.Equal(HttpStatusCode.Conflict, already.StatusCode);
             Assert.Contains(ArmorWords.Already(ArmorStatus.Approved), Text(await already.Content.ReadAsStringAsync(Token)));
             Assert.Single(await db.SentAsync());
@@ -219,7 +220,7 @@ namespace MinerBot.Dashboard.Tests
                 Services = services => services.Replace(ServiceDescriptor.Transient<IArmorSubmissionData>(provider => new LateSubmissions(ActivatorUtilities.CreateInstance<ArmorSubmissionData>(provider))))
             });
             var lateAdmin = await ReviewerAsync(late, "198.51.100.134");
-            var unsure = await PostAsync(lateAdmin, 75, "Approve", await OpenAsync(lateAdmin, 75));
+            var unsure = await RequestSteps.AnsweredAsync(lateAdmin, await PostAsync(lateAdmin, 75, "Approve", await OpenAsync(lateAdmin, 75)));
 
             Assert.Equal(HttpStatusCode.ServiceUnavailable, unsure.StatusCode);
             Assert.Contains(ArmorWords.Unsure, Text(await unsure.Content.ReadAsStringAsync(Token)));
@@ -305,10 +306,158 @@ namespace MinerBot.Dashboard.Tests
 
             // Pending armor: refused before the sender, whatever the form held
             var pending = await OpenAsync(admin, 80);
-            var refused = await AnnounceAsync(admin, 80, pending, RequestFields.NewKey());
+            var refused = await RequestSteps.AnsweredAsync(admin, await AnnounceAsync(admin, 80, pending, RequestFields.NewKey()));
             Assert.Equal(HttpStatusCode.Conflict, refused.StatusCode);
             Assert.Contains(ArmorWords.NotApprovedNow, Text(await refused.Content.ReadAsStringAsync(Token)));
             Assert.Single(await db.SentAsync(), row => row.kind == RequestKinds.JobNotifications);
+        }
+
+        // Announce now whose save the database didn't confirm is a notice whose GET says it can't tell, at the top and by the
+        // button, at 503, and draws the form with the key it was sent with, so pressing it again finds the first request
+        // rather than sending a second. Fails if the key isn't carried to the notice's GET.
+        [Fact]
+        public async Task AnUnconfirmedAnnounceKeepsItsKey()
+        {
+            var db = await fixture.ReadyBotAsync();
+            await db.AddAsync(Submission(95));
+            await using var factory = new DashboardFactory(db, new DashboardFactoryOptions
+            {
+                Services = services => services.Replace(ServiceDescriptor.Transient<IBotRequestQueue>(provider => new UnconfirmedQueue(ActivatorUtilities.CreateInstance<BotRequestQueue>(provider))))
+            });
+            var admin = await ReviewerAsync(factory, "198.51.100.146");
+            Assert.Equal(HttpStatusCode.Redirect, (await PostAsync(admin, 95, "Approve", await OpenAsync(admin, 95))).StatusCode);
+
+            var page = await OpenAsync(admin, 95);
+            var key = AnnounceKey(page.Html);
+            var unsure = await RequestSteps.AnsweredAsync(admin, await AnnounceAsync(admin, 95, page, key));
+            var html = await unsure.Content.ReadAsStringAsync(Token);
+
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, unsure.StatusCode);
+            Assert.Equal(2, Regex.Count(Text(html), Regex.Escape(RequestWords.Unsure)));
+            Assert.Equal(key, AnnounceKey(html));
+            PageTests.AssertAccessible("an Announce now the database didn't confirm", html);
+            var job = Assert.Single(await db.SentAsync(), row => row.kind == RequestKinds.JobNotifications);
+
+            var again = await AnnounceAsync(admin, 95, Read(html), key);
+            Assert.Equal($"/admin/armor/95?request={job.id}#result", SignInSteps.PathOf(again.Headers.Location));
+            Assert.Single(await db.SentAsync(), row => row.kind == RequestKinds.JobNotifications);
+        }
+
+        // Announce now whose save the database didn't confirm, which the bot then took: once a notification run has started
+        // since the approval, Announce now has no place on the page, so a reload of the notice's address, as the error page
+        // advises while the database is down, draws no form, and the words don't offer one, but say where to look. Fails if
+        // the words offer a form the page doesn't draw.
+        [Fact]
+        public async Task AnUnconfirmedAnnounceOnceARunHasStartedOffersNoForm()
+        {
+            var db = await fixture.ReadyBotAsync();
+            await db.AddAsync(Submission(97));
+            await using var factory = new DashboardFactory(db, new DashboardFactoryOptions
+            {
+                Services = services => services.Replace(ServiceDescriptor.Transient<IBotRequestQueue>(provider => new UnconfirmedQueue(ActivatorUtilities.CreateInstance<BotRequestQueue>(provider))))
+            });
+            var admin = await ReviewerAsync(factory, "198.51.100.216");
+            Assert.Equal(HttpStatusCode.Redirect, (await PostAsync(admin, 97, "Approve", await OpenAsync(admin, 97))).StatusCode);
+            var now = factory.Clock.GetUtcNow().UtcDateTime;
+
+            var page = await OpenAsync(admin, 97);
+            var address = await RequestSteps.NoticeOfAsync(await AnnounceAsync(admin, 97, page, AnnounceKey(page.Html)));
+            var job = Assert.Single(await db.SentAsync(), row => row.kind == RequestKinds.JobNotifications);
+            Assert.Equal(2, Regex.Count(Text(await (await admin.Client.GetAsync(address, Token)).Content.ReadAsStringAsync(Token)), Regex.Escape(RequestWords.Unsure)));
+
+            await RequestSteps.ClaimAsync(db, job.id, now.AddSeconds(1));
+            await RunAsync(db, now.AddSeconds(2), now.AddSeconds(4));
+            await RequestSteps.FinishAsync(db, job.id, RequestStates.Done, "The notification job ran in 2 s.", now.AddSeconds(4));
+            factory.Clock.Advance(TimeSpan.FromMinutes(3));
+
+            var later = await admin.Client.GetAsync(address, Token);
+            var html = await later.Content.ReadAsStringAsync(Token);
+
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, later.StatusCode);
+            Assert.Contains(RequestWords.UnsureNotOffered, Text(html));
+            Assert.DoesNotContain(RequestWords.Unsure, Text(html));
+            Assert.DoesNotContain("handler=Announce", html);
+            PageTests.AssertAccessible("an Announce now the database didn't confirm, once a notification run has started since", html);
+        }
+
+        // Announce now whose save the database didn't confirm, reloaded in the other ways its section loses the form: while
+        // posts are paused, once the bot has started again with no notification run since, and once it has stopped cleanly.
+        // Each draws its own words in the form's place, so the notice's words don't offer the form, but say where to look;
+        // once posts are resumed, the form is back with the key it was sent with, and they offer it again. Fails if the words
+        // offer a form the page doesn't draw in any of them, or don't once it's drawn again.
+        [Fact]
+        public async Task AnUnconfirmedAnnounceWhilePausedRestartedOrStoppedOffersNoForm()
+        {
+            var db = await fixture.ReadyBotAsync();
+            await db.AddAsync(Submission(99));
+            await using var factory = new DashboardFactory(db, new DashboardFactoryOptions
+            {
+                Services = services => services.Replace(ServiceDescriptor.Transient<IBotRequestQueue>(provider => new UnconfirmedQueue(ActivatorUtilities.CreateInstance<BotRequestQueue>(provider))))
+            });
+            var admin = await ReviewerAsync(factory, "198.51.100.218");
+            Assert.Equal(HttpStatusCode.Redirect, (await PostAsync(admin, 99, "Approve", await OpenAsync(admin, 99))).StatusCode);
+            var now = factory.Clock.GetUtcNow().UtcDateTime;
+
+            var page = await OpenAsync(admin, 99);
+            var key = AnnounceKey(page.Html);
+            var address = await RequestSteps.NoticeOfAsync(await AnnounceAsync(admin, 99, page, key));
+            Assert.Single(await db.SentAsync(), row => row.kind == RequestKinds.JobNotifications);
+
+            // The notice's address reloaded a minute on, as the section's words stand in the form's place
+            async Task AssertNotOfferedAsync(string section, string what)
+            {
+                factory.Clock.Advance(TimeSpan.FromMinutes(1));
+                var answer = await admin.Client.GetAsync(address, Token);
+                var html = await answer.Content.ReadAsStringAsync(Token);
+
+                Assert.Equal(HttpStatusCode.ServiceUnavailable, answer.StatusCode);
+                Assert.Contains(section, Text(html));
+                Assert.Contains(RequestWords.UnsureNotOffered, Text(html));
+                Assert.DoesNotContain(RequestWords.Unsure, Text(html));
+                Assert.DoesNotContain("handler=Announce", html);
+                PageTests.AssertAccessible(what, html);
+            }
+
+            await db.Requests().SavePause(true, "Testing the pause", now, TestUsers.Owner.Id, 1, now);
+            await AssertNotOfferedAsync(ArmorWords.AnnouncePaused, "an Announce now the database didn't confirm, while posts are paused");
+
+            await db.Requests().SavePause(false, null, now.AddMinutes(1), TestUsers.Owner.Id, 2, now.AddMinutes(1));
+            var resumed = await (await admin.Client.GetAsync(address, Token)).Content.ReadAsStringAsync(Token);
+            Assert.Equal(2, Regex.Count(Text(resumed), Regex.Escape(RequestWords.Unsure)));
+            Assert.Equal(key, AnnounceKey(resumed));
+
+            var bot = StatusSteps.Status(now.AddMinutes(2));
+            bot.started_at = now.AddMinutes(1).AddSeconds(30);
+            await db.Status().SaveStatus(bot);
+            await AssertNotOfferedAsync(ArmorWords.AnnounceRestarted(TimeWords.Utc(bot.started_at)), "an Announce now the database didn't confirm, once the bot has started again");
+
+            bot.stopped_at = now.AddMinutes(2).AddSeconds(30);
+            await db.Status().SaveStatus(bot);
+            await AssertNotOfferedAsync(ArmorWords.AnnounceStopped, "an Announce now the database didn't confirm, once the bot has stopped");
+        }
+
+        // Announce now refused for the armor itself, which wasn't approved when it was pressed, says why at the top of the page
+        // alone: once the armor is approved, the notice's GET draws Announce now's form with no refusal beside it, since the
+        // reason was the armor's, not the request's. Fails if such a refusal is drawn by the button too.
+        [Fact]
+        public async Task AnAnnounceRefusedForTheArmorSaysWhyAtTheTopAlone()
+        {
+            var db = await fixture.ReadyBotAsync();
+            await db.AddAsync(Submission(96));
+            await using var factory = new DashboardFactory(db);
+            var admin = await ReviewerAsync(factory, "198.51.100.147");
+
+            var address = await RequestSteps.NoticeOfAsync(await AnnounceAsync(admin, 96, await OpenAsync(admin, 96), RequestFields.NewKey()));
+            Assert.Equal(HttpStatusCode.Redirect, (await PostAsync(admin, 96, "Approve", await OpenAsync(admin, 96))).StatusCode);
+
+            var answer = await admin.Client.GetAsync(address, Token);
+            var html = await answer.Content.ReadAsStringAsync(Token);
+
+            Assert.Equal(HttpStatusCode.Conflict, answer.StatusCode);
+            Assert.Equal(1, Regex.Count(Text(html), Regex.Escape(ArmorWords.NotApprovedNow)));
+            Assert.Contains("?handler=Announce\"", html);
+            Assert.DoesNotContain("<div class=\"notice notice-problem\">", html);
+            Assert.DoesNotContain(await db.SentAsync(), row => row.kind == RequestKinds.JobNotifications);
         }
 
         // In Announce now's place: while posts are paused, the bot posts the armor once they're resumed; while a run that
@@ -593,7 +742,7 @@ namespace MinerBot.Dashboard.Tests
 
             await db.Status().SaveStatus(bot);
 
-            var refused = await AnnounceAsync(admin, 94, drawn, key);
+            var refused = await RequestSteps.AnsweredAsync(admin, await AnnounceAsync(admin, 94, drawn, key));
             var html = await refused.Content.ReadAsStringAsync(Token);
             Assert.Equal(HttpStatusCode.Conflict, refused.StatusCode);
             Assert.DoesNotContain(await db.SentAsync(), row => row.kind == RequestKinds.JobNotifications);
@@ -601,6 +750,70 @@ namespace MinerBot.Dashboard.Tests
             Assert.Contains(stopped ? ArmorWords.AnnounceStopped : ArmorWords.AnnounceRestarted(TimeWords.Utc(changed)), Text(html));
             Assert.DoesNotContain("handler=Announce", html);
             PageTests.AssertAccessible("a review page after an Announce now the bot couldn't post", html);
+        }
+
+        // Announce now refused because the bot started again since the page was drawn: the notice's GET points to the reason
+        // below, and once the bot's first notification run since has started, Announce now has no place on the page, so a
+        // reload of the same address draws no reason below, and the words say why themselves. Fails if they point to a
+        // reason the page doesn't draw.
+        [Fact]
+        public async Task AnAnnounceRefusedAfterARestartSaysWhyOnceARunHasStarted()
+        {
+            var db = await fixture.ReadyBotAsync();
+            await db.AddAsync(Submission(98));
+            await using var factory = new DashboardFactory(db);
+            var admin = await ReviewerAsync(factory, "198.51.100.217");
+            var now = factory.Clock.GetUtcNow().UtcDateTime;
+            var bot = StatusSteps.Status(now);
+            await db.Status().SaveStatus(bot);
+            await RunAsync(db, now.AddMinutes(-1), now.AddMinutes(-1).AddSeconds(3));
+            Assert.Equal(HttpStatusCode.Redirect, (await PostAsync(admin, 98, "Approve", await OpenAsync(admin, 98))).StatusCode);
+            var drawn = await OpenAsync(admin, 98);
+
+            factory.Clock.Advance(TimeSpan.FromSeconds(40));
+            var started = factory.Clock.GetUtcNow().UtcDateTime;
+            (bot.run_id, bot.started_at, bot.heartbeat_at) = (7, started, started);
+            await db.Status().SaveStatus(bot);
+
+            var address = await RequestSteps.NoticeOfAsync(await AnnounceAsync(admin, 98, drawn, AnnounceKey(drawn.Html)));
+            var refused = Text(await (await admin.Client.GetAsync(address, Token)).Content.ReadAsStringAsync(Token));
+            Assert.Contains(ArmorWords.AnnounceNotNow, refused);
+            Assert.Contains(ArmorWords.AnnounceRestarted(TimeWords.Utc(started)), refused);
+
+            await RunAsync(db, started.AddMinutes(1), started.AddMinutes(1).AddSeconds(3));
+            factory.Clock.Advance(TimeSpan.FromMinutes(3));
+            var later = await admin.Client.GetAsync(address, Token);
+            var html = await later.Content.ReadAsStringAsync(Token);
+            var text = Text(html);
+
+            Assert.Equal(HttpStatusCode.Conflict, later.StatusCode);
+            Assert.Contains(ArmorWords.AnnounceWasNotOffered, text);
+            Assert.DoesNotContain("for the reason below", text);
+            Assert.DoesNotContain("handler=Announce", html);
+            Assert.DoesNotContain(await db.SentAsync(), row => row.kind == RequestKinds.JobNotifications);
+            PageTests.AssertAccessible("an Announce now refused after a restart, once a notification run has started since", html);
+        }
+
+        // Check again, the next look at the cache clear's box without the script, loads the review page each time it's pressed,
+        // keeping the action's notice and the list the reviewer came from: from the address the approval's redirect leads to,
+        // and from the one Check again leads to, whose own leads back. Fails if it's the address the browser shows with a
+        // fragment, which only scrolls, or loses the list.
+        [Fact]
+        public async Task CheckAgainLoadsThePageAgain()
+        {
+            var db = await fixture.ReadyBotAsync();
+            await db.AddAsync(Submission(85, ArmorStatus.Pending, "Frost Knight"));
+            await using var factory = new DashboardFactory(db);
+            var admin = await ReviewerAsync(factory, "198.51.100.148");
+
+            var page = await admin.Client.GetStringAsync("/admin/armor/85?list=pending&q=frost", Token);
+            var form = Read(page);
+            var action = WebUtility.HtmlDecode(Regex.Match(page, "action=\"([^\"]*handler=Approve[^\"]*)\"").Groups[1].Value);
+            var approved = await CraftedAsync(admin, action, form.Token, ("expected", form.Expected), ("version", form.Version));
+
+            var clear = Assert.Single(await ClearsAsync(db));
+            Assert.Equal($"/admin/armor/85?done=approved&request={clear.id}&list=pending&q=frost#result", SignInSteps.PathOf(approved.Headers.Location));
+            await RequestSteps.CheckAgainWalkAsync(admin, approved);
         }
 
         // ?request= draws a box only for the page's own kinds, the cache clear and the notification job, and the line about
@@ -619,7 +832,14 @@ namespace MinerBot.Dashboard.Tests
 
             var shown = await admin.Client.GetStringAsync($"/admin/armor/82?done=approved&request={clear}", Token);
             Assert.Contains($"Clear caches, request {clear}", Text(shown));
-            Assert.Contains($"<a href=\"/admin/armor/82?done=approved&amp;request={clear}#result\">Check again</a>", shown);
+            Assert.Contains($"<a href=\"/admin/armor/82?done=approved&amp;request={clear}&amp;again=1#result\">Check again</a>", shown);
+
+            // Check again keeps the action's word and the list the reviewer came from, its search encoded, and takes again
+            // off once the page has it
+            var listed = await admin.Client.GetStringAsync($"/admin/armor/82?done=approved&request={clear}&list=pending&q=frost%20bite", Token);
+            Assert.Contains($"<a href=\"/admin/armor/82?done=approved&amp;request={clear}&amp;list=pending&amp;q=frost%20bite&amp;again=1#result\">Check again</a>", listed);
+            var again = await admin.Client.GetStringAsync($"/admin/armor/82?done=approved&request={clear}&list=pending&q=frost%20bite&again=1", Token);
+            Assert.Contains($"<a href=\"/admin/armor/82?done=approved&amp;request={clear}&amp;list=pending&amp;q=frost%20bite#result\">Check again</a>", again);
 
             foreach (var path in new[] { $"/admin/armor/82?request={restart}", $"/admin/armor/82?request={clear}x", "/admin/armor/82?request=0", "/admin/armor/82?request=99999" })
                 Assert.DoesNotContain("id=\"result\"", await admin.Client.GetStringAsync(path, Token));

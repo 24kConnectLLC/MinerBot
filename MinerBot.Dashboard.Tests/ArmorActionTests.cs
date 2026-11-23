@@ -12,6 +12,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 using MinerBot.Dashboard.Armor;
 using MinerBot.Dashboard.Audit;
+using MinerBot.Dashboard.Pages;
 using MinerBot.Dashboard.Security;
 using MinerBot.Dashboard.Tests.Support;
 using MinerBot.Shared.Armor;
@@ -47,6 +48,15 @@ namespace MinerBot.Dashboard.Tests
         {
             Assert.Equal(status, response.StatusCode);
             Assert.Contains(message, await TextAsync(response));
+        }
+
+        // An action that wasn't done is a notice, never the page drawn on the POST: its redirect's GET, in the same browser,
+        // answers with the status and words given
+        static async Task<HttpResponseMessage> NoticeAsync(TestBrowser browser, HttpResponseMessage response, HttpStatusCode status, string message)
+        {
+            var answer = await RequestSteps.AnsweredAsync(browser, response);
+            await Refused(answer, status, message);
+            return answer;
         }
 
         static async Task<List<AuditEntry>> ArmorAuditAsync(MariaDbFixture db) =>
@@ -232,11 +242,11 @@ namespace MinerBot.Dashboard.Tests
             Assert.Equal(["HiddenCharacters:Name", "LinkSyntax:Description"], page.Ticks);
             Assert.Contains("required />", page.Html);
 
-            await Refused(await PostAsync(admin, 35, "Approve", page, false), HttpStatusCode.Conflict, ArmorWords.Unticked);
-            await Refused(await PostAsync(admin, 35, "Approve", page, false, ("ticks", "HiddenCharacters:Name")), HttpStatusCode.Conflict, ArmorWords.Unticked);
+            await NoticeAsync(admin, await PostAsync(admin, 35, "Approve", page, false), HttpStatusCode.Conflict, ArmorWords.Unticked);
+            await NoticeAsync(admin, await PostAsync(admin, 35, "Approve", page, false, ("ticks", "HiddenCharacters:Name")), HttpStatusCode.Conflict, ArmorWords.Unticked);
 
             // A tick for another field doesn't count
-            await Refused(await PostAsync(admin, 35, "Approve", page, false, ("ticks", "HiddenCharacters:Name"), ("ticks", "LinkSyntax:Author")),
+            await NoticeAsync(admin, await PostAsync(admin, 35, "Approve", page, false, ("ticks", "HiddenCharacters:Name"), ("ticks", "LinkSyntax:Author")),
                 HttpStatusCode.Conflict, ArmorWords.Unticked);
 
             Assert.Equal(ArmorStatus.Pending, await db.StatusAsync(35));
@@ -275,7 +285,7 @@ namespace MinerBot.Dashboard.Tests
 
             // The page doesn't offer it, so this is the token and version of its Reject form, sent to Approve
             Assert.DoesNotContain("handler=Approve", page.Html);
-            await Refused(await PostAsync(admin, 36, "Approve", page), HttpStatusCode.Conflict, ArmorWords.Blocked);
+            await NoticeAsync(admin, await PostAsync(admin, 36, "Approve", page), HttpStatusCode.Conflict, ArmorWords.Blocked);
 
             Assert.Equal(ArmorStatus.Pending, await db.StatusAsync(36));
             Assert.Empty(await db.ReviewsAsync());
@@ -304,7 +314,7 @@ namespace MinerBot.Dashboard.Tests
             Assert.Contains("The helmet has a backtick", page.Text);
             Assert.DoesNotContain("The rules found nothing", page.Text);
 
-            await Refused(await PostAsync(admin, 50, "Approve", page), HttpStatusCode.Conflict, ArmorWords.Blocked);
+            await NoticeAsync(admin, await PostAsync(admin, 50, "Approve", page), HttpStatusCode.Conflict, ArmorWords.Blocked);
             Assert.Equal(ArmorStatus.Pending, await db.StatusAsync(50));
             Assert.Empty(await db.ReviewsAsync());
             Assert.Equal("Blocked by the approval rules: StyleHasBacktick", Assert.Single(await ArmorAuditAsync(db)).detail);
@@ -394,8 +404,8 @@ namespace MinerBot.Dashboard.Tests
 
             foreach (var (handler, expected) in new[] { ("BackToPending", ""), ("Approve", ArmorStatus.Pending), ("TakeDown", ArmorStatus.Approved) })
             {
-                var response = await CraftedAsync(admin, $"/admin/armor/52?handler={handler}", token, ("expected", expected), ("version", version));
-                await Refused(response, HttpStatusCode.Conflict, ArmorWords.Changed);
+                var response = await NoticeAsync(admin, await CraftedAsync(admin, $"/admin/armor/52?handler={handler}", token, ("expected", expected), ("version", version)),
+                    HttpStatusCode.Conflict, ArmorWords.Changed);
                 Assert.Contains(ArmorWords.UnknownStatus, await TextAsync(response));
             }
 
@@ -410,7 +420,8 @@ namespace MinerBot.Dashboard.Tests
         }
 
         // An action moves the armor out of the tab the reviewer was working through, so its page keeps that tab and search
-        // for Back to the list, rather than sending them to the new status's tab
+        // for Back to the list, rather than sending them to the new status's tab, and so does an action's notice. Fails if the
+        // action's redirect, or its notice's, loses them.
         [Fact]
         public async Task BackToTheListReturnsToTheTabTheReviewerCameFrom()
         {
@@ -428,6 +439,22 @@ namespace MinerBot.Dashboard.Tests
 
             // The form's own address carries them, and so does the page the action leads to
             var action = WebUtility.HtmlDecode(Regex.Match(page.Html, "action=\"([^\"]*handler=Approve[^\"]*)\"").Groups[1].Value);
+            Assert.Contains("list=pending", action);
+            Assert.Contains("q=frost", action);
+
+            // So does a refusal's notice, and the forms its page draws: the approval sent with a version the armor doesn't
+            // have, as from a page drawn before the website changed it
+            var stale = await RequestSteps.NoticeOfAsync(await CraftedAsync(admin, action, page.Token, ("expected", page.Expected),
+                ("version", new string('0', ArmorVersion.Length))));
+            Assert.Matches("^/admin/armor/53\\?list=pending&q=frost&notice=[0-9a-f]{32}$", stale);
+
+            var refused = await admin.Client.GetAsync(stale, Token);
+            page = Read(await refused.Content.ReadAsStringAsync(Token));
+            Assert.Equal(HttpStatusCode.Conflict, refused.StatusCode);
+            Assert.Contains(ArmorWords.Changed, WebUtility.HtmlDecode(page.Html));
+            Assert.Contains("href=\"/admin/armor?status=pending&amp;q=frost\">Back to the list</a>", page.Html);
+
+            action = WebUtility.HtmlDecode(Regex.Match(page.Html, "action=\"([^\"]*handler=Approve[^\"]*)\"").Groups[1].Value);
             Assert.Contains("list=pending", action);
             Assert.Contains("q=frost", action);
 
@@ -456,12 +483,62 @@ namespace MinerBot.Dashboard.Tests
             var second = await OpenAsync(admin, 38);
 
             Redirected(await PostAsync(admin, 37, "Approve", first), 37, "approved");
-            var response = await PostAsync(admin, 38, "Approve", second);
+            var response = await NoticeAsync(admin, await PostAsync(admin, 38, "Approve", second), HttpStatusCode.Conflict, ArmorWords.Blocked);
 
-            await Refused(response, HttpStatusCode.Conflict, ArmorWords.Blocked);
             Assert.Contains("An approved armor already has this name", await TextAsync(response));
             Assert.Equal(ArmorStatus.Pending, await db.StatusAsync(38));
             Assert.Equal("Blocked by the approval rules: NameTaken", (await ArmorAuditAsync(db))[^1].detail);
+        }
+
+        // An approval refused because another approved armor has the name answers with a notice, so once that armor is
+        // taken down, which frees the name, the notice's address is still a page that approves nothing, however often it's
+        // loaded: it's never the form sent again. The approval the page then offers is a press of its own, and approves
+        // once. Once nothing stops an approval, before that press and after it, as Back fetches the address again, its words
+        // say what stopped the press has gone, rather than point to a reason under Rules the page no longer lists. Fails if
+        // the refusal is drawn on the POST, which a reload would send again, if the notice's GET acts, or if it says the
+        // armor can't be approved while the page offers Approve or shows it approved.
+        [Fact]
+        public async Task TheArmorBlockedRefusalCannotApproveLater()
+        {
+            var db = await fixture.ReadyAsync();
+            await db.AddAsync(Submission(59, ArmorStatus.Pending, "Frost"), Submission(60, ArmorStatus.Pending, "frost"));
+            await using var factory = new DashboardFactory(db);
+            var admin = await ReviewerAsync(factory, "203.0.113.166");
+            var first = await OpenAsync(admin, 59);
+            var second = await OpenAsync(admin, 60);
+
+            Redirected(await PostAsync(admin, 59, "Approve", first), 59, "approved");
+            var address = await RequestSteps.NoticeOfAsync(await PostAsync(admin, 60, "Approve", second));
+            await Refused(await admin.Client.GetAsync(address, Token), HttpStatusCode.Conflict, ArmorWords.Blocked);
+
+            Redirected(await PostAsync(admin, 59, "TakeDown", await OpenAsync(admin, 59)), 59, "taken-down");
+            var audit = (await ArmorAuditAsync(db)).Count;
+
+            for (var reloads = 0; reloads < 2; reloads++)
+            {
+                var reload = await admin.Client.GetAsync(address, Token);
+                await Refused(reload, HttpStatusCode.Conflict, ArmorWords.WasBlocked);
+                Assert.DoesNotContain(ArmorWords.Blocked, await TextAsync(reload));
+                Assert.False(RequestSteps.TouchesNotice(reload), "A reload wrote the notice's cookie");
+            }
+
+            Assert.Equal(ArmorStatus.Pending, await db.StatusAsync(60));
+            Assert.DoesNotContain(await db.ReviewsAsync(), review => review.armor_id == 60);
+            Assert.Equal(audit, (await ArmorAuditAsync(db)).Count);
+
+            // The page the notice drew offers Approve now the name is free, and pressing it approves once
+            var page = Read(await (await admin.Client.GetAsync(address, Token)).Content.ReadAsStringAsync(Token));
+            Assert.Contains("?handler=Approve", page.Html);
+            Assert.Contains("The rules found nothing to stop or question an approval", WebUtility.HtmlDecode(page.Html));
+            Redirected(await PostAsync(admin, 60, "Approve", page), 60, "approved");
+            Assert.Equal(ArmorStatus.Approved, await db.StatusAsync(60));
+            Assert.Single(await db.ReviewsAsync(), review => review.armor_id == 60);
+
+            // The notice's address again, as Back fetches it, over the armor approved
+            var back = await admin.Client.GetAsync(address, Token);
+            await Refused(back, HttpStatusCode.Conflict, ArmorWords.WasBlocked);
+            Assert.DoesNotContain(ArmorWords.Blocked, await TextAsync(back));
+            Assert.DoesNotContain("?handler=Approve", await back.Content.ReadAsStringAsync(Token));
         }
 
         // Two reviewers at once: the second one's action finds the status changed, and writes nothing but its refusal
@@ -477,9 +554,8 @@ namespace MinerBot.Dashboard.Tests
             var secondPage = await OpenAsync(second, 39);
 
             Redirected(await PostAsync(first, 39, "Reject", firstPage), 39, "rejected");
-            var late = await PostAsync(second, 39, "Approve", secondPage);
+            var late = await NoticeAsync(second, await PostAsync(second, 39, "Approve", secondPage), HttpStatusCode.Conflict, ArmorWords.Changed);
 
-            await Refused(late, HttpStatusCode.Conflict, ArmorWords.Changed);
             Assert.Equal(ArmorStatus.NotApproved, await db.StatusAsync(39));
             Assert.Equal(ArmorStatus.Pending, Assert.Single(await db.ReviewsAsync()).from_status);
 
@@ -514,9 +590,8 @@ namespace MinerBot.Dashboard.Tests
             var page = await OpenAsync(admin, 40);
 
             await db.RootExecuteAsync($"UPDATE {MariaDbFixture.ArmorTable} SET {change} WHERE ID = 40");
-            var response = await PostAsync(admin, 40, "Approve", page);
+            var response = await NoticeAsync(admin, await PostAsync(admin, 40, "Approve", page), HttpStatusCode.Conflict, ArmorWords.Changed);
 
-            await Refused(response, HttpStatusCode.Conflict, ArmorWords.Changed);
             Assert.Equal(ArmorStatus.Pending, await db.StatusAsync(40));
             Assert.Empty(await db.ReviewsAsync());
 
@@ -613,10 +688,11 @@ namespace MinerBot.Dashboard.Tests
             Assert.Equal(HttpStatusCode.Forbidden, (await SignInSteps.PostAsync(admin, path, page.Token, fetchSite: "same-site", fields: fields)).StatusCode);
             Assert.Equal(HttpStatusCode.Forbidden, (await SignInSteps.PostAsync(admin, path, page.Token, fields: fields)).StatusCode);
 
-            // Without a session, whatever the form holds, it's sign-in
+            // Without a session, whatever the form holds, it's the page that says the session ended, by GET, with the way back
+            // to the review without the form's handler
             var anonymous = await SignInSteps.PostAsync(factory.Visitor("203.0.113.153"), path, page.Token, origin: DashboardFactory.PublicOrigin, fields: fields);
-            Assert.Equal(HttpStatusCode.Redirect, anonymous.StatusCode);
-            Assert.StartsWith("/signin?returnUrl=", SignInSteps.PathOf(anonymous.Headers.Location));
+            Assert.Equal(HttpStatusCode.SeeOther, anonymous.StatusCode);
+            Assert.Equal("/signin?ended=1&returnUrl=" + Uri.EscapeDataString("/admin/armor/44"), SignInSteps.PathOf(anonymous.Headers.Location));
 
             Assert.Equal(ArmorStatus.Pending, await db.StatusAsync(44));
             Assert.Empty(await db.ReviewsAsync());
@@ -627,8 +703,8 @@ namespace MinerBot.Dashboard.Tests
         }
 
         // A write that fails inside the transaction undoes the status and every other row with it, before anything could be
-        // committed, so the error page says nothing was changed. Fails if it says it can't tell, which only a commit that
-        // may have gone through calls for.
+        // committed, so the error page, which the form is sent to by GET with its request's ID, says nothing was changed.
+        // Fails if it says it can't tell, which only a commit that may have gone through calls for.
         [Theory]
         [InlineData("review")]
         [InlineData("audit")]
@@ -648,10 +724,12 @@ namespace MinerBot.Dashboard.Tests
             });
             var admin = await ReviewerAsync(factory, "203.0.113.154");
 
-            var response = await PostAsync(admin, 45, "Approve", await OpenAsync(admin, 45));
+            var (response, id) = await RequestSteps.FailedAsync(admin, await PostAsync(admin, 45, "Approve", await OpenAsync(admin, 45)), ErrorModel.Database);
 
-            await Refused(response, HttpStatusCode.ServiceUnavailable, ErrorResponses.Unavailable);
+            await Refused(response, HttpStatusCode.ServiceUnavailable, ErrorResponses.UnavailableAfterForm);
             Assert.DoesNotContain(ArmorWords.Unsure, await TextAsync(response));
+            Assert.Contains($"<code>{id}</code>", await TextAsync(response));
+            Assert.Contains(factory.Logs.Entries, entry => entry.Level == LogLevel.Error && entry.Message.Contains("Request " + id + " failed", StringComparison.Ordinal));
             Assert.Equal(ArmorStatus.Pending, await db.StatusAsync(45));
             Assert.Empty(await db.ReviewsAsync());
             Assert.Empty(await ArmorAuditAsync(db));
@@ -670,9 +748,9 @@ namespace MinerBot.Dashboard.Tests
             var admin = await ReviewerAsync(factory, "203.0.113.155");
             var page = await OpenAsync(admin, 46);
 
-            var unsure = await PostAsync(admin, 46, "Approve", page);
-            await Refused(unsure, HttpStatusCode.ServiceUnavailable, ArmorWords.Unsure);
+            var unsure = await NoticeAsync(admin, await PostAsync(admin, 46, "Approve", page), HttpStatusCode.ServiceUnavailable, ArmorWords.Unsure);
             Assert.Contains("<title>Not sure it was saved - MinerBot dashboard</title>", await unsure.Content.ReadAsStringAsync(Token));
+            Assert.Contains("<a href=\"/admin/armor/46\">Open the armor's page again</a>", await unsure.Content.ReadAsStringAsync(Token));
             PageTests.AssertAccessible("a save that may not have landed", await unsure.Content.ReadAsStringAsync(Token));
             Assert.DoesNotContain(ErrorResponses.Unavailable, await TextAsync(unsure));
             Assert.Equal(ArmorStatus.Approved, await db.StatusAsync(46));
@@ -692,8 +770,7 @@ namespace MinerBot.Dashboard.Tests
             Assert.Equal("203.0.113.155", rows[1].ip);
 
             faults.TimeOutAfterCommit = false;
-            var again = await PostAsync(admin, 46, "Approve", page);
-            await Refused(again, HttpStatusCode.Conflict, ArmorWords.Already(ArmorStatus.Approved));
+            var again = await NoticeAsync(admin, await PostAsync(admin, 46, "Approve", page), HttpStatusCode.Conflict, ArmorWords.Already(ArmorStatus.Approved));
             Assert.DoesNotContain(ArmorWords.Changed, await TextAsync(again));
             Assert.Contains("class=\"notice notice-done\" role=\"status\"", await again.Content.ReadAsStringAsync(Token));
             Assert.Single(await db.ReviewsAsync());
@@ -715,9 +792,8 @@ namespace MinerBot.Dashboard.Tests
             await db.RootExecuteAsync($"UPDATE {MariaDbFixture.ArmorTable} SET ArmorDescription = 'Changed after the page opened' WHERE ID = 58");
             faults.TimeOutAfterCommit = true;
 
-            var response = await PostAsync(admin, 58, "Approve", page);
+            var response = await NoticeAsync(admin, await PostAsync(admin, 58, "Approve", page), HttpStatusCode.Conflict, ArmorWords.Changed);
 
-            await Refused(response, HttpStatusCode.Conflict, ArmorWords.Changed);
             Assert.DoesNotContain(ArmorWords.Unsure, await TextAsync(response));
             Assert.Equal(ArmorStatus.Pending, await db.StatusAsync(58));
             Assert.Empty(await db.ReviewsAsync());
@@ -743,9 +819,8 @@ namespace MinerBot.Dashboard.Tests
             });
             var admin = await ReviewerAsync(factory, "203.0.113.164");
 
-            var unsure = await PostAsync(admin, 57, "Approve", await OpenAsync(admin, 57));
+            await NoticeAsync(admin, await PostAsync(admin, 57, "Approve", await OpenAsync(admin, 57)), HttpStatusCode.ServiceUnavailable, ArmorWords.Unsure);
 
-            await Refused(unsure, HttpStatusCode.ServiceUnavailable, ArmorWords.Unsure);
             Assert.Equal(ArmorStatus.Approved, await db.StatusAsync(57));
             Assert.Equal([AuditOutcome.Ok], (await ArmorAuditAsync(db)).Select(row => row.outcome));
             Assert.Contains(factory.Logs.Entries, entry => entry.Level == LogLevel.Warning && entry.Message.Contains("couldn't be written either"));
@@ -782,8 +857,10 @@ namespace MinerBot.Dashboard.Tests
             foreach (var path in new[] { "/admin/armor", "/admin/armor/1" })
                 await Refused(await admin.Client.GetAsync(path, Token), HttpStatusCode.ServiceUnavailable, ErrorResponses.Unavailable);
 
-            var action = await CraftedAsync(admin, "/admin/armor/1?handler=Approve", token, ("expected", ArmorStatus.Pending), ("version", new string('a', 64)));
-            await Refused(action, HttpStatusCode.ServiceUnavailable, ErrorResponses.Unavailable);
+            var (action, id) = await RequestSteps.FailedAsync(admin,
+                await CraftedAsync(admin, "/admin/armor/1?handler=Approve", token, ("expected", ArmorStatus.Pending), ("version", new string('a', 64))), ErrorModel.Database);
+            await Refused(action, HttpStatusCode.ServiceUnavailable, ErrorResponses.UnavailableAfterForm);
+            Assert.Contains($"<code>{id}</code>", await TextAsync(action));
 
             foreach (var secret in new[] { dead.Login, dead.Password, dead.SiteDatabase })
                 Assert.DoesNotContain(secret, factory.Logs.Text);

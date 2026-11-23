@@ -13,6 +13,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 using MinerBot.Dashboard.Audit;
 using MinerBot.Dashboard.Blacklist;
+using MinerBot.Dashboard.Pages;
 using MinerBot.Dashboard.Security;
 using MinerBot.Dashboard.Tests.Support;
 using MySql.Data.MySqlClient;
@@ -131,9 +132,9 @@ namespace MinerBot.Dashboard.Tests
             Assert.Equal(Json(null, null, null, null), Assert.Single(await db.BlacklistAuditAsync()).after_json);
         }
 
-        // Each refusal is the form again, with what was typed kept and a fixed message, and nothing written, not even an
-        // audit row: these are typing mistakes, as PR 4's 400s are. A custom link is looked up instead, which
-        // BlacklistLookupTests checks, and its name is never repeated.
+        // Each refusal is the form again, as its notice's GET, with what was typed kept and a fixed message, and nothing
+        // written, not even an audit row: these are typing mistakes, as PR 4's 400s are. A custom link is looked up instead,
+        // which BlacklistLookupTests checks, and its name is never repeated.
         [Theory]
         [InlineData("", "Enter a SteamID, an account number or a Steam profile link")]
         [InlineData("not an id", "That isn't a SteamID, an account number or a Steam profile link")]
@@ -147,7 +148,8 @@ namespace MinerBot.Dashboard.Tests
             await using var factory = new DashboardFactory(db);
             var admin = await ArmorSteps.ReviewerAsync(factory, "198.51.100.12");
 
-            var response = await AddAsync(admin, ("steamid", steamId), ("name", "Kept Name"), ("reason", "Kept Reason"), ("expires", "2027-01-02"), ("notes", "Kept Notes"));
+            var response = await RequestSteps.AnsweredAsync(admin,
+                await AddAsync(admin, ("steamid", steamId), ("name", "Kept Name"), ("reason", "Kept Reason"), ("expires", "2027-01-02"), ("notes", "Kept Notes")));
             var html = await response.Content.ReadAsStringAsync(Token);
 
             await Answered(response, HttpStatusCode.BadRequest, message);
@@ -162,7 +164,8 @@ namespace MinerBot.Dashboard.Tests
         }
 
         // The columns hold 60, 60 and 120 characters, counted as MariaDB counts them, and one more is refused here with a
-        // message, never as the database's error, which would say it couldn't be reached
+        // message, never as the database's error, which would say it couldn't be reached. Past the box's limit, which only a
+        // form someone made up can send, the text isn't kept, so the box comes back empty.
         [Theory]
         [InlineData("name", 61, "The name holds at most 60 characters.")]
         [InlineData("reason", 61, "The reason holds at most 60 characters.")]
@@ -175,7 +178,10 @@ namespace MinerBot.Dashboard.Tests
             var fields = new Dictionary<string, string> { ["steamid"] = "12345", ["name"] = "", ["reason"] = "", ["expires"] = "", ["notes"] = "" };
 
             fields[field] = string.Concat(Enumerable.Repeat("\U0001F600", length));
-            await Answered(await AddAsync(admin, [.. fields.Select(pair => (pair.Key, pair.Value))]), HttpStatusCode.BadRequest, message);
+            var refused = await RequestSteps.AnsweredAsync(admin, await AddAsync(admin, [.. fields.Select(pair => (pair.Key, pair.Value))]));
+            await Answered(refused, HttpStatusCode.BadRequest, message);
+            Assert.Equal("", BoxValue(await refused.Content.ReadAsStringAsync(Token), field));
+            Assert.Equal("12345", BoxValue(await refused.Content.ReadAsStringAsync(Token), "steamid"));
 
             // One fewer fits, emoji and all
             fields[field] = string.Concat(Enumerable.Repeat("\U0001F600", length - 1));
@@ -200,7 +206,7 @@ namespace MinerBot.Dashboard.Tests
             var fields = new Dictionary<string, string> { ["steamid"] = "12345", ["name"] = "Test Player", ["reason"] = "", ["expires"] = "", ["notes"] = "" };
             fields[field] = value;
 
-            await Answered(await AddAsync(admin, [.. fields.Select(pair => (pair.Key, pair.Value))]), HttpStatusCode.BadRequest, message);
+            await Answered(await RequestSteps.AnsweredAsync(admin, await AddAsync(admin, [.. fields.Select(pair => (pair.Key, pair.Value))])), HttpStatusCode.BadRequest, message);
             Assert.Equal(0, await db.EntryCountAsync());
             Assert.Empty(await db.BlacklistAuditAsync());
         }
@@ -215,7 +221,7 @@ namespace MinerBot.Dashboard.Tests
             await using var factory = new DashboardFactory(db);
             var admin = await ArmorSteps.ReviewerAsync(factory, "198.51.100.15");
 
-            var other = await AddAsync(admin, ("steamid", SteamId64), ("name", "Other Name"), ("reason", ""), ("expires", ""), ("notes", ""));
+            var other = await RequestSteps.AnsweredAsync(admin, await AddAsync(admin, ("steamid", SteamId64), ("name", "Other Name"), ("reason", ""), ("expires", ""), ("notes", "")));
             await Answered(other, HttpStatusCode.Conflict, BlacklistWords.Exists);
             var html = await other.Content.ReadAsStringAsync(Token);
             Assert.Contains("class=\"notice notice-problem\" role=\"alert\"", html);
@@ -233,10 +239,56 @@ namespace MinerBot.Dashboard.Tests
             Assert.Null(refusal.after_json);
             Assert.Equal("Test Player", (await db.EntryAsync(12345))?.username);
 
-            var same = await AddAsync(admin, ("steamid", "12345"), ("name", "Test Player"), ("reason", "Cheating"), ("expires", "2027-01-02"), ("notes", "Made up"));
+            var same = await RequestSteps.AnsweredAsync(admin,
+                await AddAsync(admin, ("steamid", "12345"), ("name", "Test Player"), ("reason", "Cheating"), ("expires", "2027-01-02"), ("notes", "Made up")));
             await Answered(same, HttpStatusCode.Conflict, BlacklistWords.AlreadyAdded);
             Assert.Contains("class=\"notice notice-done\" role=\"status\"", await same.Content.ReadAsStringAsync(Token));
             Assert.Equal(2, (await db.BlacklistAuditAsync()).Count);
+        }
+
+        // An add refused because the account is on the blacklist answers with a notice, so once the entry is removed, the
+        // notice's address is still a page that adds nothing, however often it's loaded: it's never the form sent again.
+        // The form that page draws, with the boxes as they were typed, is a press of its own, and adds the account once.
+        // Fails if the refusal is drawn on the POST, which a reload would send again, or if the notice's GET acts.
+        [Fact]
+        public async Task TheBlacklistExistsRefusalCannotAddLater()
+        {
+            var db = await fixture.ReadyAsync();
+            await db.AddEntriesAsync(Entry(12345));
+            await using var factory = new DashboardFactory(db);
+            var admin = await ArmorSteps.ReviewerAsync(factory, "198.51.100.39");
+
+            var address = await RequestSteps.NoticeOfAsync(await AddAsync(admin, ("steamid", "12345"), ("name", "Other Name"), ("reason", "Seen again"), ("expires", ""),
+                ("notes", "")));
+            await Answered(await admin.Client.GetAsync(address, Token), HttpStatusCode.Conflict, BlacklistWords.Exists);
+
+            await db.Blacklist().RemovePlayerBan(12345);
+            var audit = (await db.BlacklistAuditAsync()).Count;
+            var html = "";
+
+            for (var reloads = 0; reloads < 2; reloads++)
+            {
+                var reload = await admin.Client.GetAsync(address, Token);
+                html = await reload.Content.ReadAsStringAsync(Token);
+
+                await Answered(reload, HttpStatusCode.Conflict, BlacklistWords.Exists);
+                Assert.False(RequestSteps.TouchesNotice(reload), "A reload wrote the notice's cookie");
+            }
+
+            Assert.Null(await db.EntryAsync(12345));
+            Assert.Equal(audit, (await db.BlacklistAuditAsync()).Count);
+            Assert.Equal(("12345", "Other Name", "Seen again"), (BoxValue(html, "steamid"), BoxValue(html, "name"), BoxValue(html, "reason")));
+
+            // The notice wins over a SteamID the address brings
+            Assert.Equal("12345", BoxValue(await (await admin.Client.GetAsync(address + "&steamid=54321", Token)).Content.ReadAsStringAsync(Token), "steamid"));
+
+            // The form the page drew, sent as it was filled
+            var added = await CraftedAsync(admin, "/admin/blacklist/add", SignInSteps.FormToken(html), ("formkey", BoxValue(html, "formkey")!), ("lookup", ""),
+                ("steamid", "12345"), ("name", "Other Name"), ("reason", "Seen again"), ("expires", ""), ("notes", ""));
+
+            Redirected(added, 12345, "added");
+            Assert.Equal(("Other Name", "Seen again"), ((await db.EntryAsync(12345))?.username, (await db.EntryAsync(12345))?.reason));
+            Assert.Single(await db.BlacklistAuditAsync(), row => row.outcome == AuditOutcome.Ok);
         }
 
         [Fact]
@@ -1167,10 +1219,12 @@ namespace MinerBot.Dashboard.Tests
             Assert.Equal(HttpStatusCode.Forbidden, (await SignInSteps.PostAsync(admin, path, page.Token, fetchSite: "same-site", fields: fields)).StatusCode);
             Assert.Equal(HttpStatusCode.Forbidden, (await SignInSteps.PostAsync(admin, path, page.Token, fields: fields)).StatusCode);
 
-            // Without a session, whatever the form holds, it's sign-in
+            // Without a session, whatever the form holds, it's the page that says the session ended, by GET, with the way back
+            // to the page the form was on, without its handler
+            var back = action switch { "add" => "/admin/blacklist/add", "edit" or "remove" => "/admin/blacklist/12345", _ => "/admin/blacklist" };
             var anonymous = await SignInSteps.PostAsync(factory.Visitor("198.51.100.26"), path, page.Token, origin: DashboardFactory.PublicOrigin, fields: fields);
-            Assert.Equal(HttpStatusCode.Redirect, anonymous.StatusCode);
-            Assert.StartsWith("/signin?returnUrl=", SignInSteps.PathOf(anonymous.Headers.Location));
+            Assert.Equal(HttpStatusCode.SeeOther, anonymous.StatusCode);
+            Assert.Equal("/signin?ended=1&returnUrl=" + Uri.EscapeDataString(back), SignInSteps.PathOf(anonymous.Headers.Location));
 
             Assert.Equal(2, await db.EntryCountAsync());
             Assert.Equal("Test Player", (await db.EntryAsync(12345))?.username);
@@ -1192,7 +1246,7 @@ namespace MinerBot.Dashboard.Tests
         }
 
         // A write that fails inside the transaction undoes the entry and its audit row with it, before anything could be
-        // committed, so the error page says nothing was changed
+        // committed, so the error page, which each form is sent to by GET with its request's ID, says nothing was changed
         [Theory]
         [InlineData("blacklist")]
         [InlineData("audit")]
@@ -1212,9 +1266,11 @@ namespace MinerBot.Dashboard.Tests
                 await RemoveAsync(admin, 12345, page)
             })
             {
-                await Answered(response, HttpStatusCode.ServiceUnavailable, ErrorResponses.Unavailable);
-                Assert.DoesNotContain(BlacklistWords.Unsure, await ArmorSteps.TextAsync(response));
-                Assert.DoesNotContain(BlacklistWords.AddUnsure, await ArmorSteps.TextAsync(response));
+                var (failed, id) = await RequestSteps.FailedAsync(admin, response, ErrorModel.Database);
+                await Answered(failed, HttpStatusCode.ServiceUnavailable, ErrorResponses.UnavailableAfterForm);
+                Assert.Contains($"<code>{id}</code>", await ArmorSteps.TextAsync(failed));
+                Assert.DoesNotContain(BlacklistWords.Unsure, await ArmorSteps.TextAsync(failed));
+                Assert.DoesNotContain(BlacklistWords.AddUnsure, await ArmorSteps.TextAsync(failed));
             }
 
             Assert.Null(await db.EntryAsync(54321));
@@ -1241,12 +1297,13 @@ namespace MinerBot.Dashboard.Tests
             var page = await OpenAsync(admin, 12345);
             var numberVersion = NumberVersion(await admin.Client.GetStringAsync("/admin/blacklist", Token));
 
-            Task<HttpResponseMessage> Act() => action switch
+            // The add's answer is a notice, which the browser follows; the entry's and the list's forms still draw theirs
+            async Task<HttpResponseMessage> Act() => action switch
             {
-                "add" => AddAsync(admin, ("steamid", "54321"), ("name", "New Player"), ("reason", ""), ("expires", ""), ("notes", "")),
-                "edit" => EditAsync(admin, 12345, page, ("name", "Renamed Player")),
-                "number" => CraftedAsync(admin, "/admin/blacklist?handler=RemoveNumber", page.Token, ("number", "5000000000"), ("version", numberVersion)),
-                _ => RemoveAsync(admin, 12345, page)
+                "add" => await RequestSteps.AnsweredAsync(admin, await AddAsync(admin, ("steamid", "54321"), ("name", "New Player"), ("reason", ""), ("expires", ""), ("notes", ""))),
+                "edit" => await EditAsync(admin, 12345, page, ("name", "Renamed Player")),
+                "number" => await CraftedAsync(admin, "/admin/blacklist?handler=RemoveNumber", page.Token, ("number", "5000000000"), ("version", numberVersion)),
+                _ => await RemoveAsync(admin, 12345, page)
             };
 
             var unsure = await Act();
@@ -1303,7 +1360,7 @@ namespace MinerBot.Dashboard.Tests
             await using var factory = Faulty(db, faults);
             var admin = await ArmorSteps.ReviewerAsync(factory, "198.51.100.29");
 
-            var unsure = await AddAsync(admin, ("steamid", "54321"), ("name", "New Player"));
+            var unsure = await RequestSteps.AnsweredAsync(admin, await AddAsync(admin, ("steamid", "54321"), ("name", "New Player")));
 
             await Answered(unsure, HttpStatusCode.ServiceUnavailable, BlacklistWords.AddUnsure);
             Assert.NotNull(await db.EntryAsync(54321));
@@ -1341,7 +1398,7 @@ namespace MinerBot.Dashboard.Tests
             {
                 "edit" => (await EditAsync(admin, 12345, page, ("name", "My Name")), HttpStatusCode.Conflict, BlacklistWords.Changed),
                 "unchanged" => (await EditAsync(admin, 12345, page), HttpStatusCode.OK, BlacklistWords.Unchanged),
-                "add" => (await AddAsync(admin, ("steamid", "12345"), ("name", "My Name")), HttpStatusCode.Conflict, BlacklistWords.Exists),
+                "add" => (await RequestSteps.AnsweredAsync(admin, await AddAsync(admin, ("steamid", "12345"), ("name", "My Name"))), HttpStatusCode.Conflict, BlacklistWords.Exists),
                 "remove" => (await RemoveAsync(admin, 12345, page), HttpStatusCode.Conflict, BlacklistWords.RemoveChanged),
                 _ => (await CraftedAsync(admin, "/admin/blacklist?handler=RemoveNumber", page.Token, ("number", "5000000000"), ("version", numberVersion)),
                     HttpStatusCode.Conflict, BlacklistWords.NumberChanged)
@@ -1386,9 +1443,16 @@ namespace MinerBot.Dashboard.Tests
             foreach (var path in new[] { "/admin/blacklist", "/admin/blacklist/12345" })
                 await Answered(await admin.Client.GetAsync(path, Token), HttpStatusCode.ServiceUnavailable, ErrorResponses.Unavailable);
 
-            await Answered(await CraftedAsync(admin, "/admin/blacklist/add", token, ("steamid", "12345")), HttpStatusCode.ServiceUnavailable, ErrorResponses.Unavailable);
-            await Answered(await CraftedAsync(admin, "/admin/blacklist/12345?handler=Remove", token, ("version", new string('a', 64))),
-                HttpStatusCode.ServiceUnavailable, ErrorResponses.Unavailable);
+            foreach (var form in new[]
+            {
+                await CraftedAsync(admin, "/admin/blacklist/add", token, ("steamid", "12345")),
+                await CraftedAsync(admin, "/admin/blacklist/12345?handler=Remove", token, ("version", new string('a', 64)))
+            })
+            {
+                var (failed, id) = await RequestSteps.FailedAsync(admin, form, ErrorModel.Database);
+                await Answered(failed, HttpStatusCode.ServiceUnavailable, ErrorResponses.UnavailableAfterForm);
+                Assert.Contains($"<code>{id}</code>", await ArmorSteps.TextAsync(failed));
+            }
 
             foreach (var secret in new[] { dead.Login, dead.Password, dead.SiteDatabase })
                 Assert.DoesNotContain(secret, factory.Logs.Text);

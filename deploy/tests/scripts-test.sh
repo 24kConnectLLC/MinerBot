@@ -4728,7 +4728,7 @@ case_72() {
     status=$(cat "$out/restart.status" 2> /dev/null)
     expect_exit 0 "a restart (after $n looks for the lock)"
     expect_said "Waiting for the bot to be back on Discord, for up to 6 minutes." "a restart"
-    expect_said "The bot is back on Discord 38 s after the request" "a restart"
+    expect_said "The bot was back on Discord at 15:04:43 UTC, 38 s after the request" "a restart"
     tail -n +"$((mark + 1))" "$calls" | grep -qE '^docker \[timeout -k 10 900\] run .* request bot\.restart ##env' \
         || problem "the restart's one-off didn't run under 900 seconds"
     grep -qP '\trequest\tbot\.restart\t-\tdone\trequest 41$' "$home/logs/history.log" || problem "history.log has no line for the restart, done"

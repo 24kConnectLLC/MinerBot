@@ -92,6 +92,8 @@ namespace MinerBot.Dashboard.Tests
             }
         }
 
+        // A GET or a HEAD without a session goes on to the sign-in, as ever: only a form goes to the page that says the
+        // session ended (SessionTests)
         [Fact]
         public async Task AnonymousAdminGoesToSignIn()
         {
@@ -101,6 +103,10 @@ namespace MinerBot.Dashboard.Tests
 
             Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
             Assert.Equal("/signin?returnUrl=%2Fadmin", SignInSteps.PathOf(response.Headers.Location));
+
+            var head = await factory.Visitor().Client.SendAsync(new HttpRequestMessage(HttpMethod.Head, "/admin"), Token);
+            Assert.Equal(HttpStatusCode.Redirect, head.StatusCode);
+            Assert.Equal("/signin?returnUrl=%2Fadmin", SignInSteps.PathOf(head.Headers.Location));
         }
 
         // Signed in without a role is impossible, because the store refuses it, but the policy would stop it anyway

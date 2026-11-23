@@ -10,6 +10,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using MinerBot.Dashboard.Audit;
 using MinerBot.Dashboard.Requests;
+using MinerBot.Dashboard.Status;
 using MinerBot.Dashboard.Tests.Support;
 using MinerBot.Shared.Requests;
 
@@ -32,13 +33,14 @@ namespace MinerBot.Dashboard.Tests
         const ulong BotRun = 4242;
         const ulong NextRun = 4343;
         const ulong StoppedRun = 4444;
+        const ulong LaterRun = 4545;
 
         static readonly RequestWaits Quick = new() { Poll = TimeSpan.FromMilliseconds(50), RestartPoll = TimeSpan.FromMilliseconds(50), RestartLimit = TimeSpan.FromMinutes(3) };
 
         async Task<MariaDbFixture> ReadyAsync()
         {
             var db = fixture.Require();
-            await db.ClearAsync(MariaDbFixture.RequestTable, MariaDbFixture.AuditTable, MariaDbFixture.StatusTable, MariaDbFixture.SettingsTable);
+            await db.ClearAsync(MariaDbFixture.RequestTable, MariaDbFixture.AuditTable, MariaDbFixture.StatusTable, MariaDbFixture.EventTable, MariaDbFixture.SettingsTable);
             return db;
         }
 
@@ -240,9 +242,10 @@ namespace MinerBot.Dashboard.Tests
             Assert.DoesNotContain((char)27, output);
         }
 
-        // After a restart the bot took, the command waits for a new run of the bot to be up on Discord and says how long it
-        // took, then the settings as the new run keeps them: a new run that isn't on Discord yet, or that stopped again, isn't
-        // back. A bot that isn't back within the limit is exit code 1.
+        // After a restart the bot took, the command waits for a new run of the bot to be up on Discord and says when it was
+        // back, then the settings as the new run keeps them: a new run that isn't on Discord yet, or that stopped again, isn't
+        // back. It was back by the status row's sample, or at the bot's record of the new run's first connection, to the
+        // second, once that's written. A bot that isn't back within the limit is exit code 1.
         [Fact]
         public async Task RequestCommandWaitsForTheRestart()
         {
@@ -271,19 +274,81 @@ namespace MinerBot.Dashboard.Tests
             var (exit, output) = await run.EndAsync();
             Assert.Equal(0, exit);
             Assert.Contains("Waiting for the bot to be back on Discord, for up to 3 minutes.", output);
-            Assert.Contains($"The bot is back on Discord 38 s after the request: its new run started at {Clock(Now(clock).AddSeconds(-5))} UTC.", output);
+            Assert.Contains($"The bot was back on Discord by {Clock(Now(clock).AddSeconds(-5))} UTC: its new run started at {Clock(Now(clock).AddSeconds(-5))} UTC.", output);
             Assert.Contains("The bot's settings now: posts aren't paused; the default status.", output);
 
-            // The next run takes another restart, and never comes back
+            // The next run takes another restart, and the run after it has written its first connection, 1 second after its
+            // start, before its status row says it's up, as of its next 5-second sample
             run = Start(db, clock, null, "bot.restart");
             row = await RequestAsync(db, row.id);
             Assert.True(await db.Requests().Claim(row.id, NextRun, Now(clock)));
             Assert.True(await db.Requests().Finish(row.id, NextRun, RequestStates.Done, "The bot is restarting. It's usually back within a minute.", null, Now(clock)));
+            clock.Advance(TimeSpan.FromSeconds(38));
+            await db.Status().AddEvents([new BotEvent { run_id = LaterRun, seq = 1, at = Now(clock).AddSeconds(-4), kind = EventWords.DiscordConnected, level = EventLevel.Info }]);
+            await db.Status().SaveStatus(new BotStatus
+            {
+                run_id = LaterRun,
+                started_at = Now(clock).AddSeconds(-5),
+                heartbeat_at = Now(clock),
+                discord_state = DiscordState.Connected,
+                discord_since = Now(clock),
+                steam_state = SteamState.LoggedOn
+            });
+
+            (exit, output) = await run.EndAsync();
+            Assert.Equal(0, exit);
+            Assert.Contains($"The bot was back on Discord at {Clock(Now(clock).AddSeconds(-4))} UTC, 34 s after the request: its new run started at {Clock(Now(clock).AddSeconds(-5))} UTC.",
+                output);
+
+            // That run takes another restart, and never comes back
+            run = Start(db, clock, null, "bot.restart");
+            row = await RequestAsync(db, row.id);
+            Assert.True(await db.Requests().Claim(row.id, LaterRun, Now(clock)));
+            Assert.True(await db.Requests().Finish(row.id, LaterRun, RequestStates.Done, "The bot is restarting. It's usually back within a minute.", null, Now(clock)));
             await StepUntilEndedAsync(clock, run);
 
             (exit, output) = await run.EndAsync();
             Assert.Equal(1, exit);
             Assert.Contains("The bot isn't back on Discord 3 minutes after the restart.", output);
+        }
+
+        // Once the status row says the bot is back, the command reads the bot's record of the new run's first connection once,
+        // and never waits for it: none written yet, or a read that fails, gives the line by the row's sample, and the bot is
+        // back all the same. Fails if the record is waited for or read again, or a read that fails makes a bot that's back a
+        // failure.
+        [Fact]
+        public async Task TheConnectionIsReadOnceAndNeverWaitedFor()
+        {
+            var asked = new DateTime(2026, 11, 21, 15, 4, 5, DateTimeKind.Utc);
+            var request = new BotRequestRow { id = 41, kind = RequestKinds.BotRestart, created_at = asked, run_id = BotRun, state = RequestStates.Done };
+            var status = new BotStatusRow
+            {
+                run_id = NextRun,
+                started_at = asked.AddSeconds(36),
+                heartbeat_at = asked.AddSeconds(40),
+                discord_state = DiscordState.Connected,
+                discord_since = asked.AddSeconds(40),
+                steam_state = SteamState.LoggedOn
+            };
+            var waits = new RequestWaits { RestartPoll = TimeSpan.FromMilliseconds(10), RestartLimit = TimeSpan.FromSeconds(3) };
+            const string By = "The bot was back on Discord by 15:04:45 UTC: its new run started at 15:04:41 UTC.";
+
+            foreach (var (connected, fails, line) in new (BotEventRow?, bool, string)[]
+            {
+                (null, false, By),
+                (null, true, By),
+                (new BotEventRow { id = 3, at = asked.AddSeconds(38.4), kind = EventWords.DiscordConnected, level = EventLevel.Info }, false,
+                    "The bot was back on Discord at 15:04:43 UTC, 38 s after the request: its new run started at 15:04:41 UTC.")
+            })
+            {
+                var reads = new ConnectionReads(status, connected, fails);
+                var output = new StringWriter();
+
+                Assert.True(await RequestCommand.BackOnDiscordAsync(reads, request, output, TimeProvider.System, waits, Token), $"Not back: {output}");
+                Assert.Contains(line, output.ToString());
+                var from = Assert.Single(reads.Asked);
+                Assert.Equal((status.started_at, 0UL), (from!.at, from.id));
+            }
         }
 
         // No answer within the limits: a request still queued 20 seconds past its expiry, or one the bot took and hasn't

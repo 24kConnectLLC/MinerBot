@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.RazorPages;
 using MinerBot.Dashboard.Auth;
+using MinerBot.Dashboard.Hosting;
 
 namespace MinerBot.Dashboard.Pages
 {
@@ -33,6 +34,9 @@ namespace MinerBot.Dashboard.Pages
 
             // Deletes the cookie. The ticket store finds nothing left to delete.
             await HttpContext.SignOutAsync(DashboardAuth.CookieScheme);
+
+            // And this browser's form notice, which no later session could open
+            FormNotices.Forget(HttpContext);
             return LocalRedirect("/");
         }
     }

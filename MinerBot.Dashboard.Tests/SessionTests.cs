@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -15,6 +16,10 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using MinerBot.Dashboard.Auth;
 using MinerBot.Dashboard.Hosting;
+using MinerBot.Dashboard.Pages;
+using MinerBot.Dashboard.Pages.Admin;
+using MinerBot.Dashboard.Security;
+using MinerBot.Dashboard.Servers;
 using MinerBot.Dashboard.Tests.Support;
 using MinerBot.Shared.Requests;
 
@@ -367,9 +372,11 @@ namespace MinerBot.Dashboard.Tests
             var token = await SignInSteps.FormTokenAsync(owner);
 
             failures.AuditAction = "auth.signout";
-            var response = await SignInSteps.PostAsync(owner, "/signout", token, origin: DashboardFactory.PublicOrigin);
+            var (response, _) = await RequestSteps.FailedAsync(owner, await SignInSteps.PostAsync(owner, "/signout", token, origin: DashboardFactory.PublicOrigin),
+                ErrorModel.Database);
 
             Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+            Assert.Contains(ErrorResponses.UnavailableAfterForm, WebUtility.HtmlDecode(await response.Content.ReadAsStringAsync(Token)));
             Assert.NotNull(await db.SessionAsync(key));
             Assert.DoesNotContain(await db.AuditAsync(), row => row.action == "auth.signout");
 
@@ -669,6 +676,143 @@ namespace MinerBot.Dashboard.Tests
 
             var admin = new SignedInUser(TestUsers.Admin.Id, "Test Admin", false);
             await Assert.ThrowsAsync<InvalidOperationException>(() => store.StoreAsync(new AuthenticationTicket(admin.ToPrincipal(), DashboardAuth.CookieScheme), new DefaultHttpContext(), Token));
+        }
+
+        // Every form the pages under /admin send, by the address it posts to, with the page it was on
+        public static TheoryData<string, string> EveryForm()
+        {
+            var forms = new TheoryData<string, string>();
+
+            foreach (var handler in ControlsModel.Handlers.Keys)
+                forms.Add($"{ControlsModel.Address}?handler={handler}", ControlsModel.Address);
+
+            var server = "/admin/servers/" + StatusSteps.ServerId;
+            forms.Add($"{server}?handler={ServerActions.TestMessage}", server);
+            forms.Add($"{server}?handler={ServerActions.Refresh}", server);
+            forms.Add(server + "/leave", server + "/leave");
+
+            foreach (var handler in new[] { "Approve", "Reject", "TakeDown", "BackToPending", "Announce" })
+                forms.Add($"/admin/armor/44?handler={handler}&list=pending&q=frost", "/admin/armor/44?list=pending&q=frost");
+
+            forms.Add("/admin/blacklist/add", "/admin/blacklist/add");
+            forms.Add("/admin/blacklist/12345?handler=Edit", "/admin/blacklist/12345");
+            forms.Add("/admin/blacklist/12345?handler=Remove", "/admin/blacklist/12345");
+            forms.Add("/admin/blacklist?handler=RemoveNumber", "/admin/blacklist");
+            forms.Add($"/admin/sessions?handler={SessionWords.End}", "/admin/sessions");
+            forms.Add($"/admin/sessions?handler={SessionWords.EndOthersHandler}", "/admin/sessions");
+            return forms;
+        }
+
+        // A form sent after its session ended, whichever form it is, goes by GET to the page on this site that says so,
+        // /signin?ended=1, with the way back to the page the form was on, its handler left out, and nothing done: no request,
+        // no audit row, no entry, and nothing typed in the address or on that page. The cookie handler's default sends it on
+        // to Discord, which the form-action policy stops, so the press seemed to do nothing. Authorization comes before the
+        // form's token is checked, so the form's own key and token change nothing. Fails if it goes on to the sign-in, keeps
+        // the form's handler, or acts.
+        [Theory]
+        [MemberData(nameof(EveryForm))]
+        public async Task AFormSentAfterTheSessionEndedSaysSoAndDoesNothing(string path, string back)
+        {
+            const string typed = "Typed reason not kept";
+            var db = await fixture.ReadyAsync();
+            await using var factory = new DashboardFactory(db);
+            var owner = factory.Visitor("203.0.113.72");
+            await SignInSteps.SignedInAsync(factory, owner, TestUsers.Owner);
+            var page = await RequestSteps.ControlsAsync(owner);
+            var audit = (await db.AuditAsync()).Select(row => row.id).ToList();
+
+            factory.Clock.Advance(DbTicketStore.IdleLimit + TimeSpan.FromMinutes(1));
+
+            var handler = path.StartsWith(ControlsModel.Address + "?handler=", StringComparison.Ordinal) ? path[(ControlsModel.Address.Length + "?handler=".Length)..] : "";
+            var response = await SignInSteps.PostAsync(owner, path, page.Token, origin: DashboardFactory.PublicOrigin, fields:
+            [
+                new("formkey", page.Keys.GetValueOrDefault(handler) ?? RequestFields.NewKey()), new("reason", typed), new("confirm", "pause"), new("text", typed),
+                new("name", typed), new("steamid", "54321")
+            ]);
+
+            Assert.Equal(HttpStatusCode.SeeOther, response.StatusCode);
+            var location = response.Headers.Location ?? throw new InvalidOperationException("The answer has no Location");
+            Assert.True(!location.IsAbsoluteUri || location.GetLeftPart(UriPartial.Authority) == DashboardFactory.PublicOrigin, $"The answer leaves the site: {location}");
+            Assert.Equal("/signin?ended=1&returnUrl=" + Uri.EscapeDataString(back), SignInSteps.PathOf(location));
+            Assert.DoesNotContain("Typed", Uri.UnescapeDataString(location.OriginalString), StringComparison.Ordinal);
+
+            Assert.Empty(await db.SentAsync());
+            Assert.Equal(audit, (await db.AuditAsync()).Select(row => row.id));
+            Assert.Empty(await db.RootQueryAsync<long>($"SELECT steam_id FROM {MariaDbFixture.BlacklistTable}"));
+
+            var ended = await owner.Client.GetAsync(SignInSteps.PathOf(location), Token);
+            var html = WebUtility.HtmlDecode(await ended.Content.ReadAsStringAsync(Token));
+            Assert.Equal(HttpStatusCode.OK, ended.StatusCode);
+            Assert.Contains($"<h1>{SessionWords.EndedTitle}</h1>", html);
+            Assert.Contains($"href=\"/signin?returnUrl={Uri.EscapeDataString(back)}\"", html);
+            Assert.DoesNotContain(typed, html);
+        }
+
+        // Two ways a session ends that its person didn't choose, each followed by a press on a page left open, which lands on
+        // the ended page: taken off the lists, which ends all their sessions and refuses their sign-in, and a sign-in elsewhere
+        // with 5 sessions open, which ends the one used least recently. The page names both, and offers the way back only to
+        // someone still on the lists. Fails if its words leave either out, or offer the way back to everyone.
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task TheEndedPageNamesTheListsAndTheCap(bool takenOffTheLists)
+        {
+            var db = await fixture.ReadyAsync();
+            await using var factory = new DashboardFactory(db);
+            var admin = factory.Visitor("203.0.113.243");
+            var key = await SignInSteps.SignedInAsync(factory, admin, TestUsers.Admin);
+            var page = await RequestSteps.ControlsAsync(admin);
+
+            if (takenOffTheLists)
+                factory.Settings.Change(("Dashboard:Admins", TestUsers.SecondAdmin.IdText));
+            else
+            {
+                // Each from its own address, as in FiveSessionsAtMost, and each used after this one
+                for (var i = 0; i < DbTicketStore.MaxSessionsPerPerson; i++)
+                {
+                    factory.Clock.Advance(TimeSpan.FromMinutes(1));
+                    await SignInSteps.SignedInAsync(factory, factory.Visitor($"203.0.113.{244 + i}"), TestUsers.Admin);
+                }
+
+                Assert.Null(await db.SessionAsync(key));
+            }
+
+            var response = await RequestSteps.PostControlAsync(admin, page, Requests.ControlWords.ClearCaches);
+            var ended = SignInSteps.PathOf(response.Headers.Location);
+            Assert.Equal(HttpStatusCode.SeeOther, response.StatusCode);
+            Assert.Equal("/signin?ended=1&returnUrl=" + Uri.EscapeDataString(ControlsModel.Address), ended);
+            Assert.Empty(await db.SentAsync());
+
+            var text = WebUtility.HtmlDecode(await admin.Client.GetStringAsync(ended, Token));
+            Assert.Contains($"<p>{SessionWords.EndedNothingDone}</p>", text);
+            Assert.Contains($"<p>{SessionWords.EndedTypedNotKept}</p>", text);
+            Assert.Contains($", when you sign in elsewhere with {DbTicketStore.MaxSessionsPerPerson.ToString(CultureInfo.InvariantCulture)} sessions open, ", text);
+            Assert.Contains(", or when you're taken off the dashboard's lists.", text);
+            Assert.Contains("If you're still on the dashboard's lists, signing in again brings you back to that page", text);
+
+            // Its link: the sign-in of someone taken off the lists is refused, and anyone else's comes back to the page
+            var signIn = await SignInSteps.SignInAsync(factory, admin, TestUsers.Admin, ControlsModel.Address);
+            Assert.Equal(HttpStatusCode.Redirect, signIn.StatusCode);
+            Assert.Equal(takenOffTheLists ? "/denied?reason=unlisted" : ControlsModel.Address, SignInSteps.PathOf(signIn.Headers.Location));
+        }
+
+        // The way back from that page is the page the form was on: its path and query without the form's handler, in any
+        // letter case, the rest of the query as it was, and only ever a path on this site. Fails if the handler stays, which
+        // names a form, and brings a bare fragment where a page has a GET handler of that name.
+        [Theory]
+        [InlineData("/admin/bot/controls", "?handler=Pause", "/admin/bot/controls")]
+        [InlineData("/admin/armor/44", "?handler=Approve&list=pending&q=frost", "/admin/armor/44?list=pending&q=frost")]
+        [InlineData("/admin/armor/44", "?list=pending&HANDLER=Approve&q=frost%20bite", "/admin/armor/44?list=pending&q=frost%20bite")]
+        [InlineData("/admin/servers/1000000000000000701/leave", "", "/admin/servers/1000000000000000701/leave")]
+        [InlineData("/admin/requests/41", "?handler=result", "/admin/requests/41")]
+        [InlineData("//evil.example/admin", "?handler=Pause", "/admin")]
+        public void TheWayBackIsThePageNeverItsForm(string path, string query, string back)
+        {
+            var context = new DefaultHttpContext();
+            context.Request.Path = path;
+            context.Request.QueryString = new QueryString(query);
+
+            Assert.Equal(back, SessionEnded.ReturnPath(context.Request));
         }
     }
 }

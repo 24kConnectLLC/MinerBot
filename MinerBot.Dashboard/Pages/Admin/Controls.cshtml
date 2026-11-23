@@ -12,9 +12,10 @@
     again in place of its form while the sign-in isn't. The status box refreshes itself through refresh.js, as on the Bot
     status page, and so does a request's box until what it shows is final; the page works without it. Text someone typed,
     a stored reason and a status text the rules pass included, goes through RevealedText or is shown with its hidden
-    characters as their codes, and a stored status text the rules refuse is never shown. After a save the database didn't
-    confirm, when the page's own reads fail too, only why and the form sent are drawn, never the error page, which would
-    say nothing was changed.
+    characters as their codes, and a stored status text the rules refuse is never shown. A form's answer is a redirect here,
+    with ?request= once it's sent and ?notice= when it isn't, whose GET draws why: never this page drawn on the POST, which
+    a reload would send again. After a save the database didn't confirm, when that GET's own reads fail too, only why and
+    the form sent are drawn, never the error page, which would say nothing was changed.
 *@
 @{
     ViewData["Title"] = ControlWords.Title;

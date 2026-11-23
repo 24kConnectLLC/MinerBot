@@ -3,7 +3,10 @@ using System.Net;
 using System.Text.RegularExpressions;
 using DataAccessLibrary.Discord.Models;
 using DataAccessLibrary.Guilds;
+using DataAccessLibrary.Requests;
 using DataAccessLibrary.Tests.Database;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using MinerBot.Dashboard.Auth;
 using MinerBot.Dashboard.Requests;
 using MinerBot.Dashboard.Servers;
@@ -148,10 +151,11 @@ namespace MinerBot.Dashboard.Tests
             Assert.Contains(ServerActions.NoChannels, Text(await admin.Client.GetStringAsync(Page(A), Token)));
         }
 
-        // A channel that's one of the copy's but not one of the server's choices is a form someone made up, a 400; a choice
-        // that can't take it now, another server's channel or one without Embed Links, is refused with why and the picker as
-        // it is; nothing is sent either way. One that can is sent, with the server and the channel. Fails if the POST doesn't
-        // check the channel again.
+        // A channel that isn't a channel's ID is a form someone made up, a 400. One of the copy's that the server didn't
+        // choose is refused as things stand, since the server could choose it later, and so is a choice that can't take it
+        // now, another server's channel or one without Embed Links: each is a notice whose GET says why at 409, with the
+        // picker as it is; nothing is sent either way. One that can is sent, with the server and the channel. Fails if the
+        // POST doesn't check the channel again.
         [Fact]
         public async Task ATestMessageToAChannelNotOfferedIsRefused()
         {
@@ -161,8 +165,15 @@ namespace MinerBot.Dashboard.Tests
             var owner = await SignedInAsync(factory, TestUsers.Owner, "198.51.100.141");
             var action = Page(A) + "?handler=TestMessage";
 
-            foreach (var made in new[] { Postable.ToString(CultureInfo.InvariantCulture), "0", "-1", "abc", "", "18446744073709551616" })
+            foreach (var made in new[] { "0", "-1", "abc", "", "18446744073709551616" })
                 Assert.Equal(HttpStatusCode.BadRequest, (await PostAsync(owner, Page(A), action, ("channel", made))).StatusCode);
+
+            var notChosen = await RequestSteps.AnsweredAsync(owner, await PostAsync(owner, Page(A), action, ("channel", Postable.ToString(CultureInfo.InvariantCulture))));
+            var notChosenHtml = await notChosen.Content.ReadAsStringAsync(Token);
+
+            Assert.Equal(HttpStatusCode.Conflict, notChosen.StatusCode);
+            Assert.Contains(ServerActions.NotChosenNow, Text(notChosenHtml));
+            Assert.Equal([(General.ToString(CultureInfo.InvariantCulture), "Armor: #general")], Options(notChosenHtml));
 
             var refusals = new (ulong Channel, string Why)[]
             {
@@ -173,7 +184,7 @@ namespace MinerBot.Dashboard.Tests
 
             foreach (var (channel, why) in refusals)
             {
-                var refused = await PostAsync(owner, Page(A), action, ("channel", channel.ToString(CultureInfo.InvariantCulture)));
+                var refused = await RequestSteps.AnsweredAsync(owner, await PostAsync(owner, Page(A), action, ("channel", channel.ToString(CultureInfo.InvariantCulture))));
                 var html = await refused.Content.ReadAsStringAsync(Token);
 
                 Assert.Equal(HttpStatusCode.Conflict, refused.StatusCode);
@@ -190,6 +201,55 @@ namespace MinerBot.Dashboard.Tests
 
             SentTo(sent, A, row.id);
             Assert.Equal((RequestKinds.GuildTestMessage, (ulong?)A, (ulong?)General, TestUsers.Owner.Id), (row.kind, row.guild_id, row.channel_id, row.actor_id));
+        }
+
+        // A test message drawn while the server chose general, sent after /admin set_channels moved its posts elsewhere, is
+        // refused as things stand: its notice says so at 409, keeps no channel, and draws the picker as it is. Once the server
+        // chooses general again, the notice's address still sends nothing, and a press on the form it drew sends once.
+        // Fails if the stale channel is a 400 again, which a browser holds as a POST it can send later, or if the notice's
+        // GET acts.
+        [Fact]
+        public async Task AStaleChannelIsANotice()
+        {
+            var db = await fixture.ReadyBotAsync();
+            await using var factory = new DashboardFactory(db);
+            await SeedAsync(db);
+            var owner = await SignedInAsync(factory, TestUsers.Owner, "198.51.100.155");
+            var action = Page(A) + "?handler=TestMessage";
+            var general = General.ToString(CultureInfo.InvariantCulture);
+            var chosen = new Guild { guild_id = A, armor_channel_id = General, map_channel_id = General, lobby_channel_id = NoEmbed, announcements_channel_id = News };
+
+            var drawn = await owner.Client.GetStringAsync(Page(A), Token);
+            await db.Guilds().SaveGuild(new Guild { guild_id = A, armor_channel_id = Postable, map_channel_id = Postable, lobby_channel_id = NoEmbed, announcements_channel_id = News });
+
+            var refused = await SignInSteps.PostAsync(owner, action, SignInSteps.FormToken(drawn), origin: DashboardFactory.PublicOrigin,
+                fields: [new("formkey", Key(drawn, action)!), new("channel", general)]);
+            var address = await RequestSteps.NoticeOfAsync(refused);
+            var answer = await owner.Client.GetAsync(address, Token);
+            var html = await answer.Content.ReadAsStringAsync(Token);
+
+            Assert.Equal(HttpStatusCode.Conflict, answer.StatusCode);
+            Assert.Contains(ServerActions.NotChosenNow, Text(html));
+            Assert.Equal([(Postable.ToString(CultureInfo.InvariantCulture), "Armor and maps: #postable")], Options(html));
+            Assert.Null(RequestSteps.OpenNotice(factory, owner).Kept);
+            PageTests.AssertAccessible("a test message to a channel the server doesn't choose now", html);
+
+            // Chosen again: the notice's address is a page, never the form sent again
+            await db.Guilds().SaveGuild(chosen);
+            var again = await owner.Client.GetAsync(address, Token);
+            var againHtml = await again.Content.ReadAsStringAsync(Token);
+
+            Assert.Equal(HttpStatusCode.Conflict, again.StatusCode);
+            Assert.Contains(ServerActions.NotChosenNow, Text(againHtml));
+            Assert.Equal([(general, "Armor and maps: #general")], Options(againHtml));
+            Assert.Empty(await db.SentAsync());
+
+            var sent = await SignInSteps.PostAsync(owner, action, SignInSteps.FormToken(againHtml), origin: DashboardFactory.PublicOrigin,
+                fields: [new("formkey", Key(againHtml, action)!), new("channel", general)]);
+            var row = Assert.Single(await db.SentAsync());
+
+            SentTo(sent, A, row.id);
+            Assert.Equal((RequestKinds.GuildTestMessage, (ulong?)A, (ulong?)General), (row.kind, row.guild_id, row.channel_id));
         }
 
         // An option holds text alone, so a channel's name there has its hidden and direction-changing characters as their
@@ -209,6 +269,20 @@ namespace MinerBot.Dashboard.Tests
             Assert.DoesNotContain("<", option.Groups[1].Value);
             Assert.Equal("Armor and maps: #gen[U+202E]eral<b>", WebUtility.HtmlDecode(option.Groups[1].Value));
             Assert.DoesNotContain("\u202E", html, StringComparison.Ordinal);
+        }
+
+        // Check again, the next look at a form's request without the script, loads a server's page each time it's pressed: from
+        // the address the form's redirect leads to, and from the one Check again leads to, whose own leads back. Fails if it's
+        // the address the browser shows with a fragment, which only scrolls, or is built from the query the page was sent.
+        [Fact]
+        public async Task CheckAgainLoadsThePageAgain()
+        {
+            var db = await fixture.ReadyBotAsync();
+            await using var factory = new DashboardFactory(db);
+            await SeedAsync(db);
+            var admin = await SignedInAsync(factory, TestUsers.Admin, "198.51.100.156");
+
+            await RequestSteps.CheckAgainWalkAsync(admin, await PostAsync(admin, Page(A), Page(A) + "?handler=Refresh"));
         }
 
         // Rewrite the copy says what it can and can't mend, sends the server's refresh, and its box says to reload the page
@@ -233,9 +307,12 @@ namespace MinerBot.Dashboard.Tests
             var queued = await admin.Client.GetStringAsync($"{Page(A)}?request={row.id}", Token);
             Assert.Contains($"Refresh a server's channels, request {row.id}, asked for by Test Admin (Admin)", Text(queued));
             Assert.Contains($"data-refresh=\"/admin/requests/{row.id}?handler=result\"", queued);
-            Assert.Contains($"<a href=\"{Page(A)}?request={row.id}#result\">Check again</a>", queued);
+            Assert.Contains($"<a href=\"{Page(A)}?request={row.id}&amp;again=1#result\">Check again</a>", queued);
             Assert.True(PageTests.LoadsRefreshScript(queued), "The page with a box that isn't final doesn't load refresh.js");
             PageTests.AssertAccessible("a server's page with its request's box", queued);
+
+            // Opened from Check again, its Check again takes again off
+            Assert.Contains($"<a href=\"{Page(A)}?request={row.id}#result\">Check again</a>", await admin.Client.GetStringAsync($"{Page(A)}?request={row.id}&again=1", Token));
 
             await RequestSteps.ClaimAsync(db, row.id, now.AddSeconds(1));
             await RequestSteps.FinishAsync(db, row.id, RequestStates.Done, "Rewrote the copy of this server and its channels at 12:00:02 UTC: 5 text and announcement channels.",
@@ -270,10 +347,11 @@ namespace MinerBot.Dashboard.Tests
 
             foreach (var (server, channel) in new[] { (E, 501UL), (C, 401UL), (B, 301UL) })
             {
-                var test = await PostAsync(owner, Page(server), Page(server) + "?handler=TestMessage", ("channel", channel.ToString(CultureInfo.InvariantCulture)));
-                var refresh = await PostAsync(owner, Page(server), Page(server) + "?handler=Refresh");
-
+                var test = await RequestSteps.AnsweredAsync(owner,
+                    await PostAsync(owner, Page(server), Page(server) + "?handler=TestMessage", ("channel", channel.ToString(CultureInfo.InvariantCulture))));
                 Assert.Equal(HttpStatusCode.Conflict, test.StatusCode);
+
+                var refresh = await RequestSteps.AnsweredAsync(owner, await PostAsync(owner, Page(server), Page(server) + "?handler=Refresh"));
                 Assert.Equal(HttpStatusCode.Conflict, refresh.StatusCode);
                 Assert.Contains("Nothing was sent.", Text(await refresh.Content.ReadAsStringAsync(Token)));
             }
@@ -286,7 +364,7 @@ namespace MinerBot.Dashboard.Tests
 
             Assert.Contains(ServerActions.RequestsOff, Text(offHtml));
             Assert.DoesNotMatch("<form[^>]*\\?handler=", offHtml);
-            Assert.Equal(HttpStatusCode.Conflict, (await PostAsync(offOwner, Page(A), Page(A) + "?handler=Refresh")).StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, (await RequestSteps.AnsweredAsync(offOwner, await PostAsync(offOwner, Page(A), Page(A) + "?handler=Refresh"))).StatusCode);
             Assert.Empty(await db.SentAsync());
         }
 
@@ -329,13 +407,13 @@ namespace MinerBot.Dashboard.Tests
         }
 
         // The bot's limit counts each server apart for a test message: three waiting for A make a fourth to A a refusal that
-        // names the one that waits, and one to D is still sent
+        // names the one that waits, with the channel it named still chosen in the picker, and one to D is still sent
         [Fact]
         public async Task PerServerLimitsCountEachServer()
         {
             var db = await fixture.ReadyBotAsync();
             await using var factory = new DashboardFactory(db);
-            await SeedAsync(db);
+            await SeedAsync(db, new Guild { guild_id = A, armor_channel_id = General, map_channel_id = Postable, lobby_channel_id = NoEmbed, announcements_channel_id = News });
             var owner = await SignedInAsync(factory, TestUsers.Owner, "198.51.100.147");
             var now = factory.Clock.GetUtcNow().UtcDateTime;
             var waiting = new List<ulong>();
@@ -345,12 +423,15 @@ namespace MinerBot.Dashboard.Tests
 
             Assert.Contains($"A request like this is waiting: request {waiting[0]}.", Text(await owner.Client.GetStringAsync(Page(A), Token)));
 
-            var refused = await PostAsync(owner, Page(A), Page(A) + "?handler=TestMessage", ("channel", General.ToString(CultureInfo.InvariantCulture)));
+            var refused = await RequestSteps.AnsweredAsync(owner, await PostAsync(owner, Page(A), Page(A) + "?handler=TestMessage", ("channel", Postable.ToString(CultureInfo.InvariantCulture))));
             var html = await refused.Content.ReadAsStringAsync(Token);
 
             Assert.Equal(HttpStatusCode.Conflict, refused.StatusCode);
             Assert.Contains($"A request like this is already waiting for the bot: request {waiting[0]}", Text(html));
             Assert.Contains($"<a href=\"/admin/requests/{waiting[0]}\">That request</a>", html);
+            Assert.Equal([General.ToString(CultureInfo.InvariantCulture), Postable.ToString(CultureInfo.InvariantCulture)], Options(html).Select(option => option.Value));
+            Assert.Matches($"<option value=\"{Postable}\" selected=\"selected\">", html);
+            Assert.DoesNotMatch($"<option value=\"{General}\" selected", html);
             Assert.Equal(3, (await db.SentAsync()).Count);
 
             var other = await PostAsync(owner, Page(D), Page(D) + "?handler=TestMessage", ("channel", Elsewhere.ToString(CultureInfo.InvariantCulture)));
@@ -415,7 +496,7 @@ namespace MinerBot.Dashboard.Tests
 
             foreach (var typed in new[] { "TestServer", "Another", "" })
             {
-                var refused = await PostAsync(owner, leave, leave, ("confirm", typed));
+                var refused = await RequestSteps.AnsweredAsync(owner, await PostAsync(owner, leave, leave, ("confirm", typed)));
                 var html = await refused.Content.ReadAsStringAsync(Token);
 
                 Assert.Equal(HttpStatusCode.BadRequest, refused.StatusCode);
@@ -434,11 +515,14 @@ namespace MinerBot.Dashboard.Tests
             PageTests.AssertAccessible("the leave page while the sign-in isn't fresh", stale);
 
             var token = SignInSteps.FormToken(stale);
-            var old = await SignInSteps.PostAsync(owner, leave, token, origin: DashboardFactory.PublicOrigin,
-                fields: [new("formkey", RequestFields.NewKey()), new("confirm", A.ToString(CultureInfo.InvariantCulture))]);
+            var old = await RequestSteps.AnsweredAsync(owner, await SignInSteps.PostAsync(owner, leave, token, origin: DashboardFactory.PublicOrigin,
+                fields: [new("formkey", RequestFields.NewKey()), new("confirm", A.ToString(CultureInfo.InvariantCulture))]));
+            var oldHtml = await old.Content.ReadAsStringAsync(Token);
 
             Assert.Equal(HttpStatusCode.Forbidden, old.StatusCode);
-            Assert.Contains("This needs a sign-in from the last 15 minutes", Text(await old.Content.ReadAsStringAsync(Token)));
+            Assert.Contains("This needs a sign-in from the last 15 minutes", Text(oldHtml));
+            Assert.Null(Key(oldHtml, leave));
+            Assert.Contains(WebUtility.HtmlEncode(FreshSignIn.SignInAgainLink(leave)), oldHtml);
             Assert.Empty(await db.SentAsync());
         }
 
@@ -476,8 +560,13 @@ namespace MinerBot.Dashboard.Tests
                 PageTests.AssertAccessible("the leave page of a server MinerBot isn't in", page);
             }
 
-            var refused = await PostAsync(owner, Page(C) + "/leave", Page(C) + "/leave", ("confirm", C.ToString(CultureInfo.InvariantCulture)));
+            var refused = await RequestSteps.AnsweredAsync(owner, await PostAsync(owner, Page(C) + "/leave", Page(C) + "/leave", ("confirm", C.ToString(CultureInfo.InvariantCulture))));
+            var refusedHtml = await refused.Content.ReadAsStringAsync(Token);
+
             Assert.Equal(HttpStatusCode.Conflict, refused.StatusCode);
+            Assert.Contains(ServerActions.NothingToLeave + " Nothing was sent.", Text(refusedHtml));
+            Assert.DoesNotContain("name=\"confirm\"", refusedHtml);
+            PageTests.AssertAccessible("a leave of a server MinerBot isn't in", refusedHtml);
             Assert.Empty(await db.SentAsync());
         }
 
@@ -507,6 +596,300 @@ namespace MinerBot.Dashboard.Tests
                 Assert.Null(Key(html, leave));
                 PageTests.AssertAccessible("the leave page with requests off", html);
             }
+        }
+
+        // The app with a queue whose commits land but whose answers never come, as when the database stops answering then
+        static DashboardFactoryOptions Unconfirmed => new()
+        {
+            Services = services => services.Replace(ServiceDescriptor.Transient<IBotRequestQueue>(provider =>
+                new UnconfirmedQueue(ActivatorUtilities.CreateInstance<BotRequestQueue>(provider))))
+        };
+
+        // A leave whose save the database didn't confirm: while MinerBot is in the server, its notice's GET draws the form
+        // with the key it was sent with, and the words offer it. Once the bot has taken the leave and left, a reload of the
+        // same address, as the error page advises while the database is down, draws no form and no last use, so the words
+        // don't offer the form, but say where to look. Fails if the words offer a form the page doesn't draw.
+        [Fact]
+        public async Task AnUnconfirmedLeaveOfAServerMinerBotHasLeftOffersNoForm()
+        {
+            var db = await fixture.ReadyBotAsync();
+            await using var factory = new DashboardFactory(db, Unconfirmed);
+            await SeedAsync(db);
+            var owner = await SignedInAsync(factory, TestUsers.Owner, "198.51.100.213");
+            var leave = Page(A) + "/leave";
+
+            var address = await RequestSteps.NoticeOfAsync(await PostAsync(owner, leave, leave, ("confirm", "Test Server")));
+            var row = Assert.Single(await db.SentAsync());
+            var unsure = await (await owner.Client.GetAsync(address, Token)).Content.ReadAsStringAsync(Token);
+
+            Assert.Contains(RequestWords.Unsure, Text(unsure));
+            Assert.Equal(row.request_key, Key(unsure, leave));
+
+            Assert.True(await db.BotGuilds().LeaveGuild(A, At.AddHours(3), StatusSteps.RunId, 6, null));
+            var left = await owner.Client.GetAsync(address, Token);
+            var html = await left.Content.ReadAsStringAsync(Token);
+            var text = Text(html);
+
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, left.StatusCode);
+            Assert.Contains(RequestWords.UnsureNotOffered, text);
+            Assert.DoesNotContain(RequestWords.Unsure, text);
+            Assert.Contains(ServerActions.NothingToLeave, text);
+            Assert.DoesNotContain("name=\"formkey\"", html);
+            PageTests.AssertAccessible("a leave the database didn't confirm, of a server MinerBot has left since", html);
+        }
+
+        // A test message and a refresh whose saves the database didn't confirm: once none of the channels the server chose can
+        // take a test message, its notice's GET draws no form for it, and once MinerBot has left the server, none for either,
+        // so the words don't offer one, but say where to look; a form that's still drawn keeps them. Fails if the words offer
+        // a form the page doesn't draw.
+        [Fact]
+        public async Task AnUnconfirmedActionWhoseFormHasGoneOffersNoForm()
+        {
+            var db = await fixture.ReadyBotAsync();
+            await using var factory = new DashboardFactory(db, Unconfirmed);
+            await SeedAsync(db);
+            var tester = await SignedInAsync(factory, TestUsers.Owner, "198.51.100.214");
+            var refresher = await SignedInAsync(factory, TestUsers.Owner, "198.51.100.215");
+            var test = Page(A) + "?handler=TestMessage";
+            var refresh = Page(A) + "?handler=Refresh";
+
+            var tested = await RequestSteps.NoticeOfAsync(await PostAsync(tester, Page(A), test, ("channel", General.ToString(CultureInfo.InvariantCulture))));
+            var refreshed = await RequestSteps.NoticeOfAsync(await PostAsync(refresher, Page(A), refresh));
+            Assert.Equal(2, (await db.SentAsync()).Count);
+
+            // Every kind turned off: the test message's form has gone, and the refresh's is still drawn
+            await db.Guilds().SaveGuild(new Guild { guild_id = A });
+            var noTest = await tester.Client.GetAsync(tested, Token);
+            var noTestHtml = await noTest.Content.ReadAsStringAsync(Token);
+
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, noTest.StatusCode);
+            Assert.Contains(ServerActions.NoChannels, Text(noTestHtml));
+            Assert.Contains(RequestWords.UnsureNotOffered, Text(noTestHtml));
+            Assert.DoesNotContain(RequestWords.Unsure, Text(noTestHtml));
+            Assert.Null(Key(noTestHtml, test));
+            Assert.NotNull(Key(noTestHtml, refresh));
+            Assert.Contains(RequestWords.Unsure, Text(await (await refresher.Client.GetAsync(refreshed, Token)).Content.ReadAsStringAsync(Token)));
+
+            // MinerBot has left: no form at all
+            Assert.True(await db.BotGuilds().LeaveGuild(A, At.AddHours(3), StatusSteps.RunId, 6, null));
+            var left = await refresher.Client.GetAsync(refreshed, Token);
+            var html = await left.Content.ReadAsStringAsync(Token);
+            var text = Text(html);
+
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, left.StatusCode);
+            Assert.Contains(ServerActions.NotIn, text);
+            Assert.Contains(RequestWords.UnsureNotOffered, text);
+            Assert.DoesNotContain(RequestWords.Unsure, text);
+            Assert.DoesNotContain("name=\"formkey\"", html);
+            PageTests.AssertAccessible("a refresh the database didn't confirm, of a server MinerBot has left since", html);
+        }
+
+        // A test message sent again to another channel from the page a browser kept with the first one's key, as Back can
+        // restore it from the back-forward cache: while its form is drawn, the words offer the form below. Once none of the
+        // channels the server chose can take one, and once MinerBot has left the server, the page draws no form for it, so
+        // the words name the request without offering one. Fails if they offer a form the page doesn't draw.
+        [Fact]
+        public async Task ATestMessageSentBeforeWhoseFormHasGoneOffersNoForm()
+        {
+            var db = await fixture.ReadyBotAsync();
+            await using var factory = new DashboardFactory(db);
+            await SeedAsync(db, new Guild { guild_id = A, armor_channel_id = General, map_channel_id = Postable, lobby_channel_id = NoEmbed, announcements_channel_id = News });
+            var owner = await SignedInAsync(factory, TestUsers.Owner, "198.51.100.239");
+            var test = Page(A) + "?handler=TestMessage";
+            var drawn = await owner.Client.GetStringAsync(Page(A), Token);
+
+            // The form as the browser kept it, with its key and token, and the channel chosen
+            Task<HttpResponseMessage> SendAsync(ulong channel) => SignInSteps.PostAsync(owner, test, SignInSteps.FormToken(drawn), origin: DashboardFactory.PublicOrigin,
+                fields: [new("formkey", Key(drawn, test)!), new("channel", channel.ToString(CultureInfo.InvariantCulture))]);
+
+            var first = await SendAsync(General);
+            var row = Assert.Single(await db.SentAsync());
+            SentTo(first, A, row.id);
+
+            var address = await RequestSteps.NoticeOfAsync(await SendAsync(Postable));
+            var again = await owner.Client.GetAsync(address, Token);
+            var againHtml = await again.Content.ReadAsStringAsync(Token);
+
+            Assert.Equal(HttpStatusCode.Conflict, again.StatusCode);
+            Assert.Contains(RequestWords.SentBefore(row.id), Text(againHtml));
+            Assert.NotNull(Key(againHtml, test));
+
+            // Every kind turned off: the test message's form has gone, and the refresh's is still drawn
+            await db.Guilds().SaveGuild(new Guild { guild_id = A });
+            var noTest = await owner.Client.GetAsync(address, Token);
+            var noTestHtml = await noTest.Content.ReadAsStringAsync(Token);
+
+            Assert.Equal(HttpStatusCode.Conflict, noTest.StatusCode);
+            Assert.Contains(ServerActions.NoChannels, Text(noTestHtml));
+            Assert.Contains(RequestWords.SentBeforeNotOffered(row.id), Text(noTestHtml));
+            Assert.DoesNotContain("The form below is new", Text(noTestHtml));
+            Assert.Null(Key(noTestHtml, test));
+            Assert.NotNull(Key(noTestHtml, Page(A) + "?handler=Refresh"));
+
+            // MinerBot has left: no form at all
+            Assert.True(await db.BotGuilds().LeaveGuild(A, At.AddHours(3), StatusSteps.RunId, 6, null));
+            var left = await owner.Client.GetAsync(address, Token);
+            var html = await left.Content.ReadAsStringAsync(Token);
+            var text = Text(html);
+
+            Assert.Equal(HttpStatusCode.Conflict, left.StatusCode);
+            Assert.Contains(ServerActions.NotIn, text);
+            Assert.Contains(RequestWords.SentBeforeNotOffered(row.id), text);
+            Assert.DoesNotContain("The form below is new", text);
+            Assert.Contains($"<a href=\"/admin/requests/{row.id}\">That request</a>", html);
+            Assert.DoesNotContain("name=\"formkey\"", html);
+            Assert.Single(await db.SentAsync());
+            PageTests.AssertAccessible("a test message sent before, of a server MinerBot has left since", html);
+        }
+
+        // The same for a test message sent before, and one whose save the database didn't confirm, while MinerBot is in the
+        // server: once the chosen channels it was offered for can't take one, as when they lose Embed Links, the page lists
+        // them with why and draws no form for it, and once Discord marks the server unavailable, no form at all, so the
+        // words don't offer one; while the channels can take one again before that, the form and the words that offer it
+        // are back. Fails if the words offer a form the page doesn't draw.
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public async Task ATestMessageNoticeWhoseChannelsCantTakeOneOffersNoForm(bool unsure)
+        {
+            var db = await fixture.ReadyBotAsync();
+            await using var factory = new DashboardFactory(db, unsure ? Unconfirmed : new DashboardFactoryOptions());
+            await SeedAsync(db, new Guild { guild_id = A, armor_channel_id = General, map_channel_id = Postable, lobby_channel_id = NoEmbed, announcements_channel_id = News });
+            var owner = await SignedInAsync(factory, TestUsers.Owner, unsure ? "192.0.2.165" : "192.0.2.164");
+            var test = Page(A) + "?handler=TestMessage";
+            var drawn = await owner.Client.GetStringAsync(Page(A), Token);
+
+            // The form as the browser kept it, with its key and token, and the channel chosen
+            Task<HttpResponseMessage> SendAsync(ulong channel) => SignInSteps.PostAsync(owner, test, SignInSteps.FormToken(drawn), origin: DashboardFactory.PublicOrigin,
+                fields: [new("formkey", Key(drawn, test)!), new("channel", channel.ToString(CultureInfo.InvariantCulture))]);
+
+            // A's channels as the bot's code writes them, general and postable with Embed Links or without
+            Task<bool> EmbedAsync(bool embed, uint seq) => db.BotGuilds().SaveGuild(StatusSteps.Server(A, "Test Server"),
+            [
+                StatusSteps.Channel(General, "general", 0, embed: embed),
+                StatusSteps.Channel(News, "news", 1, GuildChannelType.Announcement, embed: false),
+                StatusSteps.Channel(NoEmbed, "no-embed", 2, embed: false),
+                StatusSteps.Channel(Postable, "postable", 3, embed: embed),
+                StatusSteps.Channel(Hidden, "___hidden___", 4, view: false, send: false, embed: false)
+            ], At.AddHours(3), StatusSteps.RunId, seq);
+
+            var first = await SendAsync(General);
+            var row = Assert.Single(await db.SentAsync());
+            var address = unsure ? await RequestSteps.NoticeOfAsync(first) : await RequestSteps.NoticeOfAsync(await SendAsync(Postable));
+            var offered = unsure ? RequestWords.Unsure : RequestWords.SentBefore(row.id);
+            var notOffered = unsure ? RequestWords.UnsureNotOffered : RequestWords.SentBeforeNotOffered(row.id);
+
+            if (!unsure)
+                SentTo(first, A, row.id);
+
+            var again = await owner.Client.GetAsync(address, Token);
+            var againHtml = await again.Content.ReadAsStringAsync(Token);
+
+            Assert.Contains(offered, Text(againHtml));
+            Assert.NotNull(Key(againHtml, test));
+
+            // General and postable lose Embed Links: still chosen, listed with why, and none offered
+            Assert.False(await EmbedAsync(false, 6));
+            var noneOffered = await owner.Client.GetAsync(address, Token);
+            var noneOfferedHtml = await noneOffered.Content.ReadAsStringAsync(Token);
+            var noneOfferedText = Text(noneOfferedHtml);
+
+            Assert.Equal(unsure ? HttpStatusCode.ServiceUnavailable : HttpStatusCode.Conflict, noneOffered.StatusCode);
+            Assert.Contains(ServerActions.NoneOffered, noneOfferedText);
+            Assert.Contains(notOffered, noneOfferedText);
+            Assert.DoesNotContain(unsure ? RequestWords.Unsure : "The form below is new", noneOfferedText);
+            Assert.Null(Key(noneOfferedHtml, test));
+            Assert.NotNull(Key(noneOfferedHtml, Page(A) + "?handler=Refresh"));
+
+            // Embed Links back: the form and the words that offer it
+            Assert.False(await EmbedAsync(true, 7));
+            var back = await (await owner.Client.GetAsync(address, Token)).Content.ReadAsStringAsync(Token);
+            Assert.Contains(offered, Text(back));
+            Assert.NotNull(Key(back, test));
+
+            // Discord marks the server unavailable: no form at all
+            Assert.Equal(1, await db.BotGuilds().MarkUnavailable([A], At.AddHours(4)));
+            var unavailable = await owner.Client.GetAsync(address, Token);
+            var html = await unavailable.Content.ReadAsStringAsync(Token);
+            var text = Text(html);
+
+            Assert.Equal(noneOffered.StatusCode, unavailable.StatusCode);
+            Assert.Contains(ServerActions.Unavailable, text);
+            Assert.Contains(notOffered, text);
+            Assert.DoesNotContain(unsure ? RequestWords.Unsure : "The form below is new", text);
+            Assert.DoesNotContain("name=\"formkey\"", html);
+            Assert.Single(await db.SentAsync());
+            PageTests.AssertAccessible("a test message's notice, of a server Discord marks unavailable since", html);
+        }
+
+        // A name typed wrong gets words that send the person to the box and the name above it, while the page draws them.
+        // Once the sign-in has passed its 15 minutes, within the notice's 30, and once MinerBot has left the server, the page
+        // draws no box, so the words point to none: as after the leave sent from the notice's own page, with the sign-in that
+        // sent it still fresh, and on an older notice whose sign-in is stale. Fails if they send the person to a box or a name
+        // the page doesn't draw, or the box's words go while it's drawn.
+        [Fact]
+        public async Task ANameTypedWrongPointsToNoBoxThePageDoesntDraw()
+        {
+            var db = await fixture.ReadyBotAsync();
+            await using var factory = new DashboardFactory(db);
+            await SeedAsync(db);
+            var owner = await SignedInAsync(factory, TestUsers.Owner, "192.0.2.163");
+            var leave = Page(A) + "/leave";
+
+            var address = await RequestSteps.NoticeOfAsync(await PostAsync(owner, leave, leave, ("confirm", "Test Sever")));
+            var refused = await owner.Client.GetAsync(address, Token);
+            var refusedHtml = await refused.Content.ReadAsStringAsync(Token);
+
+            Assert.Equal(HttpStatusCode.BadRequest, refused.StatusCode);
+            Assert.Contains(RequestWords.NotConfirmedServer, Text(refusedHtml));
+            Assert.DoesNotContain(RequestWords.NotConfirmedNotOffered, Text(refusedHtml));
+            Assert.NotNull(Key(refusedHtml, leave));
+
+            factory.Clock.Advance(TimeSpan.FromMinutes(16));
+            var stale = await owner.Client.GetAsync(address, Token);
+            var staleHtml = await stale.Content.ReadAsStringAsync(Token);
+
+            Assert.Equal(HttpStatusCode.BadRequest, stale.StatusCode);
+            Assert.Contains(RequestWords.NotConfirmedNotOffered, Text(staleHtml));
+            Assert.DoesNotContain(RequestWords.NotConfirmedServer, Text(staleHtml));
+            Assert.Null(Key(staleHtml, leave));
+            Assert.Contains(WebUtility.HtmlEncode(FreshSignIn.SignInAgainLink(leave)), staleHtml);
+
+            // A second session, signed in now, so fresh: the name typed wrong, the leave corrected and sent from that notice's
+            // own page, MinerBot gone, and the notice's address again within the sign-in's 15 minutes
+            var fresh = await SignedInAsync(factory, TestUsers.Owner, "192.0.2.166");
+            var freshAddress = await RequestSteps.NoticeOfAsync(await PostAsync(fresh, leave, leave, ("confirm", "Test Sever")));
+            var notice = await (await fresh.Client.GetAsync(freshAddress, Token)).Content.ReadAsStringAsync(Token);
+            var key = Key(notice, leave);
+            Assert.NotNull(key);
+
+            var sent = await SignInSteps.PostAsync(fresh, leave, SignInSteps.FormToken(notice), origin: DashboardFactory.PublicOrigin,
+                fields: [new("formkey", key), new("confirm", "Test Server")]);
+            SentTo(sent, A, Assert.Single(await db.SentAsync()).id);
+
+            Assert.True(await db.BotGuilds().LeaveGuild(A, At.AddHours(3), StatusSteps.RunId, 6, null));
+            var gone = await fresh.Client.GetAsync(freshAddress, Token);
+            var goneHtml = await gone.Content.ReadAsStringAsync(Token);
+            var goneText = Text(goneHtml);
+
+            Assert.Equal(HttpStatusCode.BadRequest, gone.StatusCode);
+            Assert.Contains(RequestWords.NotConfirmedNotOffered, goneText);
+            Assert.DoesNotContain(RequestWords.NotConfirmedServer, goneText);
+            Assert.Contains(ServerActions.NothingToLeave, goneText);
+            Assert.DoesNotContain("name=\"confirm\"", goneHtml);
+
+            // The first session's notice, whose sign-in is stale
+            var left = await owner.Client.GetAsync(address, Token);
+            var html = await left.Content.ReadAsStringAsync(Token);
+            var text = Text(html);
+
+            Assert.Equal(HttpStatusCode.BadRequest, left.StatusCode);
+            Assert.Contains(RequestWords.NotConfirmedNotOffered, text);
+            Assert.DoesNotContain(RequestWords.NotConfirmedServer, text);
+            Assert.Contains(ServerActions.NothingToLeave, text);
+            Assert.DoesNotContain("name=\"confirm\"", html);
+            Assert.Single(await db.SentAsync());
+            PageTests.AssertAccessible("a name typed wrong, of a server MinerBot has left since", html);
         }
     }
 }

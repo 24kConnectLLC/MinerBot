@@ -6,6 +6,7 @@ using System.Text.RegularExpressions;
 using Dapper;
 using DataAccessLibrary;
 using DataAccessLibrary.Audit;
+using DataAccessLibrary.Dashboard;
 using DataAccessLibrary.Requests;
 using DataAccessLibrary.Tests.Database;
 using Microsoft.Extensions.DependencyInjection;
@@ -335,8 +336,8 @@ namespace MinerBot.Dashboard.Tests
             Assert.DoesNotContain(await db.AuditAsync(), entry => entry.outcome == AuditOutcome.Refused);
         }
 
-        // The status text's form sent again with another text, as from a page a browser kept, isn't sent: it says the form
-        // was used, as request N, linking to it, and draws the form again with the new text under a new key
+        // The status text's form sent again with another text, as from a page a browser kept, isn't sent: its notice says
+        // the form was used, as request N, linking to it, and draws the form again with the new text under a new key
         [Fact]
         public async Task ASecondSendingWithOtherDetailsSaysTheFormWasUsed()
         {
@@ -346,7 +347,7 @@ namespace MinerBot.Dashboard.Tests
             var page = await RequestSteps.ControlsAsync(owner);
 
             var first = await RequestSteps.PostControlAsync(owner, page, ControlWords.SetStatus, ("text", "Back soon"));
-            var again = await RequestSteps.PostControlAsync(owner, page, ControlWords.SetStatus, ("text", "Back later"));
+            var again = await RequestSteps.AnsweredAsync(owner, await RequestSteps.PostControlAsync(owner, page, ControlWords.SetStatus, ("text", "Back later")));
             var html = await again.Content.ReadAsStringAsync(Token);
 
             var row = Assert.Single(await db.SentAsync());
@@ -379,8 +380,10 @@ namespace MinerBot.Dashboard.Tests
             await RequestSteps.AddAsync(db, factory, RequestKinds.CachesClear, factory.Clock.GetUtcNow().UtcDateTime, TestUsers.Owner, key: theirs);
 
             // The first look misses the key, so the write's unique key refuses it; the second look finds it
-            var otherPerson = await RequestSteps.PostControlAsync(admin, ControlWords.ClearCaches, (await RequestSteps.ControlsAsync(admin)).Token, theirs);
-            var otherKind = await RequestSteps.PostControlAsync(owner, ControlWords.RunNotifications, (await RequestSteps.ControlsAsync(owner)).Token, theirs);
+            var otherPerson = await RequestSteps.AnsweredAsync(admin,
+                await RequestSteps.PostControlAsync(admin, ControlWords.ClearCaches, (await RequestSteps.ControlsAsync(admin)).Token, theirs));
+            var otherKind = await RequestSteps.AnsweredAsync(owner,
+                await RequestSteps.PostControlAsync(owner, ControlWords.RunNotifications, (await RequestSteps.ControlsAsync(owner)).Token, theirs));
 
             foreach (var response in new[] { otherPerson, otherKind })
             {
@@ -411,7 +414,8 @@ namespace MinerBot.Dashboard.Tests
             Assert.DoesNotContain("so these work until", Text(html));
             PageTests.AssertAccessible("the controls page with requests off", html);
 
-            var response = await RequestSteps.PostControlAsync(owner, ControlWords.ClearCaches, SignInSteps.FormToken(html), RequestFields.NewKey());
+            var response = await RequestSteps.AnsweredAsync(owner, await RequestSteps.PostControlAsync(owner, ControlWords.ClearCaches, SignInSteps.FormToken(html),
+                RequestFields.NewKey()));
 
             Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
             Assert.Contains(RequestWords.Off, await TextAsync(response));
@@ -433,7 +437,7 @@ namespace MinerBot.Dashboard.Tests
             var owner = await SignedInAsync(factory, TestUsers.Owner, "198.51.100.113");
             var page = await RequestSteps.ControlsAsync(owner);
 
-            var link = await RequestSteps.PostControlAsync(owner, page, ControlWords.SetStatus, ("text", "<b>x.com/minerbot</b>"));
+            var link = await RequestSteps.AnsweredAsync(owner, await RequestSteps.PostControlAsync(owner, page, ControlWords.SetStatus, ("text", "<b>x.com/minerbot</b>")));
             var linkHtml = await link.Content.ReadAsStringAsync(Token);
 
             Assert.Equal(HttpStatusCode.BadRequest, link.StatusCode);
@@ -443,7 +447,7 @@ namespace MinerBot.Dashboard.Tests
             Assert.DoesNotContain("<b>x.com", linkHtml);
             PageTests.AssertAccessible("a status text the rules refuse", linkHtml);
 
-            var hidden = await RequestSteps.PostControlAsync(owner, page, ControlWords.Pause, ("reason", "Wait\u200Bing"), ("confirm", "pause"));
+            var hidden = await RequestSteps.AnsweredAsync(owner, await RequestSteps.PostControlAsync(owner, page, ControlWords.Pause, ("reason", "Wait\u200Bing"), ("confirm", "pause")));
             var hiddenHtml = await hidden.Content.ReadAsStringAsync(Token);
 
             Assert.Equal(HttpStatusCode.BadRequest, hidden.StatusCode);
@@ -463,15 +467,17 @@ namespace MinerBot.Dashboard.Tests
             var owner = await SignedInAsync(factory, TestUsers.Owner, "198.51.100.114");
             var page = await RequestSteps.ControlsAsync(owner);
 
-            foreach (var empty in new[]
+            // Each notice read before the next press, which would replace it
+            foreach (var empty in new Func<Task<HttpResponseMessage>>[]
             {
-                await RequestSteps.PostControlAsync(owner, page, ControlWords.SetStatus, ("text", "")),
-                await RequestSteps.PostControlAsync(owner, page, ControlWords.SetStatus, ("text", "   ")),
-                await RequestSteps.PostControlAsync(owner, ControlWords.SetStatus, page.Token, RequestFields.NewKey())
+                () => RequestSteps.PostControlAsync(owner, page, ControlWords.SetStatus, ("text", "")),
+                () => RequestSteps.PostControlAsync(owner, page, ControlWords.SetStatus, ("text", "   ")),
+                () => RequestSteps.PostControlAsync(owner, ControlWords.SetStatus, page.Token, RequestFields.NewKey())
             })
             {
-                Assert.Equal(HttpStatusCode.BadRequest, empty.StatusCode);
-                Assert.Contains(RequestWords.NoStatusText, await TextAsync(empty));
+                var answer = await RequestSteps.AnsweredAsync(owner, await empty());
+                Assert.Equal(HttpStatusCode.BadRequest, answer.StatusCode);
+                Assert.Contains(RequestWords.NoStatusText, await TextAsync(answer));
             }
 
             Assert.Empty(await db.SentAsync());
@@ -483,7 +489,8 @@ namespace MinerBot.Dashboard.Tests
         }
 
         // The typed word is the control's own, trimmed and in any case: an empty box, a word cut short and a form without the
-        // box send nothing, and the word with a space after it, or in capitals, is sent
+        // box send nothing, and the word with a space after it, or in capitals, is sent. The form's own key still sends once
+        // the word is right, since a refusal wrote nothing.
         [Fact]
         public async Task AWrongOrMissingConfirmationSendsNothing()
         {
@@ -492,16 +499,12 @@ namespace MinerBot.Dashboard.Tests
             var owner = await SignedInAsync(factory, TestUsers.Owner, "198.51.100.115");
             var page = await RequestSteps.ControlsAsync(owner);
 
-            foreach (var refused in new[]
+            // Each notice read before the next press, which would replace it
+            foreach (var typed in new (string Name, string Value)[][] { [("confirm", "")], [("confirm", "restar")], [("confirm", "pause")], [] })
             {
-                await RequestSteps.PostControlAsync(owner, page, ControlWords.Restart, ("confirm", "")),
-                await RequestSteps.PostControlAsync(owner, page, ControlWords.Restart, ("confirm", "restar")),
-                await RequestSteps.PostControlAsync(owner, page, ControlWords.Restart, ("confirm", "pause")),
-                await RequestSteps.PostControlAsync(owner, page, ControlWords.Restart)
-            })
-            {
-                Assert.Equal(HttpStatusCode.BadRequest, refused.StatusCode);
-                Assert.Contains("Type restart in the box to confirm. Nothing was sent.", await TextAsync(refused));
+                var answer = await RequestSteps.AnsweredAsync(owner, await RequestSteps.PostControlAsync(owner, page, ControlWords.Restart, typed));
+                Assert.Equal(HttpStatusCode.BadRequest, answer.StatusCode);
+                Assert.Contains("Type restart in the box to confirm. Nothing was sent.", await TextAsync(answer));
             }
 
             Assert.Empty(await db.SentAsync());
@@ -524,7 +527,8 @@ namespace MinerBot.Dashboard.Tests
             var now = factory.Clock.GetUtcNow().UtcDateTime;
             await RequestSteps.TakenAsync(db, factory, RequestKinds.BotRestart, now.AddMinutes(-2).AddSeconds(-1));
 
-            var refused = await RequestSteps.PostControlAsync(owner, await RequestSteps.ControlsAsync(owner), ControlWords.Restart, ("confirm", "restart"));
+            var refused = await RequestSteps.AnsweredAsync(owner,
+                await RequestSteps.PostControlAsync(owner, await RequestSteps.ControlsAsync(owner), ControlWords.Restart, ("confirm", "restart")));
 
             Assert.Equal(HttpStatusCode.Conflict, refused.StatusCode);
             Assert.Contains($"The bot takes this at most once every 10 minutes, and last took one at {RequestWords.Clock(now.AddMinutes(-2))}, so nothing was sent. "
@@ -553,7 +557,8 @@ namespace MinerBot.Dashboard.Tests
             var now = factory.Clock.GetUtcNow().UtcDateTime;
             var waiting = await RequestSteps.AddAsync(db, factory, RequestKinds.BotRestart, now.AddSeconds(-30));
 
-            var refused = await RequestSteps.PostControlAsync(owner, await RequestSteps.ControlsAsync(owner), ControlWords.Restart, ("confirm", "restart"));
+            var refused = await RequestSteps.AnsweredAsync(owner,
+                await RequestSteps.PostControlAsync(owner, await RequestSteps.ControlsAsync(owner), ControlWords.Restart, ("confirm", "restart")));
             var html = await refused.Content.ReadAsStringAsync(Token);
 
             Assert.Equal(HttpStatusCode.Conflict, refused.StatusCode);
@@ -568,8 +573,8 @@ namespace MinerBot.Dashboard.Tests
             Assert.Equal(2, (await db.SentAsync()).Count);
         }
 
-        // A save the database didn't confirm may have landed: the page says it can't tell, with the form's key kept, so
-        // sending it again finds the first request rather than writing a second. Every other form gets a new key.
+        // A save the database didn't confirm may have landed: its notice says the page can't tell, with the form's key kept,
+        // so sending it again finds the first request rather than writing a second. Every other form gets a new key.
         [Fact]
         public async Task AnUnconfirmedSaveKeepsTheFormKeySoSendingAgainIsSafe()
         {
@@ -582,7 +587,7 @@ namespace MinerBot.Dashboard.Tests
             var owner = await SignedInAsync(factory, TestUsers.Owner, "198.51.100.118");
             var page = await RequestSteps.ControlsAsync(owner);
 
-            var unsure = await RequestSteps.PostControlAsync(owner, page, ControlWords.ClearCaches);
+            var unsure = await RequestSteps.AnsweredAsync(owner, await RequestSteps.PostControlAsync(owner, page, ControlWords.ClearCaches));
             var html = await unsure.Content.ReadAsStringAsync(Token);
             var redrawn = RequestSteps.ReadControls(html);
 
@@ -597,15 +602,22 @@ namespace MinerBot.Dashboard.Tests
             Assert.Single(await db.SentAsync());
         }
 
-        // The same when the database stays down after the commit, as it usually does when a commit's answer never came, so
-        // the page's own reads fail too: the page shows why and the form sent, alone, with its key and its reason kept, never
-        // the error page, which would say nothing was changed though the request is in the table. Once the database answers,
-        // sending it again finds the first request.
-        [Fact]
-        public async Task AnUnconfirmedSaveWhileTheDatabaseStaysDownStillShowsItsForm()
+        // The same when the database stays down after the commit, as it usually does when a commit's answer never came. The
+        // notice's GET can't read its session then, so the error page says it can't tell whether it was saved, never that
+        // nothing was changed though the request is in the table, and writes no cookie. Once sessions answer but the page's
+        // own reads still fail, the page shows why and the form sent, alone, with its key and its reason kept: a resume's too,
+        // with the words for its form, since the page can't read posts then and draws no line under Posts. Once the database
+        // answers, the whole page with the form, its key and its reason, and sending it again finds the first request.
+        // Only such a save draws its form alone: a notice of a refusal, which sent nothing, gets the error page while the
+        // page's reads fail, which truly says nothing was changed.
+        [Theory]
+        [InlineData(ControlWords.Pause)]
+        [InlineData(ControlWords.Resume)]
+        public async Task AnUnconfirmedSaveWhileTheDatabaseStaysDownStillShowsItsForm(string handler)
         {
             var db = await fixture.ReadyAsync();
             SwitchedDatabase? database = null;
+            SwitchedDatabase? sessions = null;
             await using var factory = new DashboardFactory(db, new DashboardFactoryOptions
             {
                 Services = services =>
@@ -613,39 +625,83 @@ namespace MinerBot.Dashboard.Tests
                     services.RemoveAll<ISQLConnectionFactory>();
                     services.AddSingleton<ISQLConnectionFactory>(provider =>
                         database = new SwitchedDatabase(new SQLConnectionFactory(provider.GetRequiredService<IDictionary<DBConnectionName, string>>())));
+
+                    // The sessions on connections of their own, which can answer while the page's reads don't
+                    services.AddSingleton(provider => sessions = new SwitchedDatabase(new SQLConnectionFactory(provider.GetRequiredService<IDictionary<DBConnectionName, string>>())));
+                    services.Replace(ServiceDescriptor.Transient<IDashboardSessionData>(provider =>
+                        ActivatorUtilities.CreateInstance<DashboardSessionData>(provider, provider.GetRequiredService<SwitchedDatabase>())));
                     services.Replace(ServiceDescriptor.Transient<IBotRequestQueue>(provider =>
-                        new UnconfirmedQueue(ActivatorUtilities.CreateInstance<BotRequestQueue>(provider), () => database!.Down = true)));
+                        new UnconfirmedQueue(ActivatorUtilities.CreateInstance<BotRequestQueue>(provider), () => database!.Down = sessions!.Down = true)));
                 }
             });
             var owner = await SignedInAsync(factory, TestUsers.Owner, "198.51.100.126");
+            var pause = handler == ControlWords.Pause;
+
+            // A resume's form is drawn while posts are paused
+            if (!pause)
+                await db.Requests().SavePause(true, "Testing the pause", factory.Clock.GetUtcNow().UtcDateTime, TestUsers.Owner.Id, 1, factory.Clock.GetUtcNow().UtcDateTime);
+
             var page = await RequestSteps.ControlsAsync(owner);
 
-            var unsure = await RequestSteps.PostControlAsync(owner, page, ControlWords.Pause, Filled(ControlWords.Pause));
-            var html = await unsure.Content.ReadAsStringAsync(Token);
+            var address = await RequestSteps.NoticeOfAsync(await RequestSteps.PostControlAsync(owner, page, handler, Filled(handler)));
+            Assert.True(database!.Down && sessions!.Down, "The database came back before the notice's GET");
 
-            Assert.True(database!.Down, "The database came back before the page was drawn");
-            Assert.Equal(HttpStatusCode.ServiceUnavailable, unsure.StatusCode);
+            var down = await owner.Client.GetAsync(address, Token);
+            var downHtml = await down.Content.ReadAsStringAsync(Token);
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, down.StatusCode);
+            Assert.Contains(ErrorResponses.UnsureTitle, Text(downHtml));
+            Assert.Contains(ErrorResponses.UnsureUnavailable, Text(downHtml));
+            Assert.DoesNotContain(ErrorResponses.Unavailable, Text(downHtml));
+            Assert.Empty(RequestSteps.SetCookies(down));
+
+            sessions.Down = false;
+            var unread = await owner.Client.GetAsync(address, Token);
+            var html = await unread.Content.ReadAsStringAsync(Token);
+
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, unread.StatusCode);
             Assert.DoesNotContain(ErrorResponses.Unavailable, Text(html));
             Assert.Contains(RequestWords.Unsure, Text(html));
 
-            var redrawn = RequestSteps.ReadControls(html);
-            Assert.Equal([ControlWords.Pause], redrawn.Handlers);
-            Assert.Equal(page.Keys[ControlWords.Pause], redrawn.Keys[ControlWords.Pause]);
-            Assert.Contains("name=\"reason\" value=\"Testing the controls\"", html);
-            PageTests.AssertAccessible("a save the database didn't confirm, with the database still down", html);
+            var alone = RequestSteps.ReadControls(html);
+            Assert.Equal([handler], alone.Handlers);
+            Assert.Equal(page.Keys[handler], alone.Keys[handler]);
+            Assert.Equal(pause, html.Contains("name=\"reason\" value=\"Testing the controls\"", StringComparison.Ordinal));
+            PageTests.AssertAccessible("a save the database didn't confirm, with the page's reads still down", html);
 
             database.Down = false;
+            var back = await owner.Client.GetAsync(address, Token);
+            var backHtml = await back.Content.ReadAsStringAsync(Token);
+            var redrawn = RequestSteps.ReadControls(backHtml);
+
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, back.StatusCode);
+            Assert.Contains(RequestWords.Unsure, Text(backHtml));
+            Assert.Contains(ControlWords.Restart, redrawn.Handlers);
+            Assert.Equal(page.Keys[handler], redrawn.Keys[handler]);
+            Assert.Equal(pause, backHtml.Contains("name=\"reason\" value=\"Testing the controls\"", StringComparison.Ordinal));
+
             var row = Assert.Single(await db.SentAsync());
-            Assert.Equal(RequestKinds.PostsPause, row.kind);
-            SentTo(await RequestSteps.PostControlAsync(owner, redrawn, ControlWords.Pause, Filled(ControlWords.Pause)), row.id);
+            Assert.Equal(pause ? RequestKinds.PostsPause : RequestKinds.PostsResume, row.kind);
+            SentTo(await RequestSteps.PostControlAsync(owner, redrawn, handler, Filled(handler)), row.id);
+            Assert.Single(await db.SentAsync());
+
+            var refused = await RequestSteps.NoticeOfAsync(await RequestSteps.PostControlAsync(owner, await RequestSteps.ControlsAsync(owner), ControlWords.Restart,
+                ("confirm", "restar")));
+            database.Down = true;
+            var plain = await owner.Client.GetAsync(refused, Token);
+            var plainHtml = await plain.Content.ReadAsStringAsync(Token);
+            database.Down = false;
+
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, plain.StatusCode);
+            Assert.Contains(ErrorResponses.Unavailable, Text(plainHtml));
+            Assert.DoesNotContain("<form", plainHtml);
             Assert.Single(await db.SentAsync());
         }
 
         // The same for a form sent as the sign-in neared its 15 minutes, which passed while the commit's answer was awaited,
-        // with the database down after it and not: the form isn't drawn again, as none is while the sign-in isn't fresh, so
-        // the words don't offer it. The way to sign in again from the form drawn alone comes back to the control, as each
-        // control's own does, and the control's last use there is the request the database saved. Fails if the page says to
-        // send it again from a form it doesn't draw, or the way back from the form drawn alone loses the control.
+        // with the database down after it, when the notice's GET first says it can't tell, and not: once the page is drawn,
+        // the form isn't drawn again, as none is while the sign-in isn't fresh, so the words don't offer it. The way to sign
+        // in again comes back to the control, and the control's last use there is the request the database saved. Fails if
+        // the page says to send it again from a form it doesn't draw, or the way back loses the control.
         [Theory]
         [InlineData(true)]
         [InlineData(false)]
@@ -677,10 +733,20 @@ namespace MinerBot.Dashboard.Tests
             var page = await RequestSteps.ControlsAsync(owner);
             Assert.Contains(ControlWords.SetStatus, page.Handlers);
 
-            var unsure = await RequestSteps.PostControlAsync(owner, page, ControlWords.SetStatus, ("text", "Back at noon"));
+            var address = await RequestSteps.NoticeOfAsync(await RequestSteps.PostControlAsync(owner, page, ControlWords.SetStatus, ("text", "Back at noon")));
+            Assert.Equal(down, database!.Down);
+
+            if (down)
+            {
+                var notSure = await owner.Client.GetAsync(address, Token);
+                Assert.Equal(HttpStatusCode.ServiceUnavailable, notSure.StatusCode);
+                Assert.Contains(ErrorResponses.UnsureUnavailable, Text(await notSure.Content.ReadAsStringAsync(Token)));
+                database.Down = false;
+            }
+
+            var unsure = await owner.Client.GetAsync(address, Token);
             var html = await unsure.Content.ReadAsStringAsync(Token);
 
-            Assert.Equal(down, database!.Down);
             Assert.Equal(HttpStatusCode.ServiceUnavailable, unsure.StatusCode);
             Assert.DoesNotContain(ErrorResponses.Unavailable, Text(html));
             Assert.Contains(RequestWords.UnsureNotFresh, Text(html));
@@ -691,7 +757,6 @@ namespace MinerBot.Dashboard.Tests
             PageTests.AssertAccessible("a save the database didn't confirm, whose sign-in went stale meanwhile", html);
 
             // Signed in again, back at the control, whose last use is the request the database saved
-            database.Down = false;
             var row = Assert.Single(await db.SentAsync());
             var again = await SignInSteps.SignInAgainAsync(factory, owner, TestUsers.Owner, "/admin/bot/controls#status-text");
             Assert.Equal("/admin/bot/controls#status-text", SignInSteps.PathOf(again.Headers.Location));
@@ -701,8 +766,9 @@ namespace MinerBot.Dashboard.Tests
 
         // The same for a pause or a resume the bot took while the commit's answer was awaited, as it does within 3 seconds:
         // the page draws the other one's control in its place, so it has neither the form sent nor that control's last use,
-        // and the line under Posts names the request, at once or, with the database down and the sign-in gone stale, once
-        // signed in again. Fails if the words offer a form that isn't drawn, or send the person only to a last use that isn't.
+        // and the line under Posts names the request. With the database down and the sign-in gone stale, the notice's GET
+        // first says it can't tell, and once the database answers, the page says the same as without: the line under Posts
+        // needs no sign-in. Fails if the words offer a form that isn't drawn, or send the person only to a last use that isn't.
         [Theory]
         [InlineData(ControlWords.Pause, false)]
         [InlineData(ControlWords.Resume, false)]
@@ -750,28 +816,291 @@ namespace MinerBot.Dashboard.Tests
 
             var page = await RequestSteps.ControlsAsync(owner);
             Assert.Contains(handler, page.Handlers);
-            var unsure = await RequestSteps.PostControlAsync(owner, page, handler, Filled(handler));
-            var html = await unsure.Content.ReadAsStringAsync(Token);
+            var address = await RequestSteps.NoticeOfAsync(await RequestSteps.PostControlAsync(owner, page, handler, Filled(handler)));
             var row = Assert.Single(await db.SentAsync());
+
+            if (staleAndDown)
+            {
+                var notSure = await owner.Client.GetAsync(address, Token);
+                Assert.Equal(HttpStatusCode.ServiceUnavailable, notSure.StatusCode);
+                Assert.Contains(ErrorResponses.UnsureUnavailable, Text(await notSure.Content.ReadAsStringAsync(Token)));
+                database!.Down = false;
+            }
+
+            var unsure = await owner.Client.GetAsync(address, Token);
+            var html = await unsure.Content.ReadAsStringAsync(Token);
 
             Assert.Equal(HttpStatusCode.ServiceUnavailable, unsure.StatusCode);
             Assert.DoesNotContain(handler, RequestSteps.ReadControls(html).Handlers);
             Assert.DoesNotContain(RequestWords.Unsure, Text(html));
-            PageTests.AssertAccessible("an unconfirmed pause or resume the bot took", html);
-
-            if (staleAndDown)
-            {
-                Assert.Contains("or for a pause the line under Posts, shows whether it was", Text(html));
-                database!.Down = false;
-                await SignInSteps.SignInAgainAsync(factory, owner, TestUsers.Owner, "/admin/bot/controls#posts");
-                html = (await RequestSteps.ControlsAsync(owner)).Html;
-            }
-            else
-            {
-                Assert.Contains("The line under Posts shows posts as they are now and the request that last changed them", Text(html));
-            }
-
+            Assert.Contains("The line under Posts shows posts as they are now and the request that last changed them", Text(html));
             Assert.Contains($"on request {row.id}", Text(html));
+            PageTests.AssertAccessible("an unconfirmed pause or resume the bot took", html);
+        }
+
+        // The same once the dashboard has started again with requests off, within the notice's 30 minutes: the page draws no
+        // form, so the words don't offer one, and say where to look. Two factories share a keys folder, as one dashboard
+        // restarting, and the browser's cookies go from one to the other. Fails if the words offer a form that isn't drawn.
+        [Fact]
+        public async Task AnUnconfirmedSaveOnceRequestsAreOffOffersNoForm()
+        {
+            var db = await fixture.ReadyAsync();
+            var keys = DashboardFactory.NewKeysFolder();
+
+            try
+            {
+                string address;
+                CookieCollection cookies;
+
+                await using (var before = new DashboardFactory(db, new DashboardFactoryOptions
+                {
+                    KeysFolder = keys,
+                    Services = services => services.Replace(ServiceDescriptor.Transient<IBotRequestQueue>(provider =>
+                        new UnconfirmedQueue(ActivatorUtilities.CreateInstance<BotRequestQueue>(provider))))
+                }))
+                {
+                    var owner = await SignedInAsync(before, TestUsers.Owner, "198.51.100.236");
+                    address = await RequestSteps.NoticeOfAsync(await RequestSteps.PostControlAsync(owner, await RequestSteps.ControlsAsync(owner), ControlWords.ClearCaches));
+                    cookies = owner.Jar.GetCookies(DashboardFactory.PublicAddress);
+                }
+
+                await using var after = new DashboardFactory(db, new DashboardFactoryOptions
+                {
+                    KeysFolder = keys,
+                    Settings = new Dictionary<string, string?> { ["Dashboard:RequestSigningKey"] = "" }
+                });
+                var browser = after.Visitor("198.51.100.236");
+
+                foreach (Cookie cookie in cookies)
+                    browser.Jar.Add(DashboardFactory.PublicAddress, new Cookie(cookie.Name, cookie.Value) { Secure = true });
+
+                var unsure = await browser.Client.GetAsync(address, Token);
+                var html = await unsure.Content.ReadAsStringAsync(Token);
+
+                Assert.Equal(HttpStatusCode.ServiceUnavailable, unsure.StatusCode);
+                Assert.Empty(RequestSteps.ReadControls(html).Handlers);
+                Assert.DoesNotContain(RequestWords.Unsure, Text(html));
+                Assert.Contains(RequestWords.UnsureNotOffered, Text(html));
+                PageTests.AssertAccessible("a save the database didn't confirm, once requests are off", html);
+            }
+            finally
+            {
+                DashboardFactory.DeleteFolder(keys);
+            }
+        }
+
+        // The same once the lists have moved the Owner to the Admins: the page draws neither the form sent nor the Posts
+        // section, so for a pause the bot took the words point to no line under Posts either. Fails if they offer a form or a
+        // line the page doesn't draw.
+        [Fact]
+        public async Task AnUnconfirmedPauseOfSomeoneNoLongerTheOwnerOffersNoForm()
+        {
+            var db = await fixture.ReadyBotAsync();
+            FakeClock? clock = null;
+            await using var factory = new DashboardFactory(db, new DashboardFactoryOptions
+            {
+                // The bot's part, done before the answer that never comes
+                Services = services => services.Replace(ServiceDescriptor.Transient<IBotRequestQueue>(provider =>
+                    new UnconfirmedQueue(ActivatorUtilities.CreateInstance<BotRequestQueue>(provider), () =>
+                    {
+                        var at = clock!.GetUtcNow().UtcDateTime;
+
+                        Task.Run(async () =>
+                        {
+                            var row = Assert.Single(await db.SentAsync());
+                            await RequestSteps.ClaimAsync(db, row.id, at);
+                            await db.Requests().SavePause(true, row.argument, at, row.actor_id, row.id, at);
+                            await RequestSteps.FinishAsync(db, row.id, RequestStates.Done, "Done for a test", at);
+                        }, Token).GetAwaiter().GetResult();
+                    })))
+            });
+            clock = factory.Clock;
+            var owner = await SignedInAsync(factory, TestUsers.Owner, "198.51.100.237");
+            var address = await RequestSteps.NoticeOfAsync(await RequestSteps.PostControlAsync(owner, await RequestSteps.ControlsAsync(owner), ControlWords.Pause,
+                Filled(ControlWords.Pause)));
+
+            factory.Settings.Change(("Dashboard:Owners", TestUsers.SecondAdmin.IdText), ("Dashboard:Admins", $"{TestUsers.Owner.IdText},{TestUsers.Admin.IdText}"));
+            var unsure = await owner.Client.GetAsync(address, Token);
+            var html = await unsure.Content.ReadAsStringAsync(Token);
+
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, unsure.StatusCode);
+            Assert.Contains(ControlWords.AdminLine, Text(html));
+            Assert.DoesNotContain("id=\"posts\"", html);
+            Assert.DoesNotContain(RequestWords.UnsurePostsLine, Text(html));
+            Assert.DoesNotContain(RequestWords.Unsure, Text(html));
+            Assert.Contains(RequestWords.UnsureNotOffered, Text(html));
+            Assert.DoesNotContain(ControlWords.Pause, RequestSteps.ReadControls(html).Handlers);
+        }
+
+        // A pause sent again with another reason from the page a browser kept with the first one's key, as Back can restore it
+        // from the back-forward cache: while the bot hasn't taken the first, the words offer the form below, drawn with the new
+        // reason. Once it has, the page draws Resume in Pause's place, so they name the request without offering a form.
+        // Fails if the words offer a form the page doesn't draw.
+        [Fact]
+        public async Task AFormSentBeforeWhoseFormIsntDrawnOffersNoForm()
+        {
+            var db = await fixture.ReadyBotAsync();
+            await using var factory = new DashboardFactory(db);
+            var owner = await SignedInAsync(factory, TestUsers.Owner, "198.51.100.238");
+            var page = await RequestSteps.ControlsAsync(owner);
+            var now = factory.Clock.GetUtcNow().UtcDateTime;
+
+            var first = await RequestSteps.PostControlAsync(owner, page, ControlWords.Pause, ("reason", "First reason"), ("confirm", "pause"));
+            var row = Assert.Single(await db.SentAsync());
+            SentTo(first, row.id);
+
+            var waiting = await RequestSteps.AnsweredAsync(owner, await RequestSteps.PostControlAsync(owner, page, ControlWords.Pause, ("reason", "Second reason"), ("confirm", "pause")));
+            var waitingHtml = await waiting.Content.ReadAsStringAsync(Token);
+
+            Assert.Equal(HttpStatusCode.Conflict, waiting.StatusCode);
+            Assert.Contains(RequestWords.SentBefore(row.id), Text(waitingHtml));
+            Assert.Contains(ControlWords.Pause, RequestSteps.ReadControls(waitingHtml).Handlers);
+            Assert.Equal("Second reason", BlacklistSteps.BoxValue(waitingHtml, "reason"));
+
+            // The bot's part
+            await RequestSteps.ClaimAsync(db, row.id, now);
+            await db.Requests().SavePause(true, row.argument, now, row.actor_id, row.id, now);
+            await RequestSteps.FinishAsync(db, row.id, RequestStates.Done, "Done for a test", now);
+
+            var taken = await RequestSteps.AnsweredAsync(owner, await RequestSteps.PostControlAsync(owner, page, ControlWords.Pause, ("reason", "Third reason"), ("confirm", "pause")));
+            var html = await taken.Content.ReadAsStringAsync(Token);
+            var controls = RequestSteps.ReadControls(html);
+
+            Assert.Equal(HttpStatusCode.Conflict, taken.StatusCode);
+            Assert.Contains(RequestWords.SentBeforeNotOffered(row.id), Text(html));
+            Assert.DoesNotContain("The form below is new", Text(html));
+            Assert.Contains($"<a href=\"/admin/requests/{row.id}\">That request</a>", html);
+            Assert.DoesNotContain(ControlWords.Pause, controls.Handlers);
+            Assert.Contains(ControlWords.Resume, controls.Handlers);
+            Assert.Single(await db.SentAsync());
+            PageTests.AssertAccessible("a form sent before whose form isn't drawn", html);
+        }
+
+        // The same once the sign-in has passed its 15 minutes, within the notice's 30: a status text sent again with other
+        // text from the page a browser kept, whose form the page then draws no more, gets the words that offer none. A
+        // restart refused because another waits for the bot, whose form the page draws no more either, keeps its own words,
+        // which name that request: it's no form of this one sent before. Fails if the words offer a form the page doesn't
+        // draw, or say a form was sent before when it wasn't.
+        [Fact]
+        public async Task AFormSentBeforeOnceTheSignInIsStaleOffersNoForm()
+        {
+            var db = await fixture.ReadyAsync();
+            await using var factory = new DashboardFactory(db);
+            var owner = await SignedInAsync(factory, TestUsers.Owner, "192.0.2.161");
+            var other = await SignedInAsync(factory, TestUsers.Owner, "192.0.2.162");
+            var page = await RequestSteps.ControlsAsync(owner);
+            var now = factory.Clock.GetUtcNow().UtcDateTime;
+
+            var first = await RequestSteps.PostControlAsync(owner, page, ControlWords.SetStatus, ("text", "Back soon"));
+            var row = Assert.Single(await db.SentAsync());
+            SentTo(first, row.id);
+            var sentBefore = await RequestSteps.NoticeOfAsync(await RequestSteps.PostControlAsync(owner, page, ControlWords.SetStatus, ("text", "Back later")));
+
+            var waiting = await RequestSteps.AddAsync(db, factory, RequestKinds.BotRestart, now.AddSeconds(-30));
+            var waits = await RequestSteps.NoticeOfAsync(await RequestSteps.PostControlAsync(other, await RequestSteps.ControlsAsync(other), ControlWords.Restart,
+                ("confirm", "restart")));
+            var waitsWords = $"A request like this is already waiting for the bot: request {waiting}, asked for at {RequestWords.Clock(now.AddSeconds(-30))}.";
+            Assert.Contains(waitsWords, await TextAsync(await other.Client.GetAsync(waits, Token)));
+
+            factory.Clock.Advance(TimeSpan.FromMinutes(16));
+            var stale = await owner.Client.GetAsync(sentBefore, Token);
+            var html = await stale.Content.ReadAsStringAsync(Token);
+            var controls = RequestSteps.ReadControls(html);
+
+            Assert.Equal(HttpStatusCode.Conflict, stale.StatusCode);
+            Assert.Contains(RequestWords.SentBeforeNotOffered(row.id), Text(html));
+            Assert.DoesNotContain("The form below is new", Text(html));
+            Assert.Contains($"<a href=\"/admin/requests/{row.id}\">That request</a>", html);
+            Assert.DoesNotContain(ControlWords.SetStatus, controls.Handlers);
+            Assert.Contains(ControlWords.DefaultStatus, controls.Handlers);
+            PageTests.AssertAccessible("a form sent before, once the sign-in is stale", html);
+
+            var waited = await other.Client.GetAsync(waits, Token);
+            var waitedHtml = await waited.Content.ReadAsStringAsync(Token);
+
+            Assert.Equal(HttpStatusCode.Conflict, waited.StatusCode);
+            Assert.Contains(waitsWords, Text(waitedHtml));
+            Assert.DoesNotContain("This form was sent already", Text(waitedHtml));
+            Assert.DoesNotContain(ControlWords.Restart, RequestSteps.ReadControls(waitedHtml).Handlers);
+            Assert.Equal(2, (await db.SentAsync()).Count);
+        }
+
+        // A word typed wrong gets words that send the person to the box, while the page draws it. Corrected and sent from the
+        // notice's own page, a pause is taken by the bot, so the page draws Resume in its place, and the notice's address,
+        // fetched again as Back or a reload fetches it within its 30 minutes, gets words that point to no box; so does a
+        // restart's once the sign-in has passed its 15 minutes, when the way to sign in again stands in its form's place. A
+        // pause the rules refused for its reason, with the word typed right, keeps the rule's words once its form has gone.
+        // Fails if the words send the person to a box the page doesn't draw, or the box's words go while it's drawn, or a
+        // refusal of the reason says the word didn't match.
+        [Fact]
+        public async Task AWordTypedWrongPointsToNoBoxThePageDoesntDraw()
+        {
+            const string ruleWords = "The bot would refuse this, so nothing was sent: the reason has a character that shows nothing or changes the text's direction.";
+            var db = await fixture.ReadyBotAsync();
+            await using var factory = new DashboardFactory(db);
+            var owner = await SignedInAsync(factory, TestUsers.Owner, "192.0.2.160");
+            var now = factory.Clock.GetUtcNow().UtcDateTime;
+
+            var paws = await RequestSteps.NoticeOfAsync(await RequestSteps.PostControlAsync(owner, await RequestSteps.ControlsAsync(owner), ControlWords.Pause,
+                ("reason", "Testing the controls"), ("confirm", "paws")));
+            var refused = await owner.Client.GetAsync(paws, Token);
+            var refusedHtml = await refused.Content.ReadAsStringAsync(Token);
+            var drawn = RequestSteps.ReadControls(refusedHtml);
+
+            Assert.Equal(HttpStatusCode.BadRequest, refused.StatusCode);
+            Assert.Contains(RequestWords.NotConfirmed("pause"), Text(refusedHtml));
+            Assert.DoesNotContain(RequestWords.NotConfirmedNotOffered, Text(refusedHtml));
+            Assert.Contains(ControlWords.Pause, drawn.Handlers);
+
+            // In a second session, a pause the rules refuse for its reason, with the word typed right, while its form is drawn
+            var other = await SignedInAsync(factory, TestUsers.Owner, "192.0.2.167");
+            var rule = await RequestSteps.NoticeOfAsync(await RequestSteps.PostControlAsync(other, await RequestSteps.ControlsAsync(other), ControlWords.Pause,
+                ("reason", "Wait\u200Bing"), ("confirm", "pause")));
+            Assert.Contains(ruleWords, await TextAsync(await other.Client.GetAsync(rule, Token)));
+
+            var sent = await RequestSteps.PostControlAsync(owner, drawn, ControlWords.Pause, ("reason", "Testing the controls"), ("confirm", "pause"));
+            var row = Assert.Single(await db.SentAsync());
+            SentTo(sent, row.id);
+
+            // The bot's part
+            await RequestSteps.ClaimAsync(db, row.id, now);
+            await db.Requests().SavePause(true, row.argument, now, row.actor_id, row.id, now);
+            await RequestSteps.FinishAsync(db, row.id, RequestStates.Done, "Done for a test", now);
+
+            var taken = await owner.Client.GetAsync(paws, Token);
+            var html = await taken.Content.ReadAsStringAsync(Token);
+            var controls = RequestSteps.ReadControls(html);
+
+            Assert.Equal(HttpStatusCode.BadRequest, taken.StatusCode);
+            Assert.Contains(RequestWords.NotConfirmedNotOffered, Text(html));
+            Assert.DoesNotContain("in the box", Text(html));
+            Assert.DoesNotContain(ControlWords.Pause, controls.Handlers);
+            Assert.Contains(ControlWords.Resume, controls.Handlers);
+            PageTests.AssertAccessible("a word typed wrong, once the bot has taken the pause sent after it", html);
+
+            // The rules' refusal, fetched again now its form has gone, still names the rule: the word matched
+            var ruled = await other.Client.GetAsync(rule, Token);
+            var ruledHtml = await ruled.Content.ReadAsStringAsync(Token);
+
+            Assert.Equal(HttpStatusCode.BadRequest, ruled.StatusCode);
+            Assert.Contains(ruleWords, Text(ruledHtml));
+            Assert.DoesNotContain(RequestWords.NotConfirmedNotOffered, Text(ruledHtml));
+            Assert.DoesNotContain(ControlWords.Pause, RequestSteps.ReadControls(ruledHtml).Handlers);
+
+            var restat = await RequestSteps.NoticeOfAsync(await RequestSteps.PostControlAsync(owner, await RequestSteps.ControlsAsync(owner), ControlWords.Restart,
+                ("confirm", "restat")));
+            Assert.Contains(RequestWords.NotConfirmed("restart"), await TextAsync(await owner.Client.GetAsync(restat, Token)));
+
+            factory.Clock.Advance(TimeSpan.FromMinutes(16));
+            var stale = await owner.Client.GetAsync(restat, Token);
+            var staleHtml = await stale.Content.ReadAsStringAsync(Token);
+
+            Assert.Equal(HttpStatusCode.BadRequest, stale.StatusCode);
+            Assert.Contains(RequestWords.NotConfirmedNotOffered, Text(staleHtml));
+            Assert.DoesNotContain("in the box", Text(staleHtml));
+            Assert.DoesNotContain(ControlWords.Restart, RequestSteps.ReadControls(staleHtml).Handlers);
+            Assert.Contains(WebUtility.HtmlEncode(FreshSignIn.SignInAgainLink("/admin/bot/controls#restart")), staleHtml);
+            Assert.Single(await db.SentAsync());
         }
 
         // The pause and the status as the bot follows them: a pause with its reason, hidden characters as their codes, and
@@ -1060,11 +1389,29 @@ namespace MinerBot.Dashboard.Tests
             var shown = await admin.Client.GetStringAsync($"/admin/bot/controls?request={restart}", Token);
             Assert.Contains($"Restart the bot, request {restart}, asked for by Test Owner (Owner)", Text(shown));
             Assert.Contains($"data-refresh=\"/admin/requests/{restart}?handler=result\"", shown);
-            Assert.Contains($"<a href=\"/admin/bot/controls?request={restart}#result\">Check again</a>", shown);
+            Assert.Contains($"<a href=\"/admin/bot/controls?request={restart}&amp;again=1#result\">Check again</a>", shown);
             PageTests.AssertAccessible("the controls page with a request's box", shown);
+
+            // Opened from Check again, in any letter case, with any value or none, its Check again takes again off
+            foreach (var again in new[] { "again=1", "Again=", "AGAIN" })
+                Assert.Contains($"<a href=\"/admin/bot/controls?request={restart}#result\">Check again</a>",
+                    await admin.Client.GetStringAsync($"/admin/bot/controls?request={restart}&{again}", Token));
 
             foreach (var other in new[] { $"{test}", $"{restart}x", "0", "-1", "abc", "99999" })
                 Assert.DoesNotContain("id=\"result\"", await admin.Client.GetStringAsync($"/admin/bot/controls?request={other}", Token));
+        }
+
+        // Check again, the next look at a form's request without the script, loads the page each time it's pressed: from the
+        // address the form's redirect leads to, and from the one Check again leads to, whose own leads back. Fails if it's the
+        // address the browser shows with a fragment, which only scrolls, as it was before.
+        [Fact]
+        public async Task CheckAgainLoadsThePageAgain()
+        {
+            var db = await fixture.ReadyAsync();
+            await using var factory = new DashboardFactory(db);
+            var admin = await SignedInAsync(factory, TestUsers.Admin, "198.51.100.133");
+
+            await RequestSteps.CheckAgainWalkAsync(admin, await RequestSteps.PostControlAsync(admin, await RequestSteps.ControlsAsync(admin), ControlWords.ClearCaches));
         }
 
         [GeneratedRegex(@"MinimumUptime = TimeSpan\.FromMinutes\(([0-9]+)\);")]

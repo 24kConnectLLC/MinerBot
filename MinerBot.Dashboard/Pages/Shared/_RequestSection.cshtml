@@ -3,9 +3,11 @@
 @*
     The box for a request, at #result, which a form's redirect leads to. While what it shows can change, refresh.js gets it
     again from the request's Result handler, every 2 seconds while the request is young and every 5 after that, until the
-    answer says it's final, and stops with the note on anything else; Check again, the page's own address, is the next look
-    without it, on every page but one drawn again after its form, where pressing it again is. A page that draws a box that
-    isn't final loads refresh.js. Once final, the box is drawn alone.
+    answer says it's final, and stops with the note on anything else; Check again is the next look without it. On a page
+    that names the request in ?request=, Check again is the page's own address with again=1 added or taken off, so it's
+    never the address the browser shows: a link to that with a fragment would only scroll. The request's own page links its
+    own address without a fragment, which loads. The blacklist's add page draws none: pressing its form's button again is
+    the next look there. A page that draws a box that isn't final loads refresh.js. Once final, the box is drawn alone.
 *@
 <section id="result" aria-labelledby="result-heading">
     <h2 id="result-heading">@Model.Heading</h2>

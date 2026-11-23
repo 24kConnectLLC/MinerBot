@@ -1,9 +1,13 @@
 using System.Net;
 using System.Security.Claims;
+using System.Text.RegularExpressions;
 using DataAccessLibrary.Audit;
+using DataAccessLibrary.Requests;
 using DataAccessLibrary.Tests.Database;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using MinerBot.Dashboard.Auth;
 using MinerBot.Dashboard.Requests;
 using MinerBot.Dashboard.Tests.Support;
@@ -140,8 +144,8 @@ namespace MinerBot.Dashboard.Tests
             }
         }
 
-        // A refusal for a sign-in that's become too old since the page was drawn shows what was typed, read-only and encoded,
-        // to copy, in place of the form, with the way to sign in again; nothing is sent
+        // A refusal for a sign-in that's become too old since the page was drawn: its notice shows what was typed, read-only
+        // and encoded, to copy, in place of the form, with the way to sign in again; nothing is sent
         [Fact]
         public async Task ARefusalForAnOldSignInShowsWhatWasTyped()
         {
@@ -153,7 +157,8 @@ namespace MinerBot.Dashboard.Tests
             Assert.Contains(ControlWords.Pause, page.Handlers);
 
             factory.Clock.Advance(TimeSpan.FromMinutes(16));
-            var refused = await RequestSteps.PostControlAsync(owner, page, ControlWords.Pause, ("reason", "<b>Back</b> after the update"), ("confirm", "pause"));
+            var refused = await RequestSteps.AnsweredAsync(owner,
+                await RequestSteps.PostControlAsync(owner, page, ControlWords.Pause, ("reason", "<b>Back</b> after the update"), ("confirm", "pause")));
             var html = await refused.Content.ReadAsStringAsync(Token);
 
             Assert.Equal(HttpStatusCode.Forbidden, refused.StatusCode);
@@ -164,6 +169,43 @@ namespace MinerBot.Dashboard.Tests
             Assert.Contains(WebUtility.HtmlEncode(FreshSignIn.SignInAgainLink("/admin/bot/controls#posts")), html);
             Assert.Empty(await db.SentAsync());
             PageTests.AssertAccessible("a refusal for a sign-in that's too old", html);
+        }
+
+        // A leave sent as the sign-in neared its 15 minutes, which passed while the commit's answer was awaited: its notice's
+        // GET says it can't tell whether it was sent, and not to send it from the form, which isn't drawn while the sign-in
+        // isn't fresh, but where to look, with the way to sign in again, back to the leave page. Its leave's last use is the
+        // request the database saved. Fails if the words offer a form the page doesn't draw.
+        [Fact]
+        public async Task AnUnconfirmedLeaveWhoseSignInGoesStaleOffersNoForm()
+        {
+            var db = await fixture.ReadyBotAsync();
+            FakeClock? clock = null;
+            await using var factory = new DashboardFactory(db, new DashboardFactoryOptions
+            {
+                Services = services => services.Replace(ServiceDescriptor.Transient<IBotRequestQueue>(provider =>
+                    new UnconfirmedQueue(ActivatorUtilities.CreateInstance<BotRequestQueue>(provider), () => clock!.Advance(TimeSpan.FromSeconds(15)))))
+            });
+            clock = factory.Clock;
+            await StatusSteps.ServersAsync(db);
+            var owner = factory.Visitor("203.0.113.170");
+            await SignInSteps.SignedInAsync(factory, owner, TestUsers.Owner);
+            var leave = $"/admin/servers/{StatusSteps.ServerId}/leave";
+
+            factory.Clock.Advance(TimeSpan.FromMinutes(14) + TimeSpan.FromSeconds(50));
+            var drawn = await owner.Client.GetStringAsync(leave, Token);
+            var key = Regex.Match(drawn, "name=\"formkey\" value=\"([0-9a-f]{32})\"").Groups[1].Value;
+            var unsure = await RequestSteps.AnsweredAsync(owner, await SignInSteps.PostAsync(owner, leave, SignInSteps.FormToken(drawn), origin: DashboardFactory.PublicOrigin,
+                fields: [new("formkey", key), new("confirm", "Test Server")]));
+            var html = await unsure.Content.ReadAsStringAsync(Token);
+            var row = Assert.Single(await db.SentAsync());
+
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, unsure.StatusCode);
+            Assert.Contains(RequestWords.UnsureNotFresh, WebUtility.HtmlDecode(html));
+            Assert.DoesNotContain(RequestWords.Unsure, WebUtility.HtmlDecode(html));
+            Assert.DoesNotContain("name=\"confirm\"", html);
+            Assert.Contains(WebUtility.HtmlEncode(FreshSignIn.SignInAgainLink(leave)), html);
+            Assert.Contains($"<a href=\"/admin/requests/{row.id}\">Request {row.id}</a>.", html);
+            PageTests.AssertAccessible("a leave the database didn't confirm, whose sign-in went stale meanwhile", html);
         }
 
         // The controls page's handler for each kind that needs a fresh sign-in, and its section

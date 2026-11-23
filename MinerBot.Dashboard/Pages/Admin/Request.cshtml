@@ -35,6 +35,8 @@
         : row.state is RequestStates.Refused or RequestStates.Expired ? "Never: the bot didn't take it"
         : RequestWords.UnreadableTime;
 
+    // Check again is this page's own address, without a fragment, so it loads the page again. With #result it would be the
+    // address the browser shows plus a fragment, which only scrolls.
     var box = new RequestSection(view, view.Address, "What the bot did");
 }
 @section Scripts {

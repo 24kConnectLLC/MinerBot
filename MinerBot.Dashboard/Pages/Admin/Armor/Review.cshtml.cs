@@ -9,6 +9,7 @@ using Microsoft.AspNetCore.Mvc.Filters;
 using Microsoft.AspNetCore.Mvc.RazorPages;
 using Microsoft.Extensions.Options;
 using MinerBot.Dashboard.Armor;
+using MinerBot.Dashboard.Hosting;
 using MinerBot.Dashboard.Requests;
 using MinerBot.Dashboard.Security;
 using MinerBot.Dashboard.Settings;
@@ -22,12 +23,20 @@ namespace MinerBot.Dashboard.Pages.Admin.Armor
     // Its forms approve, reject, take down or move it back to pending, each through ArmorReviews, and an approval, a
     // take-down or a move back from Approved then asks the bot to clear its name cache, once the review has committed.
     // Approved armor the bot hasn't seen yet can be announced now, through the same sender as every request to the bot,
-    // unless the bot has stopped cleanly or started again since its last notification run.
+    // unless the bot has stopped cleanly or started again since its last notification run. A form that wasn't done or sent
+    // is kept as a form's notice and redirects here with ?notice=, whose GET draws why with the armor as it is then, never
+    // this page drawn on the POST, which a reload would send again, and which would act once the refusal's cause had gone.
     public sealed class ArmorReviewModel(IArmorSubmissionData submissions, IArmorReviewData reviews, IBotRequestQueue queue, IBotRequestReads requests,
         IBotStatusReads status, TimeProvider time, ILogger<ArmorReviewModel> logger) : PageModel
     {
         // The requests whose box this page shows when ?request= names one: the cache clear after a review, and Announce now
         static readonly IReadOnlyList<string> Kinds = [RequestKinds.CachesClear, RequestKinds.JobNotifications];
+
+        // The forms a notice names: Announce now, and each action by its done word. What an action's notice says stopped it,
+        // and that an announce's words are for the top of the page alone, as for armor that isn't approved now.
+        const string AnnounceForm = "announce";
+        static readonly IReadOnlyList<string> Forms = [AnnounceForm, .. Enum.GetValues<ArmorAction>().Select(action => action.DoneWord())];
+        const string ChangedState = "changed", BlockedState = "blocked", UntickedState = "unticked", PageState = "page";
 
         public long Id { get; private set; }
         public ArmorSubmission? Armor { get; private set; }
@@ -127,9 +136,23 @@ namespace MinerBot.Dashboard.Pages.Admin.Armor
         public const int ScreenshotTextLimit = 300;
 
         public async Task<IActionResult> OnGetAsync(long id, [FromQuery] string? done, [FromQuery] string? list, [FromQuery] string? q, [FromQuery] string? request,
-            [FromQuery] string? unsent)
+            [FromQuery] string? unsent, [FromQuery] string? notice)
         {
             KeepList(list, q);
+
+            // A form's notice: Announce now's, or an action's, named by its done word
+            var found = HttpContext.RequestServices.GetRequiredService<FormNotices>().Find(this, notice, Forms);
+            var acted = ArmorActions.FromDoneWord(found?.Form);
+
+            // An action whose commit the database didn't confirm: why alone, with nothing read, since the database most often
+            // still doesn't answer. Not the error page, which would say nothing was changed.
+            if (found is { Unsure: true } && acted != null)
+            {
+                Id = id;
+                Unsure = true;
+                RequestWords.Answer(Response, found, time.GetUtcNow().UtcDateTime);
+                return Page();
+            }
 
             if (!await LoadAsync(id))
                 return NotFound();
@@ -139,13 +162,67 @@ namespace MinerBot.Dashboard.Pages.Admin.Armor
 
             // Only chooses what to show, so anything but a request's number shows nothing
             if (ulong.TryParse(request, NumberStyles.None, CultureInfo.InvariantCulture, out var named) && named > 0)
-                Result = await HttpContext.RequestServices.GetRequiredService<RequestBoxes>().SectionAsync(named, Kinds, null, BoxLink(action, named));
+                Result = await HttpContext.RequestServices.GetRequiredService<RequestBoxes>().SectionAsync(named, Kinds, null,
+                    RequestBoxes.CheckAgain(BoxLink(action, named), Request.Query));
 
             // What became of the cache clear, beside the notice of an action that sends one, which shows only while the armor
             // still has the status that action gave it
             if (Notice is ArmorWords.Approved or ArmorWords.ApprovedAgain or ArmorWords.TakenDown or ArmorWords.MovedBackFromApproved)
                 FollowUp = Result?.View.Kind == RequestKinds.CachesClear ? ArmorWords.CacheClearing : ArmorWords.CacheNotCleared(unsent);
 
+            if (found == null)
+                return Page();
+
+            if (acted is { } refused)
+            {
+                // The status the action leads to is already the armor's, by this GET's reads, as DoneNotice guards ?done=: a
+                // try the dashboard couldn't confirm was saved, or someone made the same change first. Nothing was done, but
+                // nothing went wrong.
+                if (found.State == ChangedState && Armor!.KnownStatus == refused.Target())
+                {
+                    Notice = ArmorWords.Already(refused.Target());
+                    NoticeIsProblem = false;
+                }
+                else
+                {
+                    // What stops an approval is listed under Rules only while something does, by this GET's reads too: once
+                    // the name has been freed, or the armor approved since, the words don't point there
+                    Notice = found.State switch
+                    {
+                        ChangedState => ArmorWords.Changed,
+                        BlockedState when Check is { Blocking.Count: > 0 } => ArmorWords.Blocked,
+                        BlockedState => ArmorWords.WasBlocked,
+                        _ => ArmorWords.Unticked
+                    };
+
+                    NoticeIsProblem = true;
+                }
+            }
+            else
+            {
+                // Announce now's: why at the top, and by the button too unless the armor itself was why, with the form's key
+                // after a save the database didn't confirm in place of the new one LoadAsync drew. Once this GET draws no
+                // form, as once a notification run has started since the approval, the words don't offer it, and once it
+                // draws no reason below, they don't point to one.
+                Notice = found switch
+                {
+                    { Unsure: true } when Announce?.State != AnnounceState.Offered => RequestWords.UnsureNotOffered,
+                    { Words: ArmorWords.AnnounceNotNow } when Announce?.State is null or AnnounceState.Offered => ArmorWords.AnnounceWasNotOffered,
+                    _ => found.Words
+                };
+                NoticeIsProblem = true;
+
+                if (found.State != PageState)
+                {
+                    AnnounceProblem = found.Words;
+                    AnnounceRequest = found.Request;
+
+                    if (found.Key is { } key)
+                        AnnounceKey = key;
+                }
+            }
+
+            RequestWords.Answer(Response, found, time.GetUtcNow().UtcDateTime);
             return Page();
         }
 
@@ -171,21 +248,12 @@ namespace MinerBot.Dashboard.Pages.Admin.Armor
             if (!await LoadAsync(id))
                 return NotFound();
 
+            // Refused before the sender, as things stand, with the reason the page then shows
             if (!IsApproved)
-            {
-                Notice = ArmorWords.NotApprovedNow;
-                NoticeIsProblem = true;
-                Response.StatusCode = StatusCodes.Status409Conflict;
-                return Page();
-            }
+                return Keep(id, new FormNotice { Form = AnnounceForm, Status = StatusCodes.Status409Conflict, Words = ArmorWords.NotApprovedNow, State = PageState });
 
             if (Announce is { State: AnnounceState.Restarted or AnnounceState.Stopped })
-            {
-                Notice = ArmorWords.AnnounceNotNow;
-                NoticeIsProblem = true;
-                Response.StatusCode = StatusCodes.Status409Conflict;
-                return Page();
-            }
+                return Keep(id, new FormNotice { Form = AnnounceForm, Status = StatusCodes.Status409Conflict, Words = ArmorWords.AnnounceNotNow, State = PageState });
 
             var outcome = await HttpContext.RequestServices.GetRequiredService<RequestSender>()
                 .SendAsync(new SendOrder(RequestKinds.JobNotifications, formkey), HttpContext);
@@ -203,20 +271,9 @@ namespace MinerBot.Dashboard.Pages.Admin.Armor
                     return BadRequest();
             }
 
-            // The page again, with why at the top and by the button, and the form's key kept only after a save the database
-            // didn't confirm
-            (Notice, AnnounceRequest) = outcome switch
-            {
-                SendOutcome.SentBefore before => (RequestWords.SentBefore(before.Id), before.Id),
-                SendOutcome.Refused refused => (refused.Words, refused.Waiting),
-                _ => (RequestWords.Unsure, (ulong?)null)
-            };
-
-            NoticeIsProblem = true;
-            AnnounceProblem = Notice;
-            AnnounceKey = FormKeys.For(outcome);
-            RequestWords.Answer(Response, outcome, time.GetUtcNow().UtcDateTime);
-            return Page();
+            // Anything else is a notice this page's GET draws, with why at the top and by the button, and the form's key
+            // after a save the database didn't confirm
+            return Keep(id, FormNotice.Of(AnnounceForm, outcome));
         }
 
         // A request no handler takes, such as a POST without one or a PUT, would otherwise get the page with nothing loaded
@@ -253,37 +310,28 @@ namespace MinerBot.Dashboard.Pages.Admin.Armor
 
                 // Not the error page, which would say nothing was changed
                 case ArmorReviewOutcome.Unsure:
-                    Id = id;
-                    Unsure = true;
-                    Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-                    return Page();
+                    return Keep(id, new FormNotice { Form = action.DoneWord(), Status = StatusCodes.Status503ServiceUnavailable, Unsure = true });
             }
 
-            // A refusal: the page again, with the armor as it is now, and what stopped the action
-            if (!await LoadAsync(id))
-                return NotFound();
-
-            // The status this action leads to is already the armor's: a try the dashboard couldn't confirm was saved, or
-            // someone made the same change first. Nothing was done, but nothing went wrong.
-            if (outcome == ArmorReviewOutcome.Changed && Armor!.KnownStatus == action.Target())
+            // A refusal: a notice this page's GET draws, with the armor as it is then, and what stopped the action. Nothing
+            // is read here: the GET decides from its own reads whether the armor already has the status the action was for,
+            // and whether what stopped an approval still does.
+            return Keep(id, new FormNotice
             {
-                Notice = ArmorWords.Already(action.Target());
-            }
-            else
-            {
-                Notice = outcome switch
+                Form = action.DoneWord(),
+                Status = StatusCodes.Status409Conflict,
+                State = outcome switch
                 {
-                    ArmorReviewOutcome.Changed => ArmorWords.Changed,
-                    ArmorReviewOutcome.Blocked => ArmorWords.Blocked,
-                    _ => ArmorWords.Unticked
-                };
-
-                NoticeIsProblem = true;
-            }
-
-            Response.StatusCode = StatusCodes.Status409Conflict;
-            return Page();
+                    ArmorReviewOutcome.Changed => ChangedState,
+                    ArmorReviewOutcome.Blocked => BlockedState,
+                    _ => UntickedState
+                }
+            });
         }
+
+        // This page again with a form's notice, still carrying the list the reviewer came from
+        IActionResult Keep(long id, FormNotice notice) =>
+            HttpContext.RequestServices.GetRequiredService<FormNotices>().Keep(this, notice, new { id, list = FromTab?.Word, q = FromSearch });
 
         // The whole row, since lists cut the screenshot, and the name check, which only this page makes. Approved armor is
         // checked too, so a name two approved armor already share shows here.
@@ -336,7 +384,8 @@ namespace MinerBot.Dashboard.Pages.Admin.Armor
             }
         }
 
-        // This page with the box for the request named, keeping the action's word, so its notice still shows, and the list
+        // This page with the box for the request named, keeping the action's word, so its notice still shows, and the list,
+        // without a fragment: Check again's address, to which RequestBoxes.CheckAgain adds again=1, or takes it off
         string BoxLink(ArmorAction? action, ulong request)
         {
             var query = new QueryBuilder();
@@ -354,7 +403,7 @@ namespace MinerBot.Dashboard.Pages.Admin.Armor
                     query.Add("q", FromSearch);
             }
 
-            return "/admin/armor/" + Id.ToString(CultureInfo.InvariantCulture) + query.ToQueryString() + "#result";
+            return "/admin/armor/" + Id.ToString(CultureInfo.InvariantCulture) + query.ToQueryString();
         }
 
         // What an action did, on the page its form leads to, only while the armor still has the status the action gave it,
