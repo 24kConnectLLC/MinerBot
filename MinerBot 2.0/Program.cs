@@ -3,6 +3,7 @@ using Discord;
 using Discord.Interactions;
 using Discord.WebSocket;
 using MinerBot_2._0;
+using MinerBot_2._0.Feed;
 using MinerBot_2._0.Handlers;
 using MinerBot_2._0.Jobs;
 using MinerBot_2._0.Requests;
@@ -40,6 +41,9 @@ builder.Services.AddSingleton<PostsPause>();
 builder.Services.AddSingleton<PresenceKeeper>();
 builder.Services.AddSingleton<RequestActions>();
 builder.Services.AddHostedService<RequestWorker>();
+// The open lobbies and the latest maps, which the bot writes to the website's database for the website's pages.
+// Registered after the worker too, so it stops before Steam's pump ends.
+builder.Services.AddHostedService<WebsiteFeedWriter>();
 builder.Services.AddSingleton(new DiscordSocketConfig { GatewayIntents = GatewayIntents.Guilds });
 builder.Services.AddSingleton<DiscordSocketClient>();
 //builder.Services.AddSingleton<InteractionService>();
@@ -67,7 +71,8 @@ builder.Services.AddDataAccessServices(builder.Configuration)
                 .AddBotStatusAccess()
                 .AddRetentionAccess()
                 .AddBotGuildAccess()
-                .AddBotRequestAccess();
+                .AddBotRequestAccess()
+                .AddWebsiteFeedAccess();
 
 // Steam API Access
 builder.Services.AddSteamAPIServices();

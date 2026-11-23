@@ -424,14 +424,18 @@ prepare_database() {
         || stop "MariaDB didn't make the two databases: $out"
     out=$(tr -d '\r' < "$repo/docs/schema/wordpress-tables.sql" | sql "$site_db" 2>&1) \
         || stop "MariaDB didn't take the website's tables from docs/schema/wordpress-tables.sql: $out"
-    # A login like the bot's: everything in MinerBot's database, which the migrations need, and the rows of the three
-    # website tables. Its password goes in on stdin, and the client never prints a failing statement.
+    # A login like the bot's: everything in MinerBot's database, which the migrations need, and the rows of the website
+    # tables it uses, the website feed's three among them. Its password goes in on stdin, and the client never prints a
+    # failing statement.
     out=$(sql --skip-print-query-on-error 2>&1 << SQL
 CREATE USER '$bot_login'@'127.0.0.1' IDENTIFIED BY '$bot_password';
 GRANT ALL PRIVILEGES ON \`$bot_db\`.* TO '$bot_login'@'127.0.0.1';
 GRANT SELECT, INSERT, UPDATE, DELETE ON \`$site_db\`.\`ihvph_armor_styles\` TO '$bot_login'@'127.0.0.1';
 GRANT SELECT, INSERT, UPDATE, DELETE ON \`$site_db\`.\`ihvph_blacklist\` TO '$bot_login'@'127.0.0.1';
 GRANT SELECT, INSERT, UPDATE, DELETE ON \`$site_db\`.\`ihvph_discord_servers\` TO '$bot_login'@'127.0.0.1';
+GRANT SELECT, INSERT, UPDATE, DELETE ON \`$site_db\`.\`mmh_feed_lobbies\` TO '$bot_login'@'127.0.0.1';
+GRANT SELECT, INSERT, UPDATE, DELETE ON \`$site_db\`.\`mmh_feed_maps\` TO '$bot_login'@'127.0.0.1';
+GRANT SELECT, INSERT, UPDATE, DELETE ON \`$site_db\`.\`mmh_feed_state\` TO '$bot_login'@'127.0.0.1';
 SQL
     ) || stop "MariaDB didn't make the bot-like login: $out"
 }

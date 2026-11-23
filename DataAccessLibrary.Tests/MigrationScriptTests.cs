@@ -249,14 +249,15 @@ namespace DataAccessLibrary.Tests
 
         static string TableName(string statement) => Regex.Match(statement, @"^CREATE TABLE IF NOT EXISTS (\w+)").Groups[1].Value;
 
-        // The database tests build the website's tables from this file
+        // The database tests build the website's tables from this file: the three WordPress tables as the server gave them,
+        // then the website feed's three as the website's own migration makes them
         [Fact]
-        public void WebsiteSchemaFileSplitsIntoItsThreeTables()
+        public void WebsiteSchemaFileSplitsIntoItsSixTables()
         {
             var statements = MigrationScript.Split(WebsiteSchema());
 
-            Assert.Equal(["ihvph_armor_styles", "ihvph_blacklist", "ihvph_discord_servers"],
-                statements.Select(statement => Regex.Match(statement, @"^CREATE TABLE `(\w+)`").Groups[1].Value));
+            Assert.Equal(["ihvph_armor_styles", "ihvph_blacklist", "ihvph_discord_servers", "mmh_feed_lobbies", "mmh_feed_maps", "mmh_feed_state"],
+                statements.Select(statement => Regex.Match(statement, @"^CREATE TABLE (?:IF NOT EXISTS )?`?(\w+)`?").Groups[1].Value));
         }
 
         [Fact]
