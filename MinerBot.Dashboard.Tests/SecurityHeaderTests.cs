@@ -111,17 +111,23 @@ namespace MinerBot.Dashboard.Tests
             await Add("request fragment", admin.Client.GetAsync($"/admin/requests/{alert}?handler=result", Token), HttpStatusCode.OK);
             await Add("controls page", admin.Client.GetAsync("/admin/bot/controls", Token), HttpStatusCode.OK);
 
-            // The controls page drawn again for a person's limit, with Retry-After, and for a sign-in too old for the control
+            // The controls page's answer to a form refused for a person's limit, a redirect to its notice, and the notice's page,
+            // with Retry-After; and the same for a sign-in too old for the control
             var now = factory.Clock.GetUtcNow().UtcDateTime;
             await RequestSteps.AddRefusedAsync(db, RequestKinds.CachesClear, TestUsers.Admin, Enumerable.Range(1, 20).Select(minute => now.AddMinutes(-minute)));
-            await Add("person limit", RequestSteps.PostControlAsync(admin, await RequestSteps.ControlsAsync(admin), ControlWords.ClearCaches), HttpStatusCode.TooManyRequests);
+            var overLimit = await RequestSteps.PostControlAsync(admin, await RequestSteps.ControlsAsync(admin), ControlWords.ClearCaches);
+            await Add("person limit", Task.FromResult(overLimit), HttpStatusCode.Redirect);
+            await Add("person limit's notice", admin.Client.GetAsync(await RequestSteps.NoticeOfAsync(overLimit), Token), HttpStatusCode.TooManyRequests);
 
             var owner = factory.Visitor("203.0.113.79");
             await SignInSteps.SignedInAsync(factory, owner, TestUsers.Owner);
             var ownerControls = await RequestSteps.ControlsAsync(owner);
             factory.Clock.Advance(TimeSpan.FromMinutes(16));
-            await Add("old sign-in", RequestSteps.PostControlAsync(owner, ownerControls, ControlWords.Restart, ("confirm", "restart")), HttpStatusCode.Forbidden);
-            Assert.NotEmpty(Values(responses.Single(response => response.What == "person limit").Response, "Retry-After"));
+            var old = await RequestSteps.PostControlAsync(owner, ownerControls, ControlWords.Restart, ("confirm", "restart"));
+            await Add("old sign-in", Task.FromResult(old), HttpStatusCode.Redirect);
+            await Add("old sign-in's notice", owner.Client.GetAsync(await RequestSteps.NoticeOfAsync(old), Token), HttpStatusCode.Forbidden);
+            Assert.NotEmpty(Values(responses.Single(response => response.What == "person limit's notice").Response, "Retry-After"));
+            Assert.Empty(Values(responses.Single(response => response.What == "person limit").Response, "Retry-After"));
 
             // A database that's down, behind a cookie that has to be looked up
             var dead = new DeadDatabase();

@@ -358,7 +358,7 @@ request_command() {
             if [ "$FAKE_REQUEST" = restart-not-back ]; then
                 echo "The bot isn't back on Discord 6 minutes after the restart. ./status.sh says whether it runs."
             else
-                echo "The bot is back on Discord 38 s after the request: its new run started at 15:04:41 UTC."
+                echo "The bot was back on Discord at 15:04:43 UTC, 38 s after the request: its new run started at 15:04:41 UTC."
             fi
             echo "The bot's settings now: posts aren't paused; the default status."
             ;;

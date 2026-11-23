@@ -19,6 +19,9 @@ namespace MinerBot.Dashboard.Auth
         public const string AntiforgeryCookie = "__Host-mb-af";
         public const string CorrelationCookiePrefix = "__Host-mb-signin.";
 
+        // A form's notice, which FormNotices keeps for the redirect's GET to draw
+        public const string NoticeCookie = "__Host-mb-notice";
+
         // Whether the account had Discord two-factor on when it signed in
         public const string MfaClaim = "mb:mfa";
 
@@ -92,6 +95,14 @@ namespace MinerBot.Dashboard.Auth
             options.LogoutPath = "/signout";
             options.AccessDeniedPath = "/denied";
             options.ReturnUrlParameter = "returnUrl";
+
+            // Without a session, a GET or a HEAD goes to /signin as before, which goes on to Discord: a page's with a 302, and
+            // refresh.js's, which asks with X-Requested-With, with the default's 401 and the address, after which it stops
+            // with its note. Any other method is a form sent after the session ended, whose redirect couldn't go on to
+            // Discord, so SessionEnded ends it on this site's page that says so.
+            var toSignIn = options.Events.OnRedirectToLogin;
+            options.Events.OnRedirectToLogin = context =>
+                HttpMethods.IsGet(context.Request.Method) || HttpMethods.IsHead(context.Request.Method) ? toSignIn(context) : SessionEnded.RedirectAsync(context);
 
             // The cookie holds only the session's random key, and the ticket stays in the database
             options.TicketDataFormat = new SessionKeyCookieFormat();

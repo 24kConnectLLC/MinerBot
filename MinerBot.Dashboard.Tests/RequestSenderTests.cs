@@ -229,7 +229,7 @@ namespace MinerBot.Dashboard.Tests
             var otherPerson = Refused(await SendAsync(factory, admin, clear), SendRefusal.KeyTaken);
             var otherKind = Refused(await SendAsync(factory, owner, RequestSteps.Order(RequestKinds.JobNotifications) with { FormKey = clear.FormKey }), SendRefusal.KeyTaken);
 
-            Assert.Equal("This form's key belongs to another request, so nothing was sent. Reload the page and send it again.", otherPerson.Words);
+            Assert.Equal("This form's key belongs to another request, so nothing was sent. The form below is new: send it again.", otherPerson.Words);
             Assert.Equal(otherPerson.Words, otherKind.Words);
             Assert.Equal(StatusCodes.Status409Conflict, RequestWords.Status(otherKind));
             Assert.Single(await db.SentAsync());

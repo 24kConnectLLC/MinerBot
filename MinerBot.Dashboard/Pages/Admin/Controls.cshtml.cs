@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Mvc.Filters;
 using Microsoft.AspNetCore.Mvc.RazorPages;
 using Microsoft.Extensions.Options;
 using MinerBot.Dashboard.Auth;
+using MinerBot.Dashboard.Hosting;
 using MinerBot.Dashboard.Requests;
 using MinerBot.Dashboard.Security;
 using MinerBot.Dashboard.Settings;
@@ -56,8 +57,9 @@ namespace MinerBot.Dashboard.Pages.Admin
     // on the map is a 400, and one whose kind the person's role can't ask for is refused, recorded and sent to /denied
     // without reaching the sender, which checks the role again. Each handler sends its map entry's kind, never one from the
     // form, through RequestSender, which checks the form's key, the fresh sign-in, the typed word, the rules and both limits
-    // again, whatever the page showed. Sent redirects here with ?request=, whose box follows the request; anything else draws
-    // the page again with why, the text typed kept and the typed word not.
+    // again, whatever the page showed. Sent redirects here with ?request=, whose box follows the request; anything else is
+    // kept as a form's notice and redirects here with ?notice=, whose GET draws why, with the text typed kept and the typed
+    // word not. No answer is the page drawn on the POST, which a reload would send again.
     public sealed class ControlsModel(IBotRequestReads reads, IBotStatusReads status, IAuditLogData audit, TimeProvider time, ILogger<ControlsModel> logger)
         : PageModel
     {
@@ -81,8 +83,10 @@ namespace MinerBot.Dashboard.Pages.Admin
         // The page's kinds, for each control's last use and the box ?request= names
         internal static readonly IReadOnlyList<string> Kinds = [.. Handlers.Values.Distinct()];
 
-        // The forms whose text box goes back filled after a refusal: a pause's reason and a status text
+        // The forms whose text box goes back filled after a refusal: a pause's reason and a status text, kept in the notice
+        // under this name
         static readonly HashSet<string> WithText = new(StringComparer.Ordinal) { ControlWords.Pause, ControlWords.SetStatus };
+        const string TextBox = "text";
 
         public StatusBox Box { get; private set; } = null!;
         public IReadOnlyList<Banner> Banners { get; private set; } = [];
@@ -106,8 +110,8 @@ namespace MinerBot.Dashboard.Pages.Admin
         public string SteamState { get; private set; } = "";
         public string RestartWhen { get; private set; } = "";
 
-        // A form sent and not sent on: its handler, how the sender answered, why in its words, the request those name, and
-        // the text typed into its box
+        // A form sent and not sent on, from its notice: its handler, the key it keeps after a save the database didn't
+        // confirm, why in its words, the request those name, and the text typed into its box
         public string? Posted { get; private set; }
         public SendOutcome? Outcome { get; private set; }
         public string? Problem { get; private set; }
@@ -123,10 +127,67 @@ namespace MinerBot.Dashboard.Pages.Admin
         DateTime now;
         string role = "";
 
-        public async Task<IActionResult> OnGetAsync([FromQuery] string? request)
+        public async Task<IActionResult> OnGetAsync([FromQuery] string? request, [FromQuery] string? notice)
         {
-            // Only chooses what to show, so anything but a request's number shows nothing
-            await LoadAsync(ulong.TryParse(request, NumberStyles.None, CultureInfo.InvariantCulture, out var id) && id > 0 ? id : null);
+            // A form's notice, which draws the page as the form left it: why, the text typed, and the form's key after a save
+            // the database didn't confirm
+            var found = HttpContext.RequestServices.GetRequiredService<FormNotices>().Find(this, notice, Handlers.Keys);
+
+            if (found != null)
+            {
+                Posted = found.Form;
+                Outcome = found.Key is { } key ? new SendOutcome.Unsure(key) : null;
+                Problem = found.Words;
+                ProblemRequest = found.Request;
+                Typed = found.Kept?.GetValueOrDefault(TextBox);
+            }
+
+            try
+            {
+                // Only chooses what to show, so anything but a request's number shows nothing
+                await LoadAsync(ulong.TryParse(request, NumberStyles.None, CultureInfo.InvariantCulture, out var id) && id > 0 ? id : null);
+            }
+            // A save the database didn't confirm, which may have written the request, most often because the database stopped
+            // answering, so this page's reads fail too. Not the error page, which would say nothing was changed: why, and the
+            // form sent, alone, with its key. Anything else sent nothing, and the error page says so truly.
+            catch (DashboardUnavailableException) when (found is { Unsure: true })
+            {
+                var clock = time.GetUtcNow();
+                now = clock.UtcDateTime;
+                LoadPerson(clock);
+                Unread = Alone(found.Form);
+            }
+
+            if (found is { Unsure: true })
+            {
+                // The form sent isn't drawn again, so the words don't offer it: the sign-in passed its 15 minutes since the
+                // form was sent, or the form isn't offered at all now, as once the dashboard has started again with requests
+                // off, or the lists no longer give the person a role that can ask for it
+                Problem = Form(found.Form) switch
+                {
+                    ControlForm.NeedsFreshSignIn => RequestWords.UnsureNotFresh,
+                    ControlForm.NotOffered => RequestWords.UnsureNotOffered,
+                    _ => Problem
+                };
+
+                // Nor is a pause's or a resume's once the page's reads show posts as it would leave them, as when the bot took
+                // it meanwhile: the other one's control is drawn in its place, and the line under Posts, which only the
+                // Owner's page draws, is where to look
+                if (Unread == null && IsOwner && found.Form == (Paused ? ControlWords.Pause : ControlWords.Resume))
+                    Problem = RequestWords.UnsurePostsLine;
+            }
+            // A form sent before with other details whose form this GET doesn't draw, as a pause's once the bot has taken the
+            // first: the words name that request without offering a form below
+            else if (found is { Request: { } before } && found.Words == RequestWords.SentBefore(before) && !Drawn(found.Form))
+                Problem = RequestWords.SentBeforeNotOffered(before);
+            // Nor does a word typed wrong send the person to a box this GET doesn't draw, as once the bot has taken the pause
+            // sent after it, or the sign-in has passed its 15 minutes
+            else if (found != null && Confirmations.WordFor(Kind(found.Form)) is { } word && found.Words == RequestWords.NotConfirmed(word) && !Drawn(found.Form))
+                Problem = RequestWords.NotConfirmedNotOffered;
+
+            if (found != null)
+                RequestWords.Answer(Response, found, now);
+
             return Page();
         }
 
@@ -231,8 +292,12 @@ namespace MinerBot.Dashboard.Pages.Admin
             return FreshSignIn.Needs(kind, WithText.Contains(handler) ? "" : null) && !Fresh ? ControlForm.NeedsFreshSignIn : ControlForm.Offered;
         }
 
-        // A new key for every form on every render, refusals included, apart from the form sent when the database didn't
-        // confirm its save, which keeps the key it was sent with, so sending it again finds the first request
+        // Whether the page draws the handler's form: it's offered now, and for a pause or a resume, it's the one posts as they
+        // are now call for, unless the page draws it alone
+        bool Drawn(string handler) => Form(handler) == ControlForm.Offered && (Unread != null || handler != (Paused ? ControlWords.Pause : ControlWords.Resume));
+
+        // A new key for every form on every render, refusals included, apart from the form a notice draws after a save the
+        // database didn't confirm, which keeps the key it was sent with, so sending it again finds the first request
         public string KeyFor(string handler) => handler == Posted ? FormKeys.For(Outcome) : RequestFields.NewKey();
 
         // What was typed into the form's text box, back in it after a refusal; the typed word never is
@@ -282,43 +347,19 @@ namespace MinerBot.Dashboard.Pages.Admin
                     return BadRequest();
             }
 
-            Posted = handler;
-            Outcome = outcome;
-            Typed = argument;
-            (Problem, ProblemRequest) = outcome switch
+            // Anything else is a notice this page's GET draws, with what was typed into the text box within its limit, and
+            // nothing read after the send: a save the database didn't confirm usually leaves it down, and the GET says so
+            var text = handler switch
             {
-                SendOutcome.SentBefore before => (RequestWords.SentBefore(before.Id), before.Id),
-                SendOutcome.Refused refused => (refused.Words, refused.Waiting),
-                _ => (RequestWords.Unsure, (ulong?)null)
+                ControlWords.Pause => FormNotices.Text(argument, RequestRules.ReasonLimit),
+                ControlWords.SetStatus => FormNotices.Text(argument, RequestRules.StatusTextLimit),
+                _ => null
             };
 
-            try
+            return HttpContext.RequestServices.GetRequiredService<FormNotices>().Keep(this, FormNotice.Of(handler, outcome) with
             {
-                await LoadAsync(null);
-            }
-            // A save the database didn't confirm, which may have written the request, most often because the database stopped
-            // answering, so the reads after it fail too. Not the error page, which would say nothing was changed: why, and the
-            // form sent, alone, with its key. Anything else sent nothing, and the error page says so truly.
-            catch (DashboardUnavailableException) when (outcome is SendOutcome.Unsure)
-            {
-                var clock = time.GetUtcNow();
-                now = clock.UtcDateTime;
-                LoadPerson(clock);
-                Unread = Alone(handler);
-            }
-
-            // The sign-in passed its 15 minutes while the save was awaited, so the form sent isn't drawn again, and the words
-            // don't offer it
-            if (outcome is SendOutcome.Unsure && Form(handler) == ControlForm.NeedsFreshSignIn)
-                Problem = RequestWords.UnsureNotFresh;
-
-            // Nor is a pause's or a resume's once the page's reads show posts as it would leave them, as when the bot took it
-            // meanwhile: the other one's control is drawn in its place, and the line under Posts is where to look
-            if (outcome is SendOutcome.Unsure && Unread == null && handler == (Paused ? ControlWords.Pause : ControlWords.Resume))
-                Problem = RequestWords.UnsurePostsLine;
-
-            RequestWords.Answer(Response, outcome, now);
-            return Page();
+                Kept = text == null ? null : new Dictionary<string, string>(StringComparer.Ordinal) { [TextBox] = text }
+            });
         }
 
         // The form sent, drawn alone without the page's reads: its key kept, what was typed into its box, and, should the
@@ -388,7 +429,7 @@ namespace MinerBot.Dashboard.Pages.Admin
 
             if (request is { } named)
                 Result = await HttpContext.RequestServices.GetRequiredService<RequestBoxes>().SectionAsync(named, Kinds, null,
-                    $"{Address}?request={named.ToString(CultureInfo.InvariantCulture)}#result");
+                    RequestBoxes.CheckAgain($"{Address}?request={named.ToString(CultureInfo.InvariantCulture)}", Request.Query));
         }
     }
 }

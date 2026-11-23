@@ -4,6 +4,8 @@
     pages whose status box refreshes, through the Scripts section, so every other page needs no script, and those work
     without it: it only keeps the box current.
 *@
+@using MinerBot.Dashboard.Hosting
+@using MinerBot.Dashboard.Requests
 @{
     var user = SignedInUser.From(User);
     var role = RoleClaims.RoleOf(User);
@@ -55,6 +57,11 @@
         </div>
     </header>
     <main id="main" class="@column">
+        @* A form's notice that ?notice= names and that's gone, so the page is drawn as it is now *@
+        @if (ViewData[FormNotices.GoneKey] is true)
+        {
+            <p class="muted">@RequestWords.NoticeGone</p>
+        }
         @RenderBody()
     </main>
     <footer class="site-footer">

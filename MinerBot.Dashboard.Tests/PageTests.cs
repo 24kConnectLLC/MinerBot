@@ -90,7 +90,9 @@ namespace MinerBot.Dashboard.Tests
             await using var factory = new DashboardFactory(db);
             var anonymous = factory.Visitor();
 
-            foreach (var page in new[] { "/", "/signout", "/denied", "/error", "/nothing-here" }.Concat(Reasons.Select(reason => "/denied?reason=" + reason)))
+            // With the page a form sent after its session ended lands on
+            foreach (var page in new[] { "/", "/signout", "/denied", "/error", "/nothing-here", "/signin?ended=1&returnUrl=%2Fadmin%2Fbot%2Fcontrols" }
+                .Concat(Reasons.Select(reason => "/denied?reason=" + reason)))
                 AssertAccessible(page, await (await anonymous.Client.GetAsync(page, Token)).Content.ReadAsStringAsync(Token));
 
             // Armor with everything the review page draws: warnings to tick, a blocking problem, hidden characters, a
@@ -124,8 +126,9 @@ namespace MinerBot.Dashboard.Tests
             Assert.Equal(HttpStatusCode.Redirect, takenDown.StatusCode);
             AssertAccessible("a take-down with the cache clear's box", await owner.Client.GetStringAsync(SignInSteps.PathOf(takenDown.Headers.Location), Token));
 
-            // The page a refused action answers with. ArmorActionTests checks the one for a save that may not have landed.
-            var refused = await ArmorSteps.PostAsync(owner, 2, "Approve", await ArmorSteps.OpenAsync(owner, 2), false);
+            // The page a refused action answers with, its notice's GET. ArmorActionTests checks the one for a save that may not
+            // have landed.
+            var refused = await RequestSteps.AnsweredAsync(owner, await ArmorSteps.PostAsync(owner, 2, "Approve", await ArmorSteps.OpenAsync(owner, 2), false));
             Assert.Equal(HttpStatusCode.Conflict, refused.StatusCode);
             AssertAccessible("a refused approval", await refused.Content.ReadAsStringAsync(Token));
         }
@@ -164,24 +167,27 @@ namespace MinerBot.Dashboard.Tests
                 AssertAccessible("owner " + page, await owner.Client.GetStringAsync(page, Token));
 
             // The pages a refused action answers with: a field refused, an account already listed, a stale edit, and a stale
-            // removal of a row no account number can be; and the page a custom link's lookup answers with
-            var refusals = new (string What, Func<Task<HttpResponseMessage>> Send, HttpStatusCode Status)[]
+            // removal of a row no account number can be; and the page a custom link's lookup answers with. The add's are its
+            // notice's GET; the entry's and the list's forms draw theirs on the POST.
+            var refusals = new (string What, Func<Task<HttpResponseMessage>> Send, HttpStatusCode Status, bool Notice)[]
             {
-                ("an add refused for its SteamID", () => BlacklistSteps.AddAsync(owner, ("steamid", "not an id"), ("name", "x")), HttpStatusCode.BadRequest),
+                ("an add refused for its SteamID", () => BlacklistSteps.AddAsync(owner, ("steamid", "not an id"), ("name", "x")), HttpStatusCode.BadRequest, true),
                 ("an add whose custom link is looked up", () => BlacklistSteps.AddAsync(owner, ("steamid", "https://steamcommunity.com/id/someone"), ("name", "x"),
-                    ("formkey", Shared.Requests.RequestFields.NewKey())), HttpStatusCode.OK),
-                ("an add refused for its fields", () => BlacklistSteps.AddAsync(owner, ("steamid", "54321"), ("name", new string('n', 61)), ("expires", "1999-01-01")), HttpStatusCode.BadRequest),
-                ("an add of an account already listed", () => BlacklistSteps.AddAsync(owner, ("steamid", "12345")), HttpStatusCode.Conflict),
-                ("a stale edit", () => BlacklistSteps.EditAsync(owner, 12345, page12345, ("reason", "Stale again")), HttpStatusCode.Conflict),
-                ("an edit refused for its fields", async () => await BlacklistSteps.EditAsync(owner, 12345, await BlacklistSteps.OpenAsync(owner, 12345), ("notes", "a\tb")), HttpStatusCode.BadRequest),
+                    ("formkey", Shared.Requests.RequestFields.NewKey())), HttpStatusCode.OK, true),
+                ("an add refused for its fields", () => BlacklistSteps.AddAsync(owner, ("steamid", "54321"), ("name", new string('n', 61)), ("expires", "1999-01-01")),
+                    HttpStatusCode.BadRequest, true),
+                ("an add of an account already listed", () => BlacklistSteps.AddAsync(owner, ("steamid", "12345")), HttpStatusCode.Conflict, true),
+                ("a stale edit", () => BlacklistSteps.EditAsync(owner, 12345, page12345, ("reason", "Stale again")), HttpStatusCode.Conflict, false),
+                ("an edit refused for its fields", async () => await BlacklistSteps.EditAsync(owner, 12345, await BlacklistSteps.OpenAsync(owner, 12345), ("notes", "a\tb")),
+                    HttpStatusCode.BadRequest, false),
                 ("a stale removal of a row with no account number", () => BlacklistSteps.CraftedAsync(owner, "/admin/blacklist?handler=RemoveNumber", page12345.Token,
-                    ("number", "5000000000"), ("version", new string('a', 64))), HttpStatusCode.Conflict)
+                    ("number", "5000000000"), ("version", new string('a', 64))), HttpStatusCode.Conflict, false)
             };
 
             // One at a time, as one browser sends them
-            foreach (var (what, send, status) in refusals)
+            foreach (var (what, send, status, notice) in refusals)
             {
-                var answered = await send();
+                var answered = notice ? await RequestSteps.AnsweredAsync(owner, await send()) : await send();
                 Assert.True(answered.StatusCode == status, $"{what} answered {answered.StatusCode}");
                 AssertAccessible(what, await answered.Content.ReadAsStringAsync(Token));
             }

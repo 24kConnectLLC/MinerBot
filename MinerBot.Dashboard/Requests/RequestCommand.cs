@@ -5,9 +5,11 @@ using DataAccessLibrary;
 using DataAccessLibrary.Requests;
 using DataAccessLibrary.Requests.Models;
 using DataAccessLibrary.Status;
+using DataAccessLibrary.Status.Models;
 using Microsoft.Extensions.Options;
 using MinerBot.Dashboard.Security;
 using MinerBot.Dashboard.Settings;
+using MinerBot.Dashboard.Status;
 using MinerBot.Shared.Requests;
 using MinerBot.Shared.Steam;
 using MySql.Data.MySqlClient;
@@ -372,8 +374,10 @@ namespace MinerBot.Dashboard.Requests
         }
 
         // After a restart the bot took: true once a new run of the bot is up on Discord, which its status row says, false
-        // when none is within the limit
-        static async Task<bool> BackOnDiscordAsync(IBotStatusReads status, BotRequestRow row, TextWriter output, TimeProvider time, RequestWaits waits,
+        // when none is within the limit. Then the time it was back, as the box gives it (RequestViews.BackOnDiscord): at the
+        // bot's record of the run's first connection, read once and never waited for, or by the row's sample while that
+        // isn't written or can't be read. The exit code and request.sh's history line don't depend on which.
+        internal static async Task<bool> BackOnDiscordAsync(IBotStatusReads status, BotRequestRow row, TextWriter output, TimeProvider time, RequestWaits waits,
             CancellationToken stop)
         {
             await output.WriteLineAsync($"Waiting for the bot to be back on Discord, for up to {Span(waits.RestartLimit)}.");
@@ -386,9 +390,11 @@ namespace MinerBot.Dashboard.Requests
                     if (await status.GetStatus() is { } current && current.run_id != row.run_id && current.discord_state == DiscordState.Connected
                         && current.stopped_at == null)
                     {
-                        var after = (time.GetUtcNow().UtcDateTime - row.created_at).TotalSeconds;
-                        await output.WriteLineAsync(string.Create(CultureInfo.InvariantCulture,
-                            $"The bot is back on Discord {after:0} s after the request: its new run started at {Clock(current.started_at)} UTC."));
+                        var (at, exact) = RequestViews.BackOnDiscord(current, await ConnectedAsync(status, current));
+                        await output.WriteLineAsync(exact
+                            ? string.Create(CultureInfo.InvariantCulture,
+                                $"The bot was back on Discord at {Clock(at)} UTC, {RequestViews.SecondsAfter(row.created_at, at)} s after the request: its new run started at {Clock(current.started_at)} UTC.")
+                            : $"The bot was back on Discord by {Clock(at)} UTC: its new run started at {Clock(current.started_at)} UTC.");
                         return true;
                     }
                 }
@@ -404,6 +410,20 @@ namespace MinerBot.Dashboard.Requests
                 }
 
                 await Task.Delay(waits.RestartPoll, time, stop);
+            }
+        }
+
+        // The new run's first connection to Discord, as the bot recorded it, from the run's start on: null while it isn't
+        // written, and when MinerBot's database doesn't answer, which never turns a bot that's back into a failure
+        static async Task<BotEventRow?> ConnectedAsync(IBotStatusReads status, BotStatusRow current)
+        {
+            try
+            {
+                return await status.FirstEventAfter(EventWords.DiscordConnected, new BotEventRow { at = current.started_at });
+            }
+            catch (Exception e) when (e is DbException or TimeoutException)
+            {
+                return null;
             }
         }
 

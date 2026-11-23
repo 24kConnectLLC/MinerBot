@@ -13,6 +13,7 @@ using Microsoft.AspNetCore.Mvc.RazorPages;
 using Microsoft.Extensions.Options;
 using MinerBot.Dashboard.Audit;
 using MinerBot.Dashboard.Auth;
+using MinerBot.Dashboard.Hosting;
 using MinerBot.Dashboard.Requests;
 using MinerBot.Dashboard.Security;
 using MinerBot.Dashboard.Servers;
@@ -27,6 +28,8 @@ namespace MinerBot.Dashboard.Pages.Admin.Servers
     // it, and an ID that's neither is a 404. For a server the bot is in and Discord has, while requests are on, it asks
     // MinerBot for a test message to one of the server's chosen channels or a refresh of the copy, each sent through
     // RequestSender with the page's checks made again at the POST, and links the Owner to the page that asks it to leave.
+    // Sent redirects here with ?request=; anything else is kept as a form's notice and redirects here with ?notice=, whose
+    // GET draws why, never this page drawn on the POST, which a reload would send again.
     public sealed class ServerPageModel(IBotGuildReads guilds, IGuildSettingsReads settings, IBotStatusReads status, IAuditLogData audit,
         IBotRequestReads reads, TimeProvider time, ILogger<ServerPageModel> logger) : PageModel
     {
@@ -63,34 +66,61 @@ namespace MinerBot.Dashboard.Pages.Admin.Servers
         public bool IsOwner { get; private set; }
         public string LeaveLink => $"/admin/servers/{IdText}/leave";
 
-        // A form sent and not sent on: its handler, how the sender answered, why in its words, the request those name, and
-        // the channel it named, which stays chosen
+        // A form sent and not sent on, from its notice: its handler, the key it keeps after a save the database didn't
+        // confirm, why in its words, the request those name, and the channel it named, which stays chosen
         public string? Posted { get; private set; }
         public SendOutcome? Outcome { get; private set; }
         public string? Problem { get; private set; }
         public ulong? ProblemRequest { get; private set; }
         public ulong? PostedChannel { get; private set; }
 
+        // The channel a test message named, kept in its notice under this name, as invariant digits
+        const string ChannelBox = "channel";
+
         IReadOnlyDictionary<string, RequestView> latest = new Dictionary<string, RequestView>();
         LimitReads limits = new([], [], []);
 
-        public async Task<IActionResult> OnGetAsync(long id, [FromQuery] string? request)
+        public async Task<IActionResult> OnGetAsync(long id, [FromQuery] string? request, [FromQuery] string? notice)
         {
             // Every Discord ID is a positive long, which the route takes
             if (id <= 0 || !await LoadAsync((ulong)id))
                 return NotFound();
 
+            // A form's notice, which draws why nothing was sent, with the channel it named still chosen, and the form's key
+            // after a save the database didn't confirm
+            var found = HttpContext.RequestServices.GetRequiredService<FormNotices>().Find(this, notice, [ServerActions.TestMessage, ServerActions.Refresh]);
+
+            if (found != null)
+            {
+                Posted = found.Form;
+                Outcome = found.Key is { } key ? new SendOutcome.Unsure(key) : null;
+                Problem = found.Words;
+                ProblemRequest = found.Request;
+                PostedChannel = ulong.TryParse(found.Kept?.GetValueOrDefault(ChannelBox), NumberStyles.None, CultureInfo.InvariantCulture, out var channel) ? channel : null;
+
+                // A save the database didn't confirm, whose form this GET doesn't draw, as once MinerBot has left the server:
+                // the words don't offer it
+                if (found.Unsure && !Drawn(found.Form))
+                    Problem = RequestWords.UnsureNotOffered;
+                // Nor do a test message's, sent before to another channel, once its form has gone: they name that request
+                else if (found is { Request: { } before } && found.Words == RequestWords.SentBefore(before) && !Drawn(found.Form))
+                    Problem = RequestWords.SentBeforeNotOffered(before);
+            }
+
             // Only chooses what to show, so anything but a request's number, or one of another server or kind, shows nothing
             if (ulong.TryParse(request, NumberStyles.None, CultureInfo.InvariantCulture, out var named) && named > 0)
                 Result = await HttpContext.RequestServices.GetRequiredService<RequestBoxes>().SectionAsync(named, ServerActions.Kinds, Id,
-                    $"/admin/servers/{IdText}?request={named.ToString(CultureInfo.InvariantCulture)}#result");
+                    RequestBoxes.CheckAgain($"/admin/servers/{IdText}?request={named.ToString(CultureInfo.InvariantCulture)}", Request.Query));
+
+            if (found != null)
+                RequestWords.Answer(Response, found, Now);
 
             return Page();
         }
 
         // A test message to one of the channels the server chose, checked again against the copy and the settings as they
-        // are now: a channel that isn't one of them is a form someone made up, and one that can't take it now is refused,
-        // with the picker as it is
+        // are now: a channel that isn't one of them now, as after /admin set_channels changed them, and one that can't take
+        // it now are refused, with the picker as it is then
         public async Task<IActionResult> OnPostTestMessageAsync(long id, string? channel, string? formkey)
         {
             if (id <= 0 || !ulong.TryParse(channel, NumberStyles.None, CultureInfo.InvariantCulture, out var channelId) || channelId == 0)
@@ -99,18 +129,17 @@ namespace MinerBot.Dashboard.Pages.Admin.Servers
             if (!await LoadAsync((ulong)id))
                 return NotFound();
 
+            // Not a 400: the server can choose the channel again, after which the same form would be sent
             if (TestChannels.FirstOrDefault(chosen => chosen.Id == channelId) is not { } test)
-                return BadRequest();
-
-            PostedChannel = channelId;
+                return Refused(ServerActions.TestMessage, ServerActions.NotChosenNow, null);
 
             if (Actions is ServerActionState.NotIn or ServerActionState.Unavailable)
-                return Refused(ServerActions.TestMessage, ServerActions.NotOffered(Actions));
+                return Refused(ServerActions.TestMessage, ServerActions.NotOffered(Actions), channelId);
 
             if (test.Why is { } why)
-                return Refused(ServerActions.TestMessage, ServerActions.ChannelNotNow(why));
+                return Refused(ServerActions.TestMessage, ServerActions.ChannelNotNow(why), channelId);
 
-            return await SendAsync(ServerActions.TestMessage, new SendOrder(RequestKinds.GuildTestMessage, formkey, Id, channelId));
+            return await SendAsync(ServerActions.TestMessage, new SendOrder(RequestKinds.GuildTestMessage, formkey, Id, channelId), channelId);
         }
 
         // The bot rewrites its copy of this server from what it holds now
@@ -123,9 +152,9 @@ namespace MinerBot.Dashboard.Pages.Admin.Servers
                 return NotFound();
 
             if (Actions is ServerActionState.NotIn or ServerActionState.Unavailable)
-                return Refused(ServerActions.Refresh, ServerActions.NotOffered(Actions));
+                return Refused(ServerActions.Refresh, ServerActions.NotOffered(Actions), null);
 
-            return await SendAsync(ServerActions.Refresh, new SendOrder(RequestKinds.GuildRefresh, formkey, Id));
+            return await SendAsync(ServerActions.Refresh, new SendOrder(RequestKinds.GuildRefresh, formkey, Id), null);
         }
 
         // One action above its form: its label, what it does, the bot's limit, its last use for this server, whether one
@@ -149,11 +178,15 @@ namespace MinerBot.Dashboard.Pages.Admin.Servers
         // The leave's last use here, under the Owner's link to its page
         public RequestLine LastLeave => new(latest.GetValueOrDefault(RequestKinds.GuildLeave));
 
-        // A new key for every form on every render, refusals included, apart from the form sent when the database didn't
-        // confirm its save, which keeps the key it was sent with, so sending it again finds the first request
+        // A new key for every form on every render, refusals included, apart from the form a notice draws after a save the
+        // database didn't confirm, which keeps the key it was sent with, so sending it again finds the first request
         public string KeyFor(string handler) => handler == Posted ? FormKeys.For(Outcome) : RequestFields.NewKey();
 
-        async Task<IActionResult> SendAsync(string handler, SendOrder order)
+        // Whether the page draws the action's form: none while the actions aren't offered, and no test message while none of
+        // the channels the server chose can take one
+        bool Drawn(string handler) => Actions == ServerActionState.Offered && (handler != ServerActions.TestMessage || TestChannels.Any(channel => channel.Offered));
+
+        async Task<IActionResult> SendAsync(string handler, SendOrder order, ulong? channel)
         {
             var outcome = await HttpContext.RequestServices.GetRequiredService<RequestSender>().SendAsync(order, HttpContext);
 
@@ -170,29 +203,20 @@ namespace MinerBot.Dashboard.Pages.Admin.Servers
                     return BadRequest();
             }
 
-            Posted = handler;
-            Outcome = outcome;
-            (Problem, ProblemRequest) = outcome switch
-            {
-                SendOutcome.SentBefore before => (RequestWords.SentBefore(before.Id), before.Id),
-                SendOutcome.Refused refused => (refused.Words, refused.Waiting),
-                _ => (RequestWords.Unsure, (ulong?)null)
-            };
-
-            RequestWords.Answer(Response, outcome, Now);
-            return Page();
+            // Anything else is a notice this page's GET draws, with the channel the form named
+            return Keep(FormNotice.Of(handler, outcome) with { Kept = Kept(channel) });
         }
 
-        // The page again with why nothing was sent, before the sender, as things stand
-        PageResult Refused(string handler, string words)
-        {
-            Posted = handler;
-            Problem = words;
-            Response.StatusCode = StatusCodes.Status409Conflict;
-            return Page();
-        }
+        // Why nothing was sent, before the sender, as things stand: a notice this page's GET draws at 409
+        IActionResult Refused(string handler, string words, ulong? channel) =>
+            Keep(new FormNotice { Form = handler, Status = StatusCodes.Status409Conflict, Words = words, Kept = Kept(channel) });
 
-        // Everything the page shows, for its GET and for a form's answer that draws it again. False for a server neither the
+        IActionResult Keep(FormNotice notice) => HttpContext.RequestServices.GetRequiredService<FormNotices>().Keep(this, notice, new { id = (long)Id });
+
+        static Dictionary<string, string>? Kept(ulong? channel) =>
+            channel is { } named ? new(StringComparer.Ordinal) { [ChannelBox] = named.ToString(CultureInfo.InvariantCulture) } : null;
+
+        // Everything the page shows, for its GET, and what a form's checks read at the POST. False for a server neither the
         // copy nor the website knows.
         async Task<bool> LoadAsync(ulong id)
         {

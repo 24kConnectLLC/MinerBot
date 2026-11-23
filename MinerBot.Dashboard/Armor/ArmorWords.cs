@@ -103,10 +103,21 @@ namespace MinerBot.Dashboard.Armor
             $"MinerBot started at {since}, and no notification run since is recorded yet. Its first run after a start only notes the approved armor it finds, without posting any, so if the bot hasn't posted this armor yet, it won't, unless the armor was approved during that run. Announce now isn't offered.";
         public const string AnnounceStopped = "MinerBot is stopped. Its first notification run once it starts again only notes the approved armor it finds, without posting any, so if the bot hasn't posted this armor yet, it won't. Announce now isn't offered.";
         public const string AnnounceNotNow = "Announce now isn't offered any more, for the reason below, so nothing was sent.";
-        public const string NotApprovedNow = "This armor isn't approved now, so nothing was sent.";
+
+        // As things were when it was pressed, so it stays true on its notice's GET once the armor is approved again
+        public const string NotApprovedNow = "This armor wasn't approved when Announce now was pressed, so nothing was sent.";
+
+        // AnnounceNotNow on its notice's GET once that reason isn't drawn below, as once a notification run has started
+        // since: it's only ever for a stop or a start since the page was drawn
+        public const string AnnounceWasNotOffered = "Announce now wasn't offered any more when it was pressed, because MinerBot had stopped or started again, so nothing was sent.";
 
         public const string Changed = "This armor changed after you opened it, so nothing was done. The page now shows it as it is: look it over again before you choose.";
         public const string Blocked = "This armor can't be approved, so nothing was done. What stops it is listed under Rules, and what you can do about it under Decide.";
+
+        // Blocked on its notice's GET once nothing stops an approval, as once the other armor with the name has been taken
+        // down, or this one has been approved since: Rules lists nothing to point to then
+        public const string WasBlocked = "This armor couldn't be approved when Approve was pressed, so nothing was done. What stopped it has gone since: the page shows the armor as it is now.";
+
         public const string Unticked = "Tick each warning to show you've looked at it, then approve again. Nothing was done.";
         public const string Unsure = "The dashboard lost touch with its database while it was saving this, so it can't tell whether the change was saved. Wait a minute, then open the armor's page again to see its status. Trying again is safe: a change only applies while the armor still has the status you saw, and if this one was saved, the page says so.";
 

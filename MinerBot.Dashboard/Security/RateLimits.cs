@@ -26,7 +26,12 @@ namespace MinerBot.Dashboard.Security
 
         internal const string Rejection = "Too many requests just now. Wait a minute, then try again.";
 
-        static readonly TimeSpan Window = TimeSpan.FromMinutes(1);
+        // The error page's words for a form over the limit, at /error?failed=limit, which send the person back to the page the
+        // form came from, as ErrorResponses' words for a form that failed do
+        internal const string RejectedForm = "Too many requests came from your address just then, so that form wasn't sent and nothing was changed. Wait a minute, "
+            + "then go back to the page you sent it from and send it again there.";
+
+        internal static readonly TimeSpan Window = TimeSpan.FromMinutes(1);
 
         public static void Configure(RateLimiterOptions options)
         {
@@ -88,10 +93,20 @@ namespace MinerBot.Dashboard.Security
             return new IPAddress(bytes) + "/64";
         }
 
-        // Answered here with a body, so no status page runs back through the limiter
+        // Answered here with a body, so no status page runs back through the limiter. A form over the limit is answered
+        // with the error page by GET instead, which a reload never sends again.
         static async ValueTask OnRejectedAsync(OnRejectedContext context, CancellationToken cancellationToken)
         {
+            var request = context.HttpContext.Request;
             var response = context.HttpContext.Response;
+
+            if (!HttpMethods.IsGet(request.Method) && !HttpMethods.IsHead(request.Method))
+            {
+                response.StatusCode = StatusCodes.Status303SeeOther;
+                response.Headers.Location = request.PathBase + "/error?failed=limit";
+                return;
+            }
+
             var wait = context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter) ? retryAfter : Window;
 
             response.Headers.RetryAfter = Math.Max(1, (int)Math.Ceiling(wait.TotalSeconds)).ToString(CultureInfo.InvariantCulture);

@@ -514,5 +514,69 @@ namespace MinerBot.Dashboard.Tests
             Assert.Contains("path=/", attributes);
             Assert.DoesNotContain(attributes, attribute => attribute.StartsWith("domain", StringComparison.Ordinal));
         }
+
+        // The page a form sent after its session ended lands on, /signin?ended=1: why nothing was done, that what was typed
+        // isn't kept, and a link to sign in again, back to the page the form was on. A link, never a form, which the
+        // form-action policy would stop on its way to Discord, and no challenge, so no correlation cookie and nothing asked
+        // of Discord until the link is followed. Fails if the page draws a form or challenges, or its link doesn't come back.
+        [Fact]
+        public async Task TheEndedPageLinksOnToTheSignIn()
+        {
+            await using var factory = new DashboardFactory(await fixture.ReadyAsync());
+            var visitor = factory.Visitor("203.0.113.240");
+            var calls = factory.Discord.Calls.Count;
+
+            var ended = await visitor.Client.GetAsync("/signin?ended=1&returnUrl=%2Fadmin%2Fbot%2Fcontrols", Token);
+            var html = await ended.Content.ReadAsStringAsync(Token);
+            var text = WebUtility.HtmlDecode(html);
+
+            Assert.Equal(HttpStatusCode.OK, ended.StatusCode);
+            PageTests.AssertAccessible("the page a form sent after its session ended lands on", html);
+            Assert.Contains($"<title>{SessionWords.EndedTitle} - MinerBot dashboard</title>", text);
+            Assert.Contains($"<h1>{SessionWords.EndedTitle}</h1>", text);
+            Assert.Contains($"<p>{SessionWords.EndedNothingDone}</p>", text);
+            Assert.Contains($"<p>{SessionWords.EndedTypedNotKept}</p>", text);
+            Assert.Contains($"<a class=\"button\" href=\"/signin?returnUrl=%2Fadmin%2Fbot%2Fcontrols\">{Requests.ControlWords.SignInAgain}</a>", text);
+            Assert.DoesNotContain("<form", html, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(SetCookies(ended), cookie => cookie.StartsWith(DashboardAuth.CorrelationCookiePrefix, StringComparison.Ordinal));
+            Assert.Equal(calls, factory.Discord.Calls.Count);
+
+            // Its link starts the sign-in, which comes back to the page the form was on
+            var signIn = await SignInSteps.SignInAsync(factory, visitor, TestUsers.Owner, "/admin/bot/controls");
+            Assert.Equal(HttpStatusCode.Redirect, signIn.StatusCode);
+            Assert.Equal("/admin/bot/controls", SignInSteps.PathOf(signIn.Headers.Location));
+            Assert.Equal(HttpStatusCode.OK, (await visitor.Client.GetAsync("/admin/bot/controls", Token)).StatusCode);
+        }
+
+        // The ended page's link only ever leads back to a path on this site, and only someone not signed in sees the page:
+        // someone signed in goes straight back, as from any sign-in, and with fresh=1 still signs in again. Any other value
+        // of ended is a sign-in as before. Fails if the page is drawn for someone signed in, or its link can lead elsewhere.
+        [Fact]
+        public async Task TheEndedPageIsOnlyForSomeoneSignedOut()
+        {
+            await using var factory = new DashboardFactory(await fixture.ReadyAsync());
+            var visitor = factory.Visitor("203.0.113.241");
+
+            foreach (var elsewhere in new[] { "//evil.example", "https://evil.example", "/\\evil", "" })
+            {
+                var html = await visitor.Client.GetStringAsync("/signin?ended=1&returnUrl=" + Uri.EscapeDataString(elsewhere), Token);
+                Assert.Contains($"href=\"/signin?returnUrl=%2Fadmin\">{Requests.ControlWords.SignInAgain}</a>", html);
+            }
+
+            var other = await visitor.Client.GetAsync("/signin?ended=yes&returnUrl=%2Fadmin", Token);
+            Assert.Equal(HttpStatusCode.Redirect, other.StatusCode);
+            Assert.Equal(factory.Discord.AuthorizeEndpoint, other.Headers.Location!.GetLeftPart(UriPartial.Path));
+
+            var owner = factory.Visitor("203.0.113.242");
+            await SignInSteps.SignedInAsync(factory, owner, TestUsers.Owner);
+
+            var back = await owner.Client.GetAsync("/signin?ended=1&returnUrl=%2Fadmin%2Fbot%2Fcontrols", Token);
+            Assert.Equal(HttpStatusCode.Redirect, back.StatusCode);
+            Assert.Equal("/admin/bot/controls", SignInSteps.PathOf(back.Headers.Location));
+
+            var again = await owner.Client.GetAsync("/signin?fresh=1&ended=1&returnUrl=%2Fadmin%2Fbot%2Fcontrols", Token);
+            Assert.Equal(HttpStatusCode.Redirect, again.StatusCode);
+            Assert.Equal(factory.Discord.AuthorizeEndpoint, again.Headers.Location!.GetLeftPart(UriPartial.Path));
+        }
     }
 }

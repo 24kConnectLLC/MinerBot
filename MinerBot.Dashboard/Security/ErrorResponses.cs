@@ -2,16 +2,35 @@ using System.Text;
 using System.Text.Encodings.Web;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc.ViewFeatures;
+using MinerBot.Dashboard.Hosting;
 
 namespace MinerBot.Dashboard.Security
 {
     // The exception handler's page, written here directly rather than by running the pipeline again, so a database outage
-    // can't break the error page too. It says what to do and shows a request ID, and never anything of the exception.
+    // can't break the error page too. It says what to do and shows a request ID, and never anything of the exception. A
+    // form's failure is never answered with this page, which a reload would send again, but with a redirect to /error,
+    // whose GET says the same in the past tense with this request's ID.
     internal static class ErrorResponses
     {
         internal const string Unavailable = "The dashboard can't reach its database just now, so nothing was changed. Try again in a few minutes.";
         internal const string Failed = "Something went wrong, and nothing was changed.";
         internal const string Unreadable = "That request was too big, or couldn't be read, so nothing was changed.";
+
+        // A save the database didn't confirm, whose notice's GET can't read its session while the database stays down: the
+        // page can't tell whether it was saved
+        internal const string UnsureTitle = "Not sure it was saved";
+        internal const string UnsureUnavailable = "The dashboard lost touch with its database while it was saving this, and still can't reach it, so it can't tell "
+            + "whether it was saved. Reload this page in a few minutes, once the database answers, and look at what it shows, or at the audit log, before you "
+            + "send it again.";
+
+        // The error page's words for a form that failed, by /error?failed=. They send the person back to the page the form
+        // came from, never to the page opened anew: after a save the database didn't confirm, the form there keeps the key it
+        // was sent with, which finds the first request should it have landed, where a page opened anew draws a new key, which
+        // would send a second.
+        internal const string UnavailableAfterForm = "The dashboard couldn't reach its database when that form was sent, so nothing was changed. In a few minutes, "
+            + "go back to the page you sent it from and send it again there.";
+        internal const string FailedAfterForm = "Something went wrong when that form was sent, and nothing was changed. Go back to the page you sent it from and send it "
+            + "again there.";
 
         public static async Task WriteAsync(HttpContext context)
         {
@@ -31,9 +50,39 @@ namespace MinerBot.Dashboard.Security
             else
                 logger.LogError("Request {RequestId} failed with {Failure}", context.TraceIdentifier, Describe(failure));
 
+            var request = context.Request;
+
+            // A form that failed: the error page by GET, which is safe to reload, with this request's ID. A body that couldn't
+            // be read keeps its page, since sending it again gets the same answer.
+            if (!HttpMethods.IsGet(request.Method) && !HttpMethods.IsHead(request.Method) && failure is not BadHttpRequestException)
+            {
+                context.Response.StatusCode = StatusCodes.Status303SeeOther;
+                context.Response.Headers.Location = request.PathBase + "/error?failed=" + (failure is DashboardUnavailableException ? "database" : "error")
+                    + "&request=" + Uri.EscapeDataString(context.TraceIdentifier);
+                return;
+            }
+
+            // The GET of a save the database didn't confirm, whose notice can't be drawn while the database stays down: not
+            // "nothing was changed", which may not be true
+            if (failure is DashboardUnavailableException && IsUnsure(context))
+                (title, message) = (UnsureTitle, UnsureUnavailable);
+
             context.Response.StatusCode = status;
             context.Response.ContentType = "text/html; charset=utf-8";
             await context.Response.WriteAsync(Page(context, title, message));
+        }
+
+        // Read only, and never failing: this page must always come
+        static bool IsUnsure(HttpContext context)
+        {
+            try
+            {
+                return context.RequestServices.GetService<FormNotices>()?.IsUnsure(context) == true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
         }
 
         // The type and stack trace of each exception in the chain, but never a message, because the database driver's

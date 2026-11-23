@@ -6,11 +6,15 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc.RazorPages;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using MinerBot.Dashboard.Hosting;
+using MinerBot.Dashboard.Pages;
+using MinerBot.Dashboard.Security;
 using MinerBot.Dashboard.Settings;
 using MinerBot.Dashboard.Tests.Support;
 
@@ -330,6 +334,84 @@ namespace MinerBot.Dashboard.Tests
             {
                 DashboardFactory.DeleteFolder(keys);
             }
+        }
+
+        // A form that fails is sent to the error page with its request's ID, the one the error log has. The page shows a
+        // given ID only in the shape Kestrel makes them, which the test host's don't have: the connection's 13 characters,
+        // then the request's number on it. So a real Kestrel, on the socket as on the server, answers forms that fail, two
+        // on one connection and one on another, and the page shows each one's ID. Fails if the page refuses Kestrel's IDs,
+        // when it would show its own instead, which the log doesn't have.
+        [Fact]
+        public async Task TheErrorPageShowsTheIdKestrelGaveAFormThatFailed()
+        {
+            var token = TestContext.Current.CancellationToken;
+            var keys = DashboardFactory.NewKeysFolder();
+            using var sockets = new TestSockets();
+            var socket = sockets.PathOf("dashboard.sock");
+
+            try
+            {
+                var builder = WebApplication.CreateSlimBuilder();
+                builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Dashboard:PublicOrigin"] = DashboardFactory.PublicOrigin,
+                    ["Dashboard:KeysFolder"] = keys,
+                    ["Dashboard:UnixSocket"] = socket
+                });
+
+                builder.Services.AddOptions<DashboardOptions>().BindConfiguration(DashboardOptions.Section);
+                builder.Services.AddDashboardHosting();
+                builder.Logging.ClearProviders();
+
+                await using var app = builder.Build();
+                app.UseExceptionHandler(new ExceptionHandlerOptions { ExceptionHandler = ErrorResponses.WriteAsync, SuppressDiagnosticsCallback = _ => true });
+                app.MapPost("/database", _ => throw new DashboardUnavailableException());
+                app.MapPost("/failure", _ => throw new InvalidOperationException("A made-up failure"));
+
+                await app.StartAsync(token).WaitAsync(Limit, token);
+
+                try
+                {
+                    var answers = new List<(string Failed, string Id)>();
+
+                    using (var client = TestSockets.Client(socket))
+                    {
+                        answers.Add(await ErrorPageQueryAsync(client, "/database"));
+                        answers.Add(await ErrorPageQueryAsync(client, "/failure"));
+                    }
+
+                    using (var client = TestSockets.Client(socket))
+                        answers.Add(await ErrorPageQueryAsync(client, "/database"));
+
+                    Assert.Equal([ErrorModel.Database, ErrorModel.Failure, ErrorModel.Database], answers.Select(answer => answer.Failed));
+                    Assert.Equal(answers.Count, answers.Select(answer => answer.Id).Distinct().Count());
+
+                    foreach (var (failed, id) in answers)
+                    {
+                        var page = new ErrorModel { PageContext = new PageContext { HttpContext = new DefaultHttpContext() } };
+                        page.OnGet(failed, id);
+                        Assert.Equal(id, page.RequestId);
+                    }
+                }
+                finally
+                {
+                    await app.StopAsync(CancellationToken.None).WaitAsync(Limit, CancellationToken.None);
+                }
+            }
+            finally
+            {
+                DashboardFactory.DeleteFolder(keys);
+            }
+        }
+
+        // The error page's ?failed= and ?request= from the redirect after a form that failed, as the page's GET reads them
+        static async Task<(string Failed, string Id)> ErrorPageQueryAsync(HttpClient client, string path)
+        {
+            using var response = await client.PostAsync(path, new FormUrlEncodedContent([]), TestContext.Current.CancellationToken);
+            Assert.Equal(HttpStatusCode.SeeOther, response.StatusCode);
+
+            var query = QueryHelpers.ParseQuery(new Uri(DashboardFactory.PublicAddress, response.Headers.Location!).Query);
+            return (query["failed"].ToString(), query["request"].ToString());
         }
     }
 }

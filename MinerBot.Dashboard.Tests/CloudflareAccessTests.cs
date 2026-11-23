@@ -447,6 +447,7 @@ namespace MinerBot.Dashboard.Tests
                 await anonymous.Client.GetStringAsync("/", Token),
                 await anonymous.Client.GetStringAsync("/denied?reason=mfa", Token),
                 await anonymous.Client.GetStringAsync("/signout", Token),
+                await anonymous.Client.GetStringAsync("/signin?ended=1&returnUrl=%2Fadmin%2Fbot%2Fcontrols", Token),
                 await admin.Client.GetStringAsync("/", Token),
                 await admin.Client.GetStringAsync("/admin", Token),
                 await admin.Client.GetStringAsync("/admin/armor", Token),

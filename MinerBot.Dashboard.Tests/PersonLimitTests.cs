@@ -12,6 +12,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using MinerBot.Dashboard.Audit;
 using MinerBot.Dashboard.Auth;
+using MinerBot.Dashboard.Hosting;
 using MinerBot.Dashboard.Requests;
 using MinerBot.Dashboard.Security;
 using MinerBot.Dashboard.Tests.Support;
@@ -52,16 +53,19 @@ namespace MinerBot.Dashboard.Tests
         });
 
         // The controls page's cache-clear form, posted the number of times given at once, each with a new key, as a script
-        // can post it: how many were sent, and how many refused for a limit, which is every other answer
+        // can post it: how many were sent, and how many refused for a limit, which is every other answer. Every answer is a
+        // redirect, to the request's box once it's sent and to a form's notice when it isn't.
         static async Task<(int Sent, int Refused)> ClearsAtOnceAsync(TestBrowser browser, int forms)
         {
             var page = await RequestSteps.ControlsAsync(browser);
             var responses = await Task.WhenAll(Enumerable.Range(0, forms)
                 .Select(_ => RequestSteps.PostControlAsync(browser, ControlWords.ClearCaches, page.Token, RequestFields.NewKey())));
-            var statuses = responses.Select(response => response.StatusCode).ToList();
+            var addresses = responses.Select(response => (response.StatusCode, Address: SignInSteps.PathOf(response.Headers.Location) ?? "")).ToList();
 
-            Assert.All(statuses, status => Assert.Contains(status, new[] { HttpStatusCode.Redirect, HttpStatusCode.TooManyRequests }));
-            return (statuses.Count(status => status == HttpStatusCode.Redirect), statuses.Count(status => status == HttpStatusCode.TooManyRequests));
+            Assert.All(addresses, answer => Assert.Equal(HttpStatusCode.Redirect, answer.StatusCode));
+            Assert.All(addresses, answer => Assert.Matches("^/admin/bot/controls\\?(request=[0-9]+#result|notice=[0-9a-f]{32})$", answer.Address));
+            return (addresses.Count(answer => answer.Address.Contains("?request=", StringComparison.Ordinal)),
+                addresses.Count(answer => answer.Address.Contains("?notice=", StringComparison.Ordinal)));
         }
 
         // Each kind an Admin can ask for has its own share for each person: an Admin who has used up their 20 cache clears this
@@ -146,10 +150,13 @@ namespace MinerBot.Dashboard.Tests
             Assert.Equal("You've asked for this 10 times in the last hour, the most the dashboard sends for one person, so nothing was sent. "
                 + $"You can ask again after {RequestWords.Clock(now.AddMinutes(5))}.", refused.Words);
             Assert.Equal(StatusCodes.Status429TooManyRequests, RequestWords.Status(refused));
-            Assert.Equal(300, RequestWords.RetryAfter(refused, now));
+            Assert.Equal(300, RequestWords.RetryAfter(refused.After, now));
 
+            // The page that draws its notice later works Retry-After out from when it's drawn
+            var notice = FormNotice.Of(ControlWords.RunNotifications, refused);
             var page = new DefaultHttpContext();
-            RequestWords.Answer(page.Response, refused, now.AddSeconds(30.5));
+            RequestWords.Answer(page.Response, notice, now.AddSeconds(30.5));
+            Assert.Equal((StatusCodes.Status429TooManyRequests, now.AddMinutes(5), refused.Words), (notice.Status, notice.After, notice.Words));
             Assert.Equal((StatusCodes.Status429TooManyRequests, "270"), (page.Response.StatusCode, page.Response.Headers.RetryAfter.ToString()));
 
             var audit = Assert.Single(await RefusalsAsync(db));
@@ -374,7 +381,7 @@ namespace MinerBot.Dashboard.Tests
             var never = PersonLimits.Check(clear, unreadable, now);
             Assert.Equal((true, (DateTime?)null), (never.Reached, never.After));
             Assert.EndsWith("You can ask again later.", RequestWords.PersonLimit(never));
-            Assert.Equal(3600, RequestWords.RetryAfter(new SendOutcome.Refused(SendRefusal.PersonLimit, "", never.After), now));
+            Assert.Equal(3600, RequestWords.RetryAfter(never.After, now));
 
             // Rows older than the hour, and the sign-in alerts, count for nothing
             var old = Enumerable.Range(0, 20).Select(i => new AskedRow { kind = RequestKinds.CachesClear, created_at = now.AddHours(-1).AddSeconds(-1 - i) });

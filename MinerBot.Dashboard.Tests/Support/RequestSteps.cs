@@ -1,11 +1,16 @@
+using System.Buffers.Text;
 using System.Net;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using DataAccessLibrary.Requests.Models;
 using DataAccessLibrary.Tests.Database;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Extensions.DependencyInjection;
 using MinerBot.Dashboard.Auth;
+using MinerBot.Dashboard.Hosting;
 using MinerBot.Dashboard.Requests;
 using MinerBot.Shared.Requests;
 
@@ -197,9 +202,114 @@ namespace MinerBot.Dashboard.Tests.Support
             return SignInSteps.PostAsync(browser, "/admin/bot/controls?handler=" + handler, token, origin: DashboardFactory.PublicOrigin, fields: sent);
         }
 
+        // A form's answer when it wasn't sent on: a 302 with no body, to the page's own path with ?notice= and 32 hex digits,
+        // never the form's handler, so the address names the page, and without a fragment, so the alert at the top shows
+        // first, and the notice's cookie. The address, whose GET draws the notice.
+        public static async Task<string> NoticeOfAsync(HttpResponseMessage response)
+        {
+            Assert.True(response.StatusCode == HttpStatusCode.Redirect, $"The form answered {response.StatusCode}");
+            Assert.Empty(await response.Content.ReadAsByteArrayAsync(TestContext.Current.CancellationToken));
+
+            var location = SignInSteps.PathOf(response.Headers.Location) ?? throw new InvalidOperationException("The redirect has no Location");
+            Assert.DoesNotContain('#', location);
+            Assert.DoesNotContain("handler=", location, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(response.RequestMessage!.RequestUri!.AbsolutePath, location.Split('?')[0], ignoreCase: true);
+            Assert.Matches("^[0-9a-f]{32}$", NoticeId(location));
+            Assert.True(NoticeCookie(response) != null, "The form's answer kept no notice");
+            return location;
+        }
+
+        // The GET of a form's notice, in the same browser, as a browser follows the redirect
+        public static async Task<HttpResponseMessage> AnsweredAsync(TestBrowser browser, HttpResponseMessage response) =>
+            await browser.Client.GetAsync(await NoticeOfAsync(response), TestContext.Current.CancellationToken);
+
+        // The ID ?notice= gives, or empty
+        public static string NoticeId(string location) =>
+            QueryHelpers.ParseQuery(location.Contains('?', StringComparison.Ordinal) ? location[location.IndexOf('?', StringComparison.Ordinal)..] : "")[FormNotices.Parameter].ToString();
+
+        // The Set-Cookie that keeps a notice, or null
+        public static string? NoticeCookie(HttpResponseMessage response) =>
+            SetCookies(response).SingleOrDefault(cookie => cookie.StartsWith(DashboardAuth.NoticeCookie + "=", StringComparison.Ordinal)
+                && !cookie.StartsWith(DashboardAuth.NoticeCookie + "=;", StringComparison.Ordinal));
+
+        // Whether an answer deletes the notice's cookie, and whether it writes it at all, kept or deleted
+        public static bool DeletesNotice(HttpResponseMessage response) =>
+            SetCookies(response).Any(cookie => cookie.StartsWith(DashboardAuth.NoticeCookie + "=;", StringComparison.Ordinal));
+
+        public static bool TouchesNotice(HttpResponseMessage response) =>
+            SetCookies(response).Any(cookie => cookie.StartsWith(DashboardAuth.NoticeCookie + "=", StringComparison.Ordinal));
+
+        public static IReadOnlyList<string> SetCookies(HttpResponseMessage response) =>
+            response.Headers.TryGetValues("Set-Cookie", out var cookies) ? [.. cookies] : [];
+
+        // The notice the browser holds, opened as the app opens it: with the app's keys and the browser's session key
+        public static FormNotice OpenNotice(DashboardFactory factory, TestBrowser browser) =>
+            JsonSerializer.Deserialize<FormNotice>(NoticeJson(factory, browser)) ?? throw new InvalidOperationException("The notice holds no JSON");
+
+        // Its JSON, as the cookie carries it, encrypted
+        public static byte[] NoticeJson(DashboardFactory factory, TestBrowser browser)
+        {
+            var cookie = browser.Cookie(DashboardAuth.NoticeCookie) ?? throw new InvalidOperationException("The browser holds no notice");
+            var key = browser.SessionKey ?? throw new InvalidOperationException("The browser has no session");
+
+            return factory.Services.GetRequiredService<IDataProtectionProvider>().CreateProtector(FormNotices.Purpose).CreateProtector(key)
+                .Unprotect(Base64Url.DecodeFromChars(cookie));
+        }
+
+        // A form whose POST failed: a 303 with no body to the error page with why and the request's ID, and that page's GET,
+        // in the same browser
+        public static async Task<(HttpResponseMessage Page, string RequestId)> FailedAsync(TestBrowser browser, HttpResponseMessage response, string failed)
+        {
+            Assert.True(response.StatusCode == HttpStatusCode.SeeOther, $"The form answered {response.StatusCode}");
+            Assert.Empty(await response.Content.ReadAsByteArrayAsync(TestContext.Current.CancellationToken));
+
+            var location = SignInSteps.PathOf(response.Headers.Location) ?? "";
+            var match = Regex.Match(location, "^/error\\?failed=" + failed + "&request=(?<id>[^&#]+)$");
+            Assert.True(match.Success, $"The form was sent to {location}");
+
+            return (await browser.Client.GetAsync(location, TestContext.Current.CancellationToken), Uri.UnescapeDataString(match.Groups["id"].Value));
+        }
+
+        // Whether following the link loads the page, from a browser on the address shown, by HTML's navigate rule: a link
+        // whose URL is the document's own but for a fragment it has is a fragment navigation, which only scrolls. So it loads
+        // when it has no fragment, or differs from the address shown before the fragment. The link is decoded first, as the
+        // page writes & as &amp;.
+        public static bool LoadsAgain(string shown, string link)
+        {
+            var target = WebUtility.HtmlDecode(link);
+            return !target.Contains('#', StringComparison.Ordinal) || target.Split('#')[0] != shown.Split('#')[0];
+        }
+
+        // A page's Check again, decoded, or null for a page without one
+        public static string? CheckAgainLink(string html) => CheckAgain().Match(html) is { Success: true } match ? WebUtility.HtmlDecode(match.Groups[1].Value) : null;
+
+        // Check again as a browser without the script presses it, from the address a form's redirect leads to: that page's
+        // link has to load it again, at #result, and so does the link on the page that loads, which leads back to the
+        // redirect's address. HttpClient never sends a fragment, so each address is kept with its own.
+        public static async Task CheckAgainWalkAsync(TestBrowser browser, HttpResponseMessage sent)
+        {
+            var token = TestContext.Current.CancellationToken;
+            Assert.True(sent.StatusCode == HttpStatusCode.Redirect, $"The form answered {sent.StatusCode}");
+
+            var redirect = SignInSteps.PathOf(sent.Headers.Location) ?? throw new InvalidOperationException("The redirect has no Location");
+            Assert.EndsWith("#result", redirect, StringComparison.Ordinal);
+
+            var first = CheckAgainLink(await browser.Client.GetStringAsync(redirect, token)) ?? throw new InvalidOperationException($"{redirect} has no Check again");
+            Assert.True(LoadsAgain(redirect, first), $"Check again on {redirect} is {first}, which only scrolls");
+            Assert.EndsWith("#result", first, StringComparison.Ordinal);
+
+            var second = CheckAgainLink(await browser.Client.GetStringAsync(first, token)) ?? throw new InvalidOperationException($"{first} has no Check again");
+            Assert.True(LoadsAgain(first, second), $"Check again on {first} is {second}, which only scrolls");
+            Assert.EndsWith("#result", second, StringComparison.Ordinal);
+            Assert.Equal(redirect.Split('#')[0], second.Split('#')[0]);
+        }
+
         // A form of the controls page: the handler its action names, and its key, its first field
         [GeneratedRegex("""action="/admin/bot/controls\?handler=(?<handler>[A-Za-z]+)"[^>]*>\s*<input type="hidden" name="formkey" value="(?<key>[0-9a-f]{32})" />""")]
         private static partial Regex ControlForm();
+
+        [GeneratedRegex("""<a href="([^"]*)">Check again</a>""")]
+        private static partial Regex CheckAgain();
     }
 
     // The controls page as a browser got it: its markup, the forms' antiforgery token, and each form's key by its handler

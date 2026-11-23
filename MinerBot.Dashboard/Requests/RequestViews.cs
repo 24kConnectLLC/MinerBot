@@ -49,16 +49,20 @@ namespace MinerBot.Dashboard.Requests
     // A control's last use, for _RequestLine: never asked for when there's none
     public sealed record RequestLine(RequestView? Last);
 
-    // The box for a request a page's form just sent, at #result, which the redirect after the form leads to, with the address
-    // of the page itself for Check again, which is the next look without the script. None on a page drawn again after its
-    // form, such as the blacklist's add page, where pressing the form's button again is the next look.
+    // The box for a request a page's form just sent, at #result, which the redirect after the form leads to, with Check
+    // again, the next look without the script. On a page that names the request in ?request=, that's the page's own address
+    // with again=1 added or taken off (RequestBoxes.CheckAgain), so it never equals the address the browser shows, to which
+    // a link with a fragment only scrolls. The request's own page links its own address without a fragment, which loads.
+    // None on the blacklist's add page, whose lookup's box comes with the form: pressing Add to the blacklist again is the
+    // next look there.
     public sealed record RequestSection(RequestView View, string? CheckAgain, string Heading = "Your request");
 
     // The result box's rules, in one place so every state is tested without a database. It waits as request.sh does, with
     // the same RequestWaits: a request that's still queued past its expiry might have been taken just in time, for 20
     // seconds, and one the bot took has its kind's action limit and 30 seconds; a restart has 6 minutes to be back on
-    // Discord, since the bot may first wait for a notification run. The bot's result is its own words, never the request's
-    // text.
+    // Discord, since the bot may first wait for a notification run. When a restart was back is the bot's own record of the
+    // new run's first connection, or until that's written, the next 5-second sample after it, which says only by when. The
+    // bot's result is its own words, never the request's text.
     internal static class RequestViews
     {
         // The fragment's name, which refresh.js checks on each answer
@@ -85,7 +89,9 @@ namespace MinerBot.Dashboard.Requests
         public const string ReloadForLeave = "MinerBot's copy marks the server as left a few seconds later: reload the page then to see it.";
         public const string ReloadForCopy = "Reload the page to see the new copy.";
 
-        public static RequestView Of(RequestPageRow row, BotStatusRow? status, DateTime now, RequestWaits waits)
+        // connected is the bot's discord.connected event the box needs for a done restart, read only then: the first at or
+        // after the new run's start (RequestBoxes)
+        public static RequestView Of(RequestPageRow row, BotStatusRow? status, DateTime now, RequestWaits waits, BotEventRow? connected = null)
         {
             ArgumentNullException.ThrowIfNull(row);
             ArgumentNullException.ThrowIfNull(waits);
@@ -105,11 +111,11 @@ namespace MinerBot.Dashboard.Requests
 
                 // Ended by the bot, in its own words
                 RequestStates.Done => Ended(view with { Stage = RequestStage.Done, StageLabel = "Done", Marker = "marker-ok", Says = Answer("Done at " + When(row.ended_at), row.result) },
-                    row, kind, status, now, waits),
+                    row, kind, status, now, waits, connected),
                 RequestStates.Failed => Ended(view with { Stage = RequestStage.Failed, StageLabel = "Failed", Marker = "marker-block", Says = Answer("Failed at " + When(row.ended_at), row.result) },
-                    row, kind, status, now, waits),
+                    row, kind, status, now, waits, connected),
                 RequestStates.Unknown => Ended(view with { Stage = RequestStage.Unknown, StageLabel = "Not sure it happened", Marker = "marker-warn",
-                    Says = Answer("Not sure it happened, at " + When(row.ended_at), row.result) }, row, kind, status, now, waits),
+                    Says = Answer("Not sure it happened, at " + When(row.ended_at), row.result) }, row, kind, status, now, waits, connected),
                 RequestStates.Refused => view with { Stage = RequestStage.Refused, StageLabel = "Refused", Marker = "marker-warn", Says = Answer("Refused at " + When(row.ended_at), row.result) },
                 RequestStates.Expired => view with { Stage = RequestStage.Expired, StageLabel = "Expired", Marker = "marker-warn", Says = Answer("Expired", row.result) },
 
@@ -185,18 +191,20 @@ namespace MinerBot.Dashboard.Requests
             return view with { Stage = RequestStage.Running, StageLabel = "Running", Marker = "marker-quiet", Says = $"Taken at {Clock(claimed)}; the bot is acting on it.", Final = false };
         }
 
-        // Done, failed or not sure, with what follows: a restart that's done waits to be back on Discord, then to hear whether
-        // its direct message went, which may come from the next run; an Owner control or a sign-in alert waits to hear whether
-        // the owner's direct message went. Only the box refreshes, so the page under it still shows what was there before the
-        // bot acted: a done change to what the page shows says to reload it, on the page that sent it (OnItsOwnPage).
-        static RequestView Ended(RequestView view, RequestPageRow row, RequestKind? kind, BotStatusRow? status, DateTime now, RequestWaits waits)
+        // Done, failed or not sure, with what follows: a restart that's done waits to be back on Discord, at the time of the
+        // new run's first connection as the bot recorded it, then to hear whether its direct message went, which may come from
+        // the next run; an Owner control or a sign-in alert waits to hear whether the owner's direct message went. Only the
+        // box refreshes, so the page under it still shows what was there before the bot acted: a done change to what the page
+        // shows says to reload it, on the page that sent it (OnItsOwnPage).
+        static RequestView Ended(RequestView view, RequestPageRow row, RequestKind? kind, BotStatusRow? status, DateTime now, RequestWaits waits,
+            BotEventRow? connected)
         {
             var done = row.state == RequestStates.Done;
             (string Words, bool Final)? dm = kind != null && (kind.OwnerOnly || kind.Word == RequestKinds.OwnerSigninAlert) ? DirectMessage(row, now) : null;
             view = view with { Dm = dm?.Words, Final = dm?.Final ?? true };
 
             if (done && kind?.Word == RequestKinds.BotRestart)
-                return Back(view, row, status, now, waits);
+                return Back(view, row, status, now, waits, connected);
 
             if (done && kind?.Word == RequestKinds.GuildRefresh)
                 view = view with { Then = ReloadForCopy };
@@ -222,18 +230,19 @@ namespace MinerBot.Dashboard.Requests
             return view;
         }
 
-        // Back once the bot's status row is a new run's, up on Discord and not stopping, as request.sh tells it, with the
-        // time from when that run reached Discord, and final once the direct message is heard of. The old run sends it before
-        // it stops, but one taken off Discord, or whose message didn't end in time, is told by the new run once it's up, which
-        // can be a few seconds after its status row says so: the wait to hear counts from then. Not back 6 minutes after the
-        // bot ended the request: final, with where to look.
+        // Back once the bot's status row is a new run's, up on Discord and not stopping, as request.sh tells it, at the time
+        // BackOnDiscord gives: at the bot's record of that run's first connection, or until that's written, by the row's
+        // sample. Final once the direct message is heard of. The old run sends it before it stops, but one taken off Discord,
+        // or whose message didn't end in time, is told by the new run once it's up, which can be a few seconds after its
+        // status row says so: the wait to hear counts from the row's time, never the event's earlier one, so a message the
+        // new run sends that late still counts. Not back 6 minutes after the bot ended the request: final, with where to look.
         // The status row is the bot as it is now, while the request's own page and ?request= draw the box any time later, as
         // the audit log's link does. So past the 6 minutes the row tells how the restart went only while the new run's state
-        // on Discord dates from within them: up since then, the box gives that connection, the restart's own unless a
-        // reconnect or a later run within them took its place; in one state off Discord since then, or still the old run, it
-        // isn't back, stopped since or not. A change of state or of run since, or the stop of a run that was up, says nothing
-        // of it, so the box says where to look instead.
-        static RequestView Back(RequestView view, RequestPageRow row, BotStatusRow? status, DateTime now, RequestWaits waits)
+        // on Discord dates from within them, by the row's own time: up since then, the box gives that run's first connection,
+        // the restart's own unless a later run within them took its place; in one state off Discord since then, or still the
+        // old run, it isn't back, stopped since or not. A change of state or of run since, or the stop of a run that was up,
+        // says nothing of it, so the box says where to look instead.
+        static RequestView Back(RequestView view, RequestPageRow row, BotStatusRow? status, DateTime now, RequestWaits waits, BotEventRow? connected)
         {
             var ended = row.ended_at ?? row.claimed_at ?? row.created_at;
             var limit = ended + waits.RestartLimit;
@@ -245,13 +254,17 @@ namespace MinerBot.Dashboard.Requests
 
             if (within && status is { stopped_at: null, discord_state: DiscordState.Connected })
             {
-                var back = status.discord_since ?? status.started_at;
-                var after = row.created_at is { } created ? Math.Max(0, (long)(back - created).TotalSeconds) : 0;
-                var dm = DirectMessage(row, now, row.ended_at is { } endedAt && endedAt > back ? endedAt : back);
+                var sampled = status.discord_since ?? status.started_at;
+                var (back, exact) = BackOnDiscord(status, connected);
+                var dm = DirectMessage(row, now, row.ended_at is { } endedAt && endedAt > sampled ? endedAt : sampled);
 
                 return view with
                 {
-                    Then = string.Create(CultureInfo.InvariantCulture, $"Back on Discord at {Clock(back)}, {after} s after the request: its new run started at {Clock(status.started_at)}."),
+                    // By when, without seconds, since the sample is only the latest it can have been
+                    Then = exact
+                        ? string.Create(CultureInfo.InvariantCulture,
+                            $"Back on Discord at {Clock(back)}, {SecondsAfter(row.created_at, back)} s after the request: its new run started at {Clock(status.started_at)}.")
+                        : $"Back on Discord by {Clock(back)}: its new run started at {Clock(status.started_at)}.",
                     Dm = dm.Words,
                     Final = dm.Final,
                     Next = LaterSeconds
@@ -275,6 +288,25 @@ namespace MinerBot.Dashboard.Requests
 
             return view with { Then = "Waiting for the bot to come back on Discord.", Final = false, Next = LaterSeconds };
         }
+
+        // When a new run, whose status row says it's up on Discord, got there, for the box and request.sh alike. Exact: the
+        // bot's own record of the run's first connection, written as it happened, or the row's discord_since when that's
+        // earlier, as when the bot's 5-second sample read the connection a moment before Discord's library raised its event.
+        // Not exact, until the bot has written that record, just after the row that first says connected, or for good if it
+        // dropped it: the row's discord_since, the next sample after the connection, which says only by when it was back, or
+        // the run's start for a row without it. An event from before the run's start is an earlier run's and never counts.
+        public static (DateTime At, bool Exact) BackOnDiscord(BotStatusRow status, BotEventRow? connected)
+        {
+            ArgumentNullException.ThrowIfNull(status);
+
+            if (connected is { } first && first.at >= status.started_at)
+                return (status.discord_since is { } since && since < first.at ? since : first.at, true);
+
+            return (status.discord_since ?? status.started_at, false);
+        }
+
+        // Whole seconds from the request to the time given, never below 0, as the box and request.sh say it
+        public static long SecondsAfter(DateTime? created, DateTime at) => created is { } asked ? Math.Max(0, (long)(at - asked).TotalSeconds) : 0;
 
         // Whether the bot's direct message to the owner about it went, once the bot has had time to say, counted from when it
         // ended the request, or from the later time given

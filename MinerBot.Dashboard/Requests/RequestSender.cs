@@ -49,7 +49,7 @@ namespace MinerBot.Dashboard.Requests
     }
 
     // The key a form is drawn with: a new one for every form on every render, refusals included, since a refusal wrote
-    // nothing, apart from the form drawn again after a save the database didn't confirm, which keeps the key it was sent
+    // nothing, apart from the form a notice draws after a save the database didn't confirm, which keeps the key it was sent
     // with, so pressing it again finds the first request rather than writing a second
     internal static class FormKeys
     {

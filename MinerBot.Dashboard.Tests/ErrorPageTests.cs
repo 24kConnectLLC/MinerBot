@@ -133,7 +133,8 @@ namespace MinerBot.Dashboard.Tests
         }
 
         // A body over Kestrel's limit is the visitor's doing, so it keeps its own status with a plain page, not a 500.
-        // TestServer has no body limit, so the handler's page is checked on its own.
+        // TestServer has no body limit, so the handler's page is checked on its own, for a GET: a form's failure is sent to
+        // the error page by GET instead (FormAnswerTests).
         [Theory]
         [InlineData(nameof(BadHttpRequestException), StatusCodes.Status413PayloadTooLarge, "That request was too big")]
         [InlineData(nameof(DashboardUnavailableException), StatusCodes.Status503ServiceUnavailable, "can't reach its database")]
@@ -149,6 +150,7 @@ namespace MinerBot.Dashboard.Tests
             };
 
             var context = new DefaultHttpContext { RequestServices = new ServiceCollection().AddLogging().BuildServiceProvider() };
+            context.Request.Method = HttpMethods.Get;
             context.Response.Body = new MemoryStream();
             context.Features.Set<IExceptionHandlerFeature>(new ExceptionHandlerFeature { Error = exception, Path = "/signout" });
 
@@ -174,6 +176,7 @@ namespace MinerBot.Dashboard.Tests
                 .AddSingleton<IFileVersionProvider>(new UnreadableStylesheet())
                 .BuildServiceProvider();
             var context = new DefaultHttpContext { RequestServices = services };
+            context.Request.Method = HttpMethods.Get;
             context.Response.Body = new MemoryStream();
             context.Features.Set<IExceptionHandlerFeature>(new ExceptionHandlerFeature { Error = new UnauthorizedAccessException("marker"), Path = "/" });
 

@@ -6,8 +6,11 @@ using DataAccessLibrary.Requests.Models;
 using DataAccessLibrary.Status;
 using DataAccessLibrary.Status.Models;
 using DataAccessLibrary.Tests.Database;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Primitives;
 using MinerBot.Dashboard.Auth;
 using MinerBot.Dashboard.Requests;
 using MinerBot.Dashboard.Security;
@@ -64,7 +67,11 @@ namespace MinerBot.Dashboard.Tests
             steam_state = SteamState.LoggedOn
         };
 
-        static RequestView View(RequestPageRow row, DateTime now, BotStatusRow? status = null) => RequestViews.Of(row, status, now, RequestViews.Waits);
+        static RequestView View(RequestPageRow row, DateTime now, BotStatusRow? status = null, BotEventRow? connected = null) =>
+            RequestViews.Of(row, status, now, RequestViews.Waits, connected);
+
+        // The bot's record of a connection to Discord at noon and the seconds given, as the reads give it
+        static BotEventRow Connected(double seconds) => new() { id = 9, at = Noon.AddSeconds(seconds), kind = EventWords.DiscordConnected, level = EventLevel.Info };
 
         static Task<HttpResponseMessage> LookAsync(TestBrowser browser, ulong id) => LookAsync(browser, $"/admin/requests/{id}?handler=result");
 
@@ -140,8 +147,16 @@ namespace MinerBot.Dashboard.Tests
                 // refresh.js caps at 15 minutes
                 Assert.Equal(refreshes, html.Contains($"data-refresh-every=\"{RequestViews.SoonSeconds}\"", StringComparison.Ordinal));
 
-                // Without the script, Check again is the next look: the page's own address, a GET
+                // Without the script, Check again is the next look: the page's own address, a GET, without a fragment, which a
+                // link to the address the browser shows would only scroll to
                 Assert.Equal(refreshes, html.Contains($"<a href=\"/admin/requests/{id}\">Check again</a>", StringComparison.Ordinal));
+
+                if (RequestSteps.CheckAgainLink(html) is { } link)
+                {
+                    Assert.DoesNotContain('#', link);
+                    Assert.True(RequestSteps.LoadsAgain($"/admin/requests/{id}", link), $"Check again on request {id}'s page is {link}, which only scrolls");
+                }
+
                 PageTests.AssertAccessible($"request {id}'s page", html);
             }
         }
@@ -207,10 +222,13 @@ namespace MinerBot.Dashboard.Tests
         }
 
         // A restart that's done waits for the bot to be back on Discord: a new run, connected and not stopping, as request.sh
-        // tells it. Then it waits to hear whether its direct message went, which the new run sends once it's up when the old
-        // one couldn't, a few seconds after its status row says so: 45 seconds from when it was back, then it says what's
+        // tells it. It was back at the bot's own record of that run's first connection, exact, or until that's written, by
+        // the status row's 5-second sample, with no seconds, since that's only the latest it can have been. Then it waits to
+        // hear whether its direct message went, which the new run sends once it's up when the old one couldn't, a few seconds
+        // after its status row says so: 45 seconds from the row's time, never the record's earlier one, then it says what's
         // recorded. Not back 6 minutes after it ended, it says where to look. Fails if the box ends at once, takes the old run
-        // for the new one, or ends while it still waits to hear of the message.
+        // for the new one, says the sample's time is exact, takes an earlier run's connection, or ends while it still waits
+        // to hear of the message.
         [Fact]
         public void ARestartShowsWhenTheBotIsBack()
         {
@@ -220,28 +238,47 @@ namespace MinerBot.Dashboard.Tests
             foreach (var status in new BotStatusRow?[] { StatusRow(now), StatusRow(now, run: NewRun, discord: DiscordState.Connecting, since: 25),
                 StatusRow(now, run: NewRun, since: 25, stopped: now), null })
             {
-                var waiting = View(restart, now, status);
+                var waiting = View(restart, now, status, Connected(17));
                 Assert.Equal(("Waiting for the bot to come back on Discord.", false, 5), (waiting.Then!, waiting.Final, waiting.Next));
                 Assert.Equal("Done at 12:00:02 UTC: The bot is restarting. It's usually back on Discord within a minute.", waiting.Says);
             }
 
             var back = View(restart, now, StatusRow(now, run: NewRun, since: 20));
-            Assert.Equal("Back on Discord at 12:00:20 UTC, 20 s after the request: its new run started at 12:00:15 UTC.", back.Then);
+            Assert.Equal("Back on Discord by 12:00:20 UTC: its new run started at 12:00:15 UTC.", back.Then);
             Assert.Equal(("Waiting to hear whether the direct message to the owner went.", false, 5), (back.Dm!, back.Final, back.Next));
+
+            // At the bot's record of the new run's first connection; never an earlier run's, from before its start; and at
+            // the sample when the sample read it first
+            Assert.Equal("Back on Discord at 12:00:17 UTC, 17 s after the request: its new run started at 12:00:15 UTC.",
+                View(restart, now, StatusRow(now, run: NewRun, since: 20), Connected(17)).Then);
+            Assert.Equal(back.Then, View(restart, now, StatusRow(now, run: NewRun, since: 20), Connected(14)).Then);
+            Assert.Equal("Back on Discord at 12:00:20 UTC, 20 s after the request: its new run started at 12:00:15 UTC.",
+                View(restart, now, StatusRow(now, run: NewRun, since: 20), Connected(20.010)).Then);
+
+            // A row without a sample's time and the record: the record's time
+            var unsampled = StatusRow(now, run: NewRun, since: 20);
+            unsampled.discord_since = null;
+            Assert.Equal("Back on Discord at 12:00:17 UTC, 17 s after the request: its new run started at 12:00:15 UTC.", View(restart, now, unsampled, Connected(17)).Then);
 
             var told = View(Row(RequestKinds.BotRestart, RequestStates.Done, claimed: 1, ended: 2, result: "Restarting.", dm: RequestDmStates.Sent), now,
                 StatusRow(now, run: NewRun, since: 20));
             Assert.Equal(("The owner was sent a direct message about it.", true), (told.Dm!, told.Final));
 
-            // Back over 45 seconds after the bot ended it: the wait counts from when the new run was back
+            // Back over 45 seconds after the bot ended it: the wait counts from when the new run's status row says it was back,
+            // with the record or without it
             var slow = StatusRow(Noon.AddSeconds(70), run: NewRun, since: 65);
             var hearing = View(restart, Noon.AddSeconds(70), slow);
             Assert.Equal(("Waiting to hear whether the direct message to the owner went.", false), (hearing.Dm!, hearing.Final));
             Assert.False(View(restart, Noon.AddSeconds(65 + 45), slow).Final);
+            Assert.False(View(restart, Noon.AddSeconds(65 + 45), slow, Connected(62)).Final);
 
             var unheard = View(restart, Noon.AddSeconds(65 + 46), slow);
             Assert.Equal(("No direct message to the owner is recorded.", true), (unheard.Dm!, unheard.Final));
-            Assert.StartsWith("Back on Discord at 12:01:05 UTC, 65 s after the request", unheard.Then);
+            Assert.StartsWith("Back on Discord by 12:01:05 UTC: its new run started", unheard.Then);
+
+            var unheardExact = View(restart, Noon.AddSeconds(65 + 46), slow, Connected(62));
+            Assert.Equal(("No direct message to the owner is recorded.", true), (unheardExact.Dm!, unheardExact.Final));
+            Assert.StartsWith("Back on Discord at 12:01:02 UTC, 62 s after the request", unheardExact.Then);
 
             Assert.False(View(restart, Noon.AddSeconds(2) + TimeSpan.FromMinutes(6), StatusRow(now)).Final);
 
@@ -267,9 +304,12 @@ namespace MinerBot.Dashboard.Tests
             const string Moved = "The bot's status has changed since this restart, so it no longer shows whether and when the bot was back on Discord: the Bot page's events do.";
             const string NotBack = "The bot isn't back on Discord 6 minutes after it restarted. ./status.sh on the server says whether it runs.";
 
-            // Back 20 seconds after the request, and up on Discord since: the line it ended with on the day
+            // Back 20 seconds after the request, and up on Discord since: the line it ended with on the day, by the sample, or
+            // at the bot's record of the run's first connection
             var up = View(restart, later, StatusRow(later, run: NewRun, since: 20));
-            Assert.Equal(("Back on Discord at 12:00:20 UTC, 20 s after the request: its new run started at 12:00:15 UTC.", true), (up.Then!, up.Final));
+            Assert.Equal(("Back on Discord by 12:00:20 UTC: its new run started at 12:00:15 UTC.", true), (up.Then!, up.Final));
+            var recorded = View(restart, later, StatusRow(later, run: NewRun, since: 20), Connected(17));
+            Assert.Equal(("Back on Discord at 12:00:17 UTC, 17 s after the request: its new run started at 12:00:15 UTC.", true), (recorded.Then!, recorded.Final));
 
             // The same run reconnected an hour ago, off Discord for the last 20 seconds, or stopped an hour ago, and a later run
             // since a deploy 3 hours ago
@@ -285,6 +325,10 @@ namespace MinerBot.Dashboard.Tests
                 var box = View(restart, later, status);
                 Assert.Equal((Moved, "The owner was sent a direct message about it.", true), (box.Then!, box.Dm!, box.Final));
             }
+
+            // Whether it's within them goes by the status row's time, so the record of the run's first connection doesn't make
+            // a reconnect since the restart's own return
+            Assert.Equal(Moved, View(restart, later, reconnected, Connected(17)).Then);
 
             // Still the old run, up on Discord since before the request, stopped after it, or with a state from since, no row,
             // and a new run that hasn't been on Discord since before the 6 minutes ended, running, or stopped within them or
@@ -303,6 +347,65 @@ namespace MinerBot.Dashboard.Tests
             moment.discord_since = later.AddSeconds(-10);
             var unheard = View(Row(RequestKinds.BotRestart, RequestStates.Done, claimed: 1, ended: 2, result: "Restarting."), later, moment);
             Assert.Equal((Moved, "No direct message to the owner is recorded.", true), (unheard.Then!, unheard.Dm!, unheard.Final));
+        }
+
+        // When a new run was back on Discord, for the box and request.sh alike: the bot's record of the run's first
+        // connection, from its start on, is exact, or the sample's time when that's earlier; without one, or with an earlier
+        // run's, the sample's time, which isn't. Fails if the sample is taken as exact, or an earlier run's connection counts.
+        [Fact]
+        public void BackOnDiscordIsTheNewRunsFirstConnection()
+        {
+            // Started at 12:00:15, and sampled up on Discord at 12:00:20
+            var status = StatusRow(Noon, run: NewRun, since: 20);
+
+            Assert.Equal((Noon.AddSeconds(20), false), RequestViews.BackOnDiscord(status, null));
+            Assert.Equal((Noon.AddSeconds(20), false), RequestViews.BackOnDiscord(status, Connected(14.999)));
+            Assert.Equal((Noon.AddSeconds(15), true), RequestViews.BackOnDiscord(status, Connected(15)));
+            Assert.Equal((Noon.AddSeconds(17), true), RequestViews.BackOnDiscord(status, Connected(17)));
+            Assert.Equal((Noon.AddSeconds(20), true), RequestViews.BackOnDiscord(status, Connected(20.010)));
+
+            // A row without the sample's time: the record's, or the run's start, not exact
+            status.discord_since = null;
+            Assert.Equal((Noon.AddSeconds(17), true), RequestViews.BackOnDiscord(status, Connected(17)));
+            Assert.Equal((Noon.AddSeconds(15), false), RequestViews.BackOnDiscord(status, null));
+        }
+
+        // The box reads the bot's record of the new run's first connection only for a done restart whose status row is a new
+        // run's, up on Discord and not stopped: once, from that run's start, and through the guard, as every read. Never for
+        // the old run's row, a run that's stopped or not on Discord, no row, a restart that isn't done, or another kind. Fails
+        // if the record is read for every box, from anywhere but the run's start, or a read that fails isn't the dashboard's
+        // own answer.
+        [Fact]
+        public async Task TheConnectionIsReadOnlyForADoneRestartsNewRun()
+        {
+            var now = Noon.AddSeconds(30);
+            var restart = Row(RequestKinds.BotRestart, RequestStates.Done, claimed: 1, ended: 2, result: "Restarting.");
+
+            async Task<(RequestView View, List<BotEventRow?> Asked)> LoadAsync(RequestPageRow row, ConnectionReads reads)
+            {
+                var box = await new RequestBoxes(new OneRequest(row), reads, new StoppedClock(now), NullLogger<RequestBoxes>.Instance).LoadAsync(row.id);
+                return (box!.View, reads.Asked);
+            }
+
+            var (back, asked) = await LoadAsync(restart, new ConnectionReads(StatusRow(now, run: NewRun, since: 20), Connected(17)));
+            var from = Assert.Single(asked);
+            Assert.Equal((Noon.AddSeconds(15), 0UL), (from!.at, from.id));
+            Assert.Equal("Back on Discord at 12:00:17 UTC, 17 s after the request: its new run started at 12:00:15 UTC.", back.Then);
+
+            foreach (var (row, status) in new (RequestPageRow, BotStatusRow?)[]
+            {
+                (restart, StatusRow(now)),
+                (restart, StatusRow(now, run: NewRun, since: 20, stopped: now)),
+                (restart, StatusRow(now, run: NewRun, discord: DiscordState.Connecting, since: 25)),
+                (restart, null),
+                (Row(RequestKinds.BotRestart), StatusRow(now, run: NewRun, since: 20)),
+                (Row(RequestKinds.BotRestart, RequestStates.Failed, claimed: 1, ended: 2, result: "Failed."), StatusRow(now, run: NewRun, since: 20)),
+                (Row(RequestKinds.CachesClear), StatusRow(now, run: NewRun, since: 20)),
+                (Row(RequestKinds.CachesClear, RequestStates.Done, claimed: 1, ended: 2, result: "Cleared."), StatusRow(now, run: NewRun, since: 20))
+            })
+                Assert.Empty((await LoadAsync(row, new ConnectionReads(status, Connected(17)))).Asked);
+
+            await Assert.ThrowsAsync<DashboardUnavailableException>(() => LoadAsync(restart, new ConnectionReads(StatusRow(now, run: NewRun, since: 20), fails: true)));
         }
 
         // Only the box refreshes, so once a pause, a resume, a status text or a leave is done, the page under it still shows
@@ -358,9 +461,11 @@ namespace MinerBot.Dashboard.Tests
 
             var restart = Row(RequestKinds.BotRestart, RequestStates.Done, claimed: 1, ended: 2, result: "Restarting.");
 
-            foreach (var status in new BotStatusRow?[] { StatusRow(now), StatusRow(now, run: NewRun, since: 20) })
+            foreach (var (status, connected) in new (BotStatusRow?, BotEventRow?)[] { (StatusRow(now), null), (StatusRow(now, run: NewRun, since: 20), null),
+                (StatusRow(now, run: NewRun, since: 20), Connected(17)) })
             {
-                var box = View(restart, now, status);
+                var box = View(restart, now, status, connected);
+                Assert.NotNull(box.Then);
                 Assert.Equal(box.Then, RequestViews.OnItsOwnPage(box).Then);
             }
 
@@ -743,7 +848,7 @@ namespace MinerBot.Dashboard.Tests
             var owner = factory.Visitor("203.0.113.215");
             await SignInSteps.SignedInAsync(factory, owner, TestUsers.Owner);
 
-            var sent = await RequestSteps.PostControlAsync(owner, await RequestSteps.ControlsAsync(owner), ControlWords.ClearCaches);
+            var sent = await RequestSteps.AnsweredAsync(owner, await RequestSteps.PostControlAsync(owner, await RequestSteps.ControlsAsync(owner), ControlWords.ClearCaches));
             Assert.Contains(RequestWords.Unsure, Text(await sent.Content.ReadAsStringAsync(Token)));
             Assert.Empty(await db.SentAsync());
             var unsure = Assert.Single(await db.AuditAsync(), entry => entry.outcome == DataAccessLibrary.Audit.AuditOutcome.Unknown);
@@ -934,6 +1039,89 @@ namespace MinerBot.Dashboard.Tests
             // A page about no one server shows its kinds of any
             Assert.Equal(restart, (await boxes.SectionAsync(restart, [RequestKinds.BotRestart, RequestKinds.CachesClear], null, "/admin/bot/controls?request=1#result"))?.View.Id);
             Assert.Null(await boxes.SectionAsync(test, [RequestKinds.BotRestart, RequestKinds.CachesClear], null, "/admin/bot/controls?request=1#result"));
+        }
+
+        // Check again is the address the page builds, with again=1 added, or taken off when the page was opened with again in
+        // any letter case and with any value or none, as the app's own query reads it, and #result. So it's never the address
+        // shown. Fails if it equals that address, or keeps again once the page has it.
+        [Fact]
+        public void CheckAgainAddsOrTakesOffItsOwnParameter()
+        {
+            static QueryCollection Shown(params string[] keys) => new(keys.ToDictionary(key => key, _ => new StringValues(""), StringComparer.OrdinalIgnoreCase));
+
+            Assert.Equal("/admin/bot/controls?request=5&again=1#result", RequestBoxes.CheckAgain("/admin/bot/controls?request=5", QueryCollection.Empty));
+            Assert.Equal("/admin/bot/controls?request=5&again=1#result", RequestBoxes.CheckAgain("/admin/bot/controls?request=5", Shown("request", "notice")));
+            Assert.Equal("/admin/bot/controls?request=5#result", RequestBoxes.CheckAgain("/admin/bot/controls?request=5", Shown("request", "Again")));
+            Assert.Equal("/admin/bot/controls?request=5#result", RequestBoxes.CheckAgain("/admin/bot/controls?request=5", Shown("AGAIN")));
+
+            // The review's address as it built it, its search encoded
+            Assert.Equal("/admin/armor/82?done=approved&request=5&list=pending&q=frost%20bite&again=1#result",
+                RequestBoxes.CheckAgain("/admin/armor/82?done=approved&request=5&list=pending&q=frost%20bite", QueryCollection.Empty));
+        }
+
+        // A restart's box on the request's own page, its fragment and ?request= on the controls page reads the bot's record of
+        // the new run's first connection: by the status row's sample while only an earlier run's is there, then at the
+        // record's time once the bot has written it, late, at the next look, which a reconnect since doesn't replace. Fails if
+        // the box keeps the sample once the record is there, or takes an earlier run's connection or a reconnect for it.
+        [Fact]
+        public async Task ARestartsBoxReadsWhenTheNewRunConnected()
+        {
+            var db = await fixture.ReadyBotAsync();
+            await using var factory = new DashboardFactory(db);
+            var owner = factory.Visitor("203.0.113.215");
+            await SignInSteps.SignedInAsync(factory, owner, TestUsers.Owner);
+            var now = factory.Clock.GetUtcNow().UtcDateTime;
+
+            var restart = await RequestSteps.TakenAsync(db, factory, RequestKinds.BotRestart, now.AddSeconds(-30));
+            await RequestSteps.FinishAsync(db, restart, RequestStates.Done, "The bot is restarting. It's usually back within a minute.", now.AddSeconds(-28));
+
+            static BotEvent Connection(ulong run, uint seq, DateTime at) =>
+                new() { run_id = run, seq = seq, at = at, kind = EventWords.DiscordConnected, level = EventLevel.Info, detail = "the first connection of this run" };
+
+            var status = StatusSteps.Status(now.AddSeconds(-1));
+            (status.run_id, status.started_at, status.discord_since) = (NewRun, now.AddSeconds(-15), now.AddSeconds(-9));
+            await db.Status().SaveStatus(status);
+            await db.Status().AddEvents([Connection(Run, 1, now.AddHours(-1))]);
+
+            async Task<string[]> BoxesAsync() =>
+            [
+                Text(await owner.Client.GetStringAsync($"/admin/requests/{restart}", Token)),
+                Text(await (await LookAsync(owner, restart)).Content.ReadAsStringAsync(Token)),
+                Text(await owner.Client.GetStringAsync($"/admin/bot/controls?request={restart}", Token))
+            ];
+
+            var started = RequestWords.Clock(now.AddSeconds(-15));
+            Assert.All(await BoxesAsync(), box => Assert.Contains($"Back on Discord by {RequestWords.Clock(now.AddSeconds(-9))}: its new run started at {started}.", box));
+
+            await db.Status().AddEvents([Connection(NewRun, 1, now.AddSeconds(-13))]);
+            var exact = $"Back on Discord at {RequestWords.Clock(now.AddSeconds(-13))}, 17 s after the request: its new run started at {started}.";
+            Assert.All(await BoxesAsync(), box => Assert.Contains(exact, box));
+
+            status.discord_since = now.AddSeconds(-2);
+            await db.Status().SaveStatus(status);
+            await db.Status().AddEvents([Connection(NewRun, 2, now.AddSeconds(-3))]);
+            Assert.All(await BoxesAsync(), box => Assert.Contains(exact, box));
+        }
+
+        // The time a box is drawn at, which never moves
+        sealed class StoppedClock(DateTime now) : TimeProvider
+        {
+            public override DateTimeOffset GetUtcNow() => new(now);
+        }
+
+        // The one request a box is for, as the reads give it
+        sealed class OneRequest(RequestPageRow row) : IBotRequestReads
+        {
+            static NotSupportedException NotTheBoxs() => new("Not a read the box makes");
+
+            public Task<RequestPageRow?> GetRequestView(ulong id) => Task.FromResult<RequestPageRow?>(id == row.id ? row : null);
+            public Task<long> CountAlertsSince(DateTime since) => throw NotTheBoxs();
+            public Task<RequestPageRow?> LatestDm() => throw NotTheBoxs();
+            public Task<RequestPageRow?> LatestRefusedAlert() => throw NotTheBoxs();
+            public Task<IReadOnlyList<AskedRow>> ListAskedBy(ulong actorId, DateTime since) => throw NotTheBoxs();
+            public Task<IReadOnlyList<ClaimRow>> ListClaimsSince(DateTime since) => throw NotTheBoxs();
+            public Task<IReadOnlyList<RequestPageRow>> ListLatest(IReadOnlyCollection<string> kinds, ulong? guildId = null) => throw NotTheBoxs();
+            public Task<IReadOnlyList<WaitingRow>> ListWaiting(DateTime now) => throw NotTheBoxs();
         }
 
         // Every read fails as a database that stopped answering would

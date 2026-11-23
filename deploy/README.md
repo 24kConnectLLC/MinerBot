@@ -256,6 +256,24 @@ the container, or Compose didn't put a failed swap back. This run finishes that 
 removes the service's containers, Compose's half-made `<12 hex>_minerbot-<service>` among them (the volumes stay),
 starts it and checks that it's ready. Running it once more goes back to `:previous`.
 
+### Undoing a deploy
+
+`./rollback.sh <service>` undoes a deploy only after the deploy's swap of that service completed. Take what the deploy
+did from its log's last `RESULT` line, and from `./status.sh` once that says "Running now: nothing", never from
+`deploy.sh`'s exit code, which is 1 for a failure, a run cut off and a dropped SSH session alike. Then, by the images
+`./status.sh` shows for the container and the tags:
+
+- The container and `:current` on the deployed commit, and `:previous` on the one before: `./rollback.sh <service>`
+  puts the one before back.
+- Both still on the commit from before, since the deploy stopped before its swap or a failed swap was put back: there's
+  nothing to undo. `./rollback.sh` would put the image from before that one live, and `./status.sh --check` would stay
+  clean.
+- The container and `:current` on different commits, after a swap that was cut off or that Compose didn't put back:
+  one `./rollback.sh <service>` finishes that swap onto `:current` and moves no tag, as above. Then read `./status.sh`
+  again.
+- No container: `docker compose up -d --no-build --no-deps <service>`, which starts `:current`.
+- A rollback that landed one too far: `./rollback.sh <service>` once more goes forward again.
+
 ### The nightly check
 
 `./status.sh --check` runs at 05:47 from `/etc/cron.d/minerbot`. It reports, one line each:
@@ -584,8 +602,13 @@ each sign-in. `request.sh` sends one from the server too, for when the pages can
   prints the request's number, then the bot's answer ("Done at ...: ..."), a lookup's account number or a test
   message's ID, and the bot's settings after a pause, a resume, a status text or a restart. After a restart, it waits up
   to 6 minutes for a new run of the bot to be up on Discord: the bot writes done first, then lets a notification run the
-  schedule started meanwhile end, which takes at most 270 seconds, before it stops. It never prints the key, the
-  signature or a connection string. For `steam.lookup`, `--text` takes a custom link's name or the whole link.
+  schedule started meanwhile end, which takes at most 270 seconds, before it stops. Once the new run is up, it prints
+  "The bot was back on Discord at T UTC, N s after the request: its new run started at R UTC.", T being the bot's own
+  record of that run's first connection to Discord, or, while the bot hasn't written that record yet, "The bot was back
+  on Discord by T UTC: its new run started at R UTC.", T being the first 5-second status sample that showed it
+  connected, which says only by when. It reads that record once and never waits for it, and neither line changes the
+  exit code or the history line. It never prints the key, the signature or a connection string. For `steam.lookup`,
+  `--text` takes a custom link's name or the whole link.
 - One history line: `request  <kind>  -  <state>  request <number>`, the state being `done`, `failed`, `refused`,
   `expired`, `unknown`, `no answer` or `not sent`.
 - Exit code 0 done, and the bot back after a restart; 1 refused, failed, expired, unknown, no answer, or refused before
@@ -634,34 +657,144 @@ PR 10 adds the dashboard's pages that send requests, and the Sessions page. The 
 2. `./status.sh --check` is clean.
 
 The new right is `SELECT` on `schema_version`, which the Sessions page reads to compare the migrations MinerBot's
-database has run with the ones built into the dashboard. To undo the deploy, `./rollback.sh dashboard` puts PR 9's
-dashboard back; the right stays, unused and harmless, as a deploy keeps a previous image's rights. PR 9's dashboard
-sends no message about a sign-in, and the requests PR 10's pages left are taken or expire as usual.
+database has run with the ones built into the dashboard. To undo the deploy after its swap completed, `./rollback.sh
+dashboard` puts PR 9's dashboard back ("Undoing a deploy" says how to tell, and what to do otherwise); the right stays,
+unused and harmless, as a deploy keeps a previous image's rights. PR 9's dashboard sends no message about a sign-in,
+and the requests PR 10's pages left are taken or expire as usual. It can neither show nor undo a pause or a status text
+set from PR 10's pages, which outlast the rollback ("What to know" below).
 
 ### PR 10's live check
 
 In the owner's browser, through Cloudflare Access, with `./status.sh` over SSH, read-only, before and after. Steps 7 to
 11 need a sign-in from the last 15 minutes, all but Resume posts and Back to the default status, and the page offers one
-when it's older.
+when it's older. What a press's answer is since PR 10b, and what still needs care, is under "What to know".
 
 | # | In the browser | Look for |
 |---|---|---|
 | 0 | `./status.sh --check` | clean |
 | 1 | Sign in at https://bot.murderminershub.com/admin, signing out first if the browser is still signed in from before the deploy: a session outlasts the swap, and only a new sign-in sends the message | within about 10 seconds, a direct message "Dashboard sign-in: ... signed in as Owner ..."; no banner saying requests are off |
 | 2 | Sessions | this session, with its address and browser, marked as this one; each check OK or a note: the rights match with 15 connections and 20 seconds, the keys folder and the temporary folder writable, the structure up to date (migrations 1 to 4), Access on with fresh keys, requests on with no refusal, the last direct message sent (step 1's), the sign-in messages counted |
-| 3 | Controls | "Posts aren't paused."; "Discord shows the default status, ..."; each control's last use from PR 9's live check, by "request.sh on the server"; each one "Available now." |
+| 3 | Controls, within 15 minutes of step 1 | "Posts aren't paused."; "Discord shows the default status, ..."; each control's last use from PR 9's live check, by "request.sh on the server"; each one "Available now.". Resume isn't drawn while posts aren't paused, and a last use can be a refusal beside "Available now." |
 | 4 | Clear the caches | Queued, then "Done at ...: Cleared the armor-name and latest-maps caches." within about 5 seconds |
-| 5 | Servers, the 24kConnect server: Rewrite the copy, then Send a test message | the copy rewritten, with its count of text and announcement channels; then, to a channel the picker offers, which is one of the channels 24kConnect chose for MinerBot's posts with `/admin set_channels`, never one it didn't, so not #bot-testing unless that's one of them: done, with "Open the test message in Discord", which opens the silent "MinerBot test message" embed |
-| 6 | Blacklist, Add, with https://steamcommunity.com/id/gabelogannewell, the name "Live check" and the reason "PR 10 live check" | the page back with the boxes kept and the lookup's box saying "That link is account [U:1:22202]."; Add to the blacklist again makes entry [U:1:22202]; Remove takes it away; the audit log shows the lookup, the add and the removal |
-| 7 | Restart, the plan's check | once the sign-in is 15 minutes old, the restart section offers a sign-in again, and Sign in again with Discord brings a second sign-in message and the page back (before then the form shows at once, and Your sign-in says until when); typing `restart` and pressing Restart the bot shows Queued, "Done ...: The bot is restarting ...", then "Back on Discord at ..., N s after the request" within 2 minutes, or up to 6 when a notification run had just started, which the restart lets end; a direct message "Restart the bot, asked for on the MinerBot dashboard by ..."; Stopping and Started on the Bot page. If the bot refuses because a notification run is under way, press it again a minute later |
-| 8 | Restart again at once, typing `restart` | refused before sending: "The bot takes this at most once every 10 minutes, and last took one at ..., so nothing was sent. Try again after ...", and no new request in the audit log |
-| 9 | Pause posts with a reason, typing `pause`; once its box says to reload the page, reload it, then Resume posts | each done, with its direct message and "Reload the page to see the new settings."; the Overview's paused banner comes and goes |
-| 10 | Optional: set a status text, then Back to the default status | Discord shows each |
-| 11 | Optional: sign in from a second browser or a phone, then on the first, Sessions, End it | the second browser's next click goes to the sign-in page; Changes to sessions shows "Ended a session" |
+| 5 | Servers, the 24kConnect server: Rewrite the copy, then Send a test message to the least visible channel the picker offers | the copy rewritten, with its count of text and announcement channels; then, to a channel the picker offers, which is one of the channels 24kConnect chose for MinerBot's posts with `/admin set_channels`, never one it didn't, so not #bot-testing unless that's one of them: done, with "Open the test message in Discord", which opens the silent "MinerBot test message" embed. It's a real embed, which that channel's members see and the bot can't delete: delete it by hand through that link. Don't change `/admin set_channels` for the test: the kinds left out of it are turned off |
+| 6 | First confirm that [U:1:22202] isn't listed: search the Blacklist, or run `SELECT COUNT(*) FROM ihvph_blacklist WHERE steam_id = 22202` in the website's database, which gives 0. If it is listed, check only the lookup, and never press Remove. Then Blacklist, Add, with https://steamcommunity.com/id/gabelogannewell, the name "Live check" and the reason "PR 10 live check" | the page back with the boxes kept and the lookup's box saying "That link is account [U:1:22202]."; Add to the blacklist again makes entry [U:1:22202]; Remove, pressed straight after the add, takes it away (or give tomorrow as the end date); the audit log shows the lookup, the add and the removal. Since PR 10b, reloading the add's "already on the blacklist" answer after the removal adds nothing: it's a page of its own, not the form sent again |
+| 7 | Restart, only as "A restart from the dashboard" below says, with the owner's yes on its costs | once the sign-in is 15 minutes old and the page is loaded again, the restart section offers a sign-in again, and Sign in again with Discord brings a second sign-in message and the page back (before then the form shows at once, and Your sign-in says until when); typing `restart` and pressing Restart the bot shows Queued, "Done at ...: The bot is restarting. It's usually back within a minute.", then "Back on Discord at T, N s after the request: its new run started at R." within 2 minutes, or up to 6 when a notification run had just started, which the restart lets end, with "Back on Discord by T: ..." instead until the bot has written its record of the new run's connection, and "The owner was sent a direct message about it."; a direct message "Restart the bot, asked for on the MinerBot dashboard by ..."; Stopping and Started on the Bot page. A refusal, a failure, an expiry, "Not sure it happened", the dashboard's own "can't tell whether it was sent", "Not sure it was saved" or "Too many requests", a request still queued at the mark, or no request at all ends the step, with no second press, whatever the page says about sending it again: if nothing restarted, tell the owner approvals can resume, and to try again, start a new cycle before a later mark |
+| 8 | Only when step 7 is back, as "A restart from the dashboard" says: load `/admin/bot/controls` by a fresh GET at its bare address, and go on only with "The bot takes this again after X UTC." under Restart and "these work until Y" under Your sign-in ("Available now.", a waiting line or no line there means skip it: the press would really restart the bot). Read the server's time with `date -u`, then press Restart the bot again, typing `restart` without Enter and clicking once, before the earliest of the new run's start + 4:00, X - 1:00 and Y - 0:30 | "The bot takes this at most once every 10 minutes, and last took one at ..., so nothing was sent. Try again after ...", with no new request or audit row; nginx's access log shows the POST's 302 and the GET's 409 (copy their time, method, path and status only). The answer's address ends in `?notice=` and 32 hexadecimal digits, and Reload and Back on it send nothing. If nginx's own "The MinerBot dashboard is restarting or stopped. Try again in a minute." answers the press instead, the step ends there: never reload that page or go back to it, which sends the press again and restarts the bot once the limit has passed; close the tab, and read Restart's last use on the page opened anew. The dashboard's own error page and "Too many requests" end the step too, whatever they say about sending it again: nothing was sent, and the form sent again once the limit has passed restarts the bot. Never sign in again for this step: a new sign-in opens 15 minutes in which a press past the 10-minute limit restarts the bot. On a skip, clear the typed box and close the tab |
+| 9 | Pause posts with a reason, typing `pause`; once its box says to reload the page, reload it, then Resume posts at once | each done, with its direct message and "Reload the page to see the new settings."; the Overview's paused banner comes and goes. A pause holds the posts of every server and outlasts restarts and rollbacks, and Resume needs no fresh sign-in: the check isn't over until Controls says "Posts aren't paused." |
+| 10 | Optional: set a status text, then Back to the default status at once | Discord shows each. A status text shows in every server and outlasts restarts and rollbacks, and Back to the default needs no fresh sign-in: the check isn't over until Controls says "Discord shows the default status, ..." |
+| 11 | Optional: sign in from a second browser or a phone, then on the first, Sessions, End it | in the second browser, a link or a reload goes on to Discord's Authorize screen, where not authorizing is fine, a button that changes something or asks the bot, such as Clear the caches, lands on "Your session ended", Sign out goes to the home page, and a search or a filter seems to do nothing ("What to know"); Changes to sessions shows "Ended a session" |
 | 12 | Audit log | each request reads "Sent to the bot", with a "Bot request N" link to its page and the bot's answer there |
-| 13 | Optional, only if a pending armor should be approved, and only once the Bot page shows a notification run that started after step 7's Started event, not one the restart let end, since the bot's first run after a start only notes the approved armor it finds, and armor approved before that run is never posted: Approve it | the page says the bot was asked to clear its armor-name cache, and its box says done; Announce now posts the armor within seconds |
+| 13 | Optional, only if a pending armor that was never approved should be approved, and only once the Bot page shows a notification run that started after step 7's Started event, not one the restart let end, since the bot's first run after a start only notes the approved armor it finds, and armor approved before that run is never posted: Approve it | the page says the bot was asked to clear its armor-name cache, and its box says done; Announce now posts the armor within seconds |
 | 14 | Leave | skipped unless there's a throwaway server, as in PR 9's |
-| 15 | `./status.sh --check` | clean |
+| 15 | `./status.sh --check`, Controls, and the logs since the new run's start | clean, though it reads neither the pause nor the status text, so it proves neither undo: Controls says "Posts aren't paused." and "Discord shows the default status, ...", or `mariadb <BOT_DB from server.conf> -e "SELECT posts_paused, status_text IS NULL FROM bot_settings WHERE id = 1"` gives 0 and 1; and each of the counts below is 0 |
+
+Step 15's counts, from the new run's start, which `docker inspect -f '{{.State.StartedAt}}' minerbot-bot` gives:
+
+```bash
+docker logs --since <start> minerbot-bot 2>&1 | grep -c -E '^(warn|fail|crit): |\[General/(Warning|Error|Critical)\]'
+docker logs --since <start> minerbot-dashboard 2>&1 | grep -c -E '^(warn|fail|crit): '
+docker logs --since <start> minerbot-bot 2>&1 | grep -ci 'unhandled exception'
+docker logs --since <start> minerbot-dashboard 2>&1 | grep -ci 'unhandled exception'
+```
+
+The old run's clean stop logs a warn from RequestWorker, a crit from Worker and a `[General/Warning]` Gateway line just
+before that start. They aren't faults, and `--since` leaves them out.
+
+### A restart from the dashboard
+
+A restart costs posts, so the dashboard's Restart the bot is pressed only like this, which is how PR 10's live check
+restarted the bot. The bot's jobs, cron and nginx's log go by the server's Eastern time; the dashboard's and the
+database's times are UTC, as `date -u` gives the server's.
+
+1. **The owner's yes, on these costs:**
+   - New and updated maps, approved armor and new lobbies that come between the notification job's last read and the
+     new run's first run are never announced: the bot's first run after a start only notes what it finds.
+   - An update of a map posted since the bot's last start, still in its 24-hour cooldown, is lost, and the cooldown
+     forgotten.
+   - Everyone else who approves armor holds off too: the admins, and approvals on the website.
+   - The bot is off Discord about 2 seconds, and commands used then get no answer.
+   - A start renews the Steam token once.
+   - A lobby can be announced again.
+   - Rarely the bot doesn't come back (a deleted webhook, or Discord's API failing at the start), and it stays down
+     until the owner approves a fix, so the owner stays reachable.
+2. **Not at these times, Eastern:** 02:28 to 02:36, when cPanel's nightly update restarts MariaDB and Docker at about
+   02:31; 04:20 to 04:31, the members count and the clean-up; 05:45 to 05:58, the nightly `./status.sh --check`; and
+   11:58 to 12:02, the Steam token's renewal. In UTC that's 07:28 to 07:36, 09:20 to 09:31, 10:45 to 10:58 and 16:58 to
+   17:02 in winter, and an hour earlier in summer.
+3. **Before:** `./status.sh` shows the bot healthy, and its restart count is noted; nothing is waiting, and posts aren't
+   paused; no deploy or rollback runs; and no restart was claimed in the last 10 minutes.
+4. **Sign in fresh at A,** the time of the audit log's sign-in row. M is the first five-minute mark with M - 110 s at or
+   after A + 5:00. A restart is sent only within 15 minutes of the sign-in and once the last one is 10 minutes old, so
+   with this one claimed at A + 5:00 or later, no later press in that session can restart the bot again. In a live
+   check, if A + 14:30 leaves no room for its step 8, sign in again before pressing anything.
+5. **Between M - 150 s and M - 110 s, press Run the notification job now.** Go on only with its box Done, "The
+   notification job ran in N s." (not still running), Steam logged on, and no new failure line in the bot's log.
+6. **Press Restart the bot once,** typing `restart` without Enter, by M - 45 s and never before A + 5:00. If that moment
+   has passed, press nothing: let M's run end, and start again at 5.
+7. **Back** means all of these: the restart's row in `bot_commands` is done, with `claimed_at` set; `bot_status` is on
+   another `run_id`, connected, with `stopped_at` NULL; Steam is logged on; and the bot is healthy, with exactly one more
+   restart and a steady StartedAt. Read them from the database and with `docker inspect -f`, never a plain `docker
+   inspect`, which prints the environment, and never from a box in a hidden tab, which isn't refreshed while hidden.
+8. **If it goes wrong, never press a second time:**
+   - Refused, failed, expired, "Not sure it happened", the dashboard's own "can't tell whether it was sent", "Not sure
+     it was saved" or "Too many requests", nginx's own "restarting or stopped" page, or no request at all: the cycle
+     ends there, whatever the page says about sending it again. The bot's refusal while a notification run is under
+     way says to try again in a minute, and so does nginx's page, whose reload sends the press again, but a press a
+     minute later lands just after the mark's run, and the new run's first run only notes what it finds, which loses
+     about 4 more minutes of posts. If nothing restarted, tell the owner approvals can resume; to try again, start a
+     new cycle at 4, before a later mark.
+   - Still queued at M: press nothing, and keep approvals held until it expires or the new run's first run.
+   - Two or more restarts, or not back within 6 minutes: press nothing. Read `docker inspect -f` and the counts, and ask
+     the owner for one named command: `docker start` if it exited, `docker restart` if it hangs, `docker stop` to
+     contain a loop. For a deleted webhook, `./fill-secrets.sh` and the recreate it prints.
+   - Never `./rollback.sh bot` or a deploy: the previous image makes the same webhook call.
+   - Discord back but Steam not logged on 2 minutes after the start: tell the owner, and don't restart again.
+9. **Approvals resume** once the new run's first notification run is ok, with a NULL detail and no failure line: its
+   row in `job_runs` has the new `run_id` and started after the Started event.
+10. **The words:** Queued, then "Done at ...: The bot is restarting. It's usually back within a minute.", then "Back on
+    Discord at T, N s after the request: its new run started at R." once the bot has written its record of the new
+    run's connection, or until then "Back on Discord by T: its new run started at R.", and "The owner was sent a direct
+    message about it." PR 10's live check saw "9 s", which was the bot's next 5-second status sample: the bot was
+    connected 4.6 s after the press.
+
+### PR 10b's deploy
+
+PR 10b fixes what PR 10's live check found, in the dashboard alone: a press's answer has an address of its own, so a
+reload or Back on it doesn't send the form again ("What to know" says what still needs care); Check again loads the
+page again; a restart's box says when the bot was back by the bot's own record of its connection, and so does
+`request.sh`; and a press that would change something or ask the bot, sent after the session ended, says so. The bot
+doesn't change.
+
+1. Close every dashboard tab from before the deploy, and ask the admins to close theirs and to say no whenever the
+   browser asks to send a form again: one may hold an answer that a reload would send again, and a refused press sent
+   again acts once what refused it has gone.
+2. `./deploy.sh <commit> --only dashboard`, with the owner's go-ahead, at a quiet hour. It installs the deploy files
+   (only this README and the tests changed, and neither is installed), runs no migration, so it takes no dump, builds
+   the dashboard, checks its settings (there's no new one, so `dashboard.env` stays as it is), applies the rights,
+   which haven't changed, after their rehearsal, and swaps the dashboard. The bot isn't built or touched.
+3. `./status.sh --check` is clean.
+
+Beyond the deploy's go-ahead, there's nothing for the owner to approve. Undo it as "Undoing a deploy" says. PR 10's
+dashboard then answers a refused press, a failed one and one over the rate limit on the POST itself again, and ignores
+`?notice=` and the notice cookie, which ends within 30 minutes. Until PR 10b is deployed again, what "What to know"
+says of a press's answer doesn't hold: a reload, Back or a restored tab on any of those answers, the error page and
+"Too many requests" included, sends the form again, so open the page anew instead; Check again under a request's box
+only scrolls, so reload that page to look again; and a press after the session ended seems to do nothing, so reload
+the page. As before PR 10b, a restart's box takes T in "Back on Discord at T" from the first 5-second status sample
+that showed the bot connected, a few seconds late, and never says "by", and `request.sh` prints "The bot is back on
+Discord N s after the request: ...".
+
+### PR 10b's live check
+
+In the owner's browser, through Cloudflare Access, with `./status.sh --check` clean before and after. It costs nothing:
+the requests it sends are its cache clears and the usual message about each sign-in it needs.
+
+| # | In the browser | Look for |
+|---|---|---|
+| 1 | Controls: Clear the caches, then Check again under its box | the address gains `again=1`, nginx's access log shows a GET, and the box is drawn as it stands: once final, without Check again. If it isn't final yet, its Check again takes `again=1` off and loads the page again. The bot looks every 3 seconds, so now and then it has ended the clear before the page first shows its box, which is then final, with no Check again: press Clear the caches once more |
+| 2 | With a sign-in from the last 15 minutes, under Pause posts, the reason "Live check of PR 10b" and the word `paws`, then Pause posts | the address ends in `?notice=` and 32 hexadecimal digits; the alert reads "Type pause in the box to confirm. Nothing was sent."; the reason is back in its box, and the word's box is empty; nginx logs a POST 302, then a GET 400. Reload: the same page, with no question about sending the form again, and no request or audit row. Back: the controls page as it was before the press |
+| 3 | Sign out in a second tab, then press Clear the caches in the first | "Your session ended"; nginx logs a POST 303, then a GET 200. Its link, Sign in again with Discord, signs in, with one sign-in message, and returns to `/admin/bot/controls`. The audit log, read then, has nothing for the press: after the sign-out's "Signed out" come only that sign-in's "Signed in" and "Asked the bot to tell the owner about a sign-in", the request for its message |
+| 4 | Nothing to press | the restart's new words need no restart here: the tests cover them. The next real restart's box should say "Back on Discord at ..." with the time of the bot's `discord.connected` event for its new run |
 
 ### What to know
 
@@ -682,6 +815,60 @@ when it's older.
 - The nightly clean-up deletes a request 90 days after it was made, or after the bot ended it if that came first, so
   a row dated years ahead by a writer without the key, which the bot refuses, still goes. The dumps hold the requests,
   so a restore brings them back as they were dumped, which only each one's expiry keeps from being acted on.
+- **What a restart leaves:** the Stopping and Started events, and the owner's direct message; the channel copy
+  rewritten and the commands registered again, as at every start; on the Bot page's uptime, the restart's minute as a
+  whole minute down on Discord and Steam, since the new run's first sample replaces the old run's for that minute, until
+  a fix to the bot (PR 11); `./status.sh` showing the bot with "1 restarts" until a deploy that swaps the bot,
+  `./rollback.sh bot` or setup's recreate makes a new container, which isn't a fault, as `--check` doesn't read it;
+  possibly a lobby announced again or one missed, which nothing records; and the maps' cooldown forgotten.
+- **A pause or a status text outlasts a rollback,** and every restart, since both are kept in `bot_settings`, and a
+  dashboard from before PR 10 can neither show nor undo either. After any rollback, read `mariadb <BOT_DB from
+  server.conf> -e "SELECT posts_paused, status_text IS NULL FROM bot_settings WHERE id = 1"`: 0 and 1, or no row, mean
+  posts aren't paused and Discord shows the default status. Otherwise, unless the owner wants it kept, and with their
+  yes: `./request.sh posts.resume`, or `./request.sh status.set` with no text. Never restart or redeploy the bot while
+  posts are paused: that loses what the pause holds.
+- **A press's answer has an address of its own** since PR 10b. Controls, a server's page and its leave, the armor
+  review and the blacklist's add page answer a press with a redirect, but for a form that had expired, was incomplete
+  or names something that's gone, which gets the same answer however often it's sent: a press that was sent or done
+  goes on to a page that shows it, as before, and one that was refused, or whose save wasn't confirmed, to the page's
+  own address with `?notice=` and 32 hexadecimal digits. Reload, Back and a restored tab fetch that page again and send
+  nothing. Its message is kept for 30 minutes, in that browser's session, in an encrypted cookie, never in the
+  address. There's one at a time: a later press, in any tab, answered at such an address, a blacklist lookup included,
+  replaces it. After its 30 minutes, after a sign-in again, or once it's replaced, the address shows the page as it is
+  now, with the line "The message this address showed after a form isn't kept any more, so this is the page as it is
+  now." Check again loads the page again: its address gains or loses `again=1`. A press that
+  would change something or ask the bot, after the session ended, lands on "Your session ended", which says nothing was
+  changed or sent and that what was typed isn't kept, and whose link signs in again and comes back to the page. A press
+  that fails is redirected to the error page, which says nothing was changed and to go back to the page it was sent
+  from and send it again there, and one over the rate limit to its "Too many requests", which within the same minute
+  is only "Too many requests just now. Wait a minute, then try again.": a reload of either sends nothing. Going back
+  matters after a request whose save wasn't confirmed: the page it was sent from keeps the form's key, which finds that
+  request if it landed, where a page opened anew draws a new key, which would send a second. What still needs care:
+  - a tab left open from before PR 10b's deploy, which may hold an answer that a reload sends again, and a refused press
+    sent again acts once what refused it has gone, even in a later session: close it, as the admins should theirs;
+  - the Sessions page's End and End every other session, a blacklist entry's Save and Remove from the blacklist, and the
+    blacklist's Remove for a row with no Steam account number, which still draw a refusal, or a save that wasn't
+    confirmed, on the POST, as before PR 10b: Back to such an answer or a reload of it may bring the browser's question
+    about sending the form again, and sending it acts as a new press would, though on the blacklist only while the
+    entry, or the row, is still as it was when the form was drawn. Say no, and open the page anew;
+  - the dashboard's Cloudflare Access check answering a press in plain text, "Cloudflare Access couldn't be checked
+    just now, ..." or "... this request didn't come through it. ...", which a reload sends again: open the page anew;
+  - nginx's own plain "The MinerBot dashboard is restarting or stopped. Try again in a minute." answering a press,
+    while the dashboard is stopped or restarting, as during a deploy's swap, or hasn't answered within 60 seconds,
+    or an error page of Cloudflare's own: the press may have been sent, refused or never read, and a reload of that
+    page, or Back to it, sends it again. Close the tab, and on the page opened anew read the control's last use or
+    the audit log before pressing again; never press Restart again a minute later, as "A restart from the dashboard"
+    says;
+  - an ended Cloudflare Access session, after its 24 hours, which makes a press seem to do nothing: reload the page;
+  - a search or a filter sent after the session ended, on the armor list, the blacklist, the audit log or the Bot
+    page's events, which in Chrome still seems to do nothing, since the browser stops a form's redirect on to Discord:
+    reload the page, which goes on to the sign-in.
+
+  Before sending anything again after an answer that isn't clear, read the control's last use or the audit log. While
+  the database stays down, a save it didn't confirm shows "Not sure it was saved", and a press that failed gets an
+  error page whose only advice is "Try again in a few minutes.": reload it once the database answers, and it then says
+  to go back to the page the form was sent from and send it again there, rather than open that page anew. Keep to one
+  or two tabs: each address gets 60 requests a minute, the boxes' refreshes included.
 
 ## Rules for every script
 
