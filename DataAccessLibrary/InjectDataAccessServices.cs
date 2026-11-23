@@ -4,6 +4,7 @@ using DataAccessLibrary.Audit;
 using DataAccessLibrary.Blacklist;
 using DataAccessLibrary.Dashboard;
 using DataAccessLibrary.Discord;
+using DataAccessLibrary.Feed;
 using DataAccessLibrary.Guilds;
 using DataAccessLibrary.Health;
 using DataAccessLibrary.Requests;
@@ -22,6 +23,7 @@ namespace DataAccessLibrary
                 { DBConnectionName.Armor,  configuration.GetConnectionString("DefaultConnection")},
                 { DBConnectionName.Blacklist, configuration.GetConnectionString("DefaultConnection") },
                 { DBConnectionName.Guild, configuration.GetConnectionString("DefaultConnection") },
+                { DBConnectionName.Feed, configuration.GetConnectionString("DefaultConnection") },
                 // MinerBot's own database, where the bot records its status and history. It may be missing: the bot then
                 // records nothing and runs on, and only a call that needs it fails.
                 { DBConnectionName.Bot, configuration.GetConnectionString("BotConnection") ?? "" }
@@ -133,6 +135,13 @@ namespace DataAccessLibrary
         public static IServiceCollection AddBotRequestAccess(this IServiceCollection services)
         {
             services.AddTransient<IBotRequestData, BotRequestData>();
+            return services;
+        }
+
+        // The open lobbies and the latest maps the bot writes for the website's pages, in the website's database
+        public static IServiceCollection AddWebsiteFeedAccess(this IServiceCollection services)
+        {
+            services.AddTransient<IWebsiteFeedData, WebsiteFeedData>();
             return services;
         }
 

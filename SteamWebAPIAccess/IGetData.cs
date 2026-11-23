@@ -16,10 +16,17 @@ namespace SteamWebAPIAccess
         void Disconnect();
         Task<string> GetAndCreateLobby();
         Task<string> GetInviteLink(uint lobbyID);
-        Task<List<PublishedFileDetailsModel>> GetLatestWorkshopItems(int numPerPage);
+
+        // The latest public maps, from at most maxPages pages of Steam's list: three unless the caller says otherwise
+        Task<List<PublishedFileDetailsModel>> GetLatestWorkshopItems(int numPerPage, int maxPages = GetData.MaxQueryPages);
+
         Task<string> GetLobbyData(ulong lobbyID);
         Task<PlayerSummaryModel?> GetPlayerSummaries(ulong steamid);
-        Task<LobbyListResult> GetServerList();
+
+        // The open public lobbies. frequent is for a caller that reads them far more often than every 5 minutes: its
+        // failed reads write their line once every 5 minutes, not every time.
+        Task<LobbyListResult> GetServerList(bool frequent = false);
+
         ulong GetSteamID3To64(uint steamID3);
         Task<List<SteamMatchmaking.Lobby.Member>> GetUsersInLobby(ulong lobbyID);
         Task<PublishedFileDetailsModel?> GetWorkshopItem(ulong id);

@@ -5,6 +5,7 @@ using DataAccessLibrary.Audit;
 using DataAccessLibrary.Blacklist;
 using DataAccessLibrary.Dashboard;
 using DataAccessLibrary.Discord;
+using DataAccessLibrary.Feed;
 using DataAccessLibrary.Guilds;
 using DataAccessLibrary.Migrations;
 using DataAccessLibrary.Requests;
@@ -22,7 +23,7 @@ namespace DataAccessLibrary.Tests.Database
     // One MariaDB 11.4 in Docker for the whole run, with a website database and MinerBot's own, as on the server but with
     // made-up names. The website's tables are built from docs/schema/wordpress-tables.sql, and MinerBot's database is
     // migrated. The tests use a login with the bot's rights: everything in MinerBot's database, and only reading and
-    // changing rows in the three website tables.
+    // changing rows in the website tables the bot uses, the three of the website feed among them.
     // Starting never throws, because a fixture that throws fails every test instead of letting them skip, so each test
     // calls Require first.
     public sealed class MariaDbFixture : IAsyncLifetime
@@ -33,6 +34,11 @@ namespace DataAccessLibrary.Tests.Database
         public const string ArmorTable = SiteDatabase + ".ihvph_armor_styles";
         public const string BlacklistTable = SiteDatabase + ".ihvph_blacklist";
         public const string GuildTable = SiteDatabase + ".ihvph_discord_servers";
+
+        // The website feed's tables, which the website makes and the bot writes
+        public const string FeedLobbyTable = SiteDatabase + ".mmh_feed_lobbies";
+        public const string FeedMapTable = SiteDatabase + ".mmh_feed_maps";
+        public const string FeedStateTable = SiteDatabase + ".mmh_feed_state";
         public const string AuditTable = BotDatabase + ".audit_log";
         public const string ReviewTable = BotDatabase + ".armor_reviews";
         public const string SessionTable = BotDatabase + ".dashboard_sessions";
@@ -59,7 +65,7 @@ namespace DataAccessLibrary.Tests.Database
         const string Image = "mariadb:11.4";
         const string TestLogin = "minerbot_test";
 
-        static readonly string[] WebsiteTables = ["ihvph_armor_styles", "ihvph_blacklist", "ihvph_discord_servers"];
+        static readonly string[] WebsiteTables = ["ihvph_armor_styles", "ihvph_blacklist", "ihvph_discord_servers", "mmh_feed_lobbies", "mmh_feed_maps", "mmh_feed_state"];
 
         static readonly TimeSpan StartLimit = TimeSpan.FromMinutes(3);
         static readonly TimeSpan CallLimit = TimeSpan.FromSeconds(30);
@@ -135,6 +141,7 @@ namespace DataAccessLibrary.Tests.Database
         public BotGuildData BotGuilds() => new(Factory, Names);
         public BlacklistData Blacklist() => new(Factory);
         public GuildData Guilds() => new(Factory);
+        public WebsiteFeedData Feed() => new(Factory);
         public BotRequestData Requests() => new(Factory, Names);
 
         // The dashboard's reads of what the bot writes, and of the website's settings
@@ -253,6 +260,7 @@ namespace DataAccessLibrary.Tests.Database
                 [DBConnectionName.Armor] = SiteConnection,
                 [DBConnectionName.Blacklist] = SiteConnection,
                 [DBConnectionName.Guild] = SiteConnection,
+                [DBConnectionName.Feed] = SiteConnection,
                 [DBConnectionName.Bot] = BotConnection
             };
 

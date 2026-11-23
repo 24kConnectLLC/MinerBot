@@ -14,6 +14,7 @@ MinerBot 2.0 uses modern **Slash Commands** to streamline your Murder Miners com
 - Armor catalog: list + lookup
 - Workshop maps: latest + lookup
 - Public lobby discovery
+- A feed of the open lobbies and the latest maps for the website's pages
 - Steam profile utilities (SteamID conversions)
 - Admin tools: announcements + channel setup
 
@@ -151,7 +152,7 @@ Create an `appsettings.json` file and fill in your credentials:
 }
 ```
 
-`DefaultConnection` is the website's database, which holds the armor, the blacklist and each server's channels. `BotConnection` is MinerBot's own database, which the web dashboard uses and where the bot records its status and history and keeps a copy of its servers ([Status and history](#-status-and-history)). It can be left out: the bot then runs and posts as before, records nothing, and says so once in its log as it starts. Both end in `CharSet=utf8mb4`, the tables' own character set: without it, MySql.Data sends text in the server's default character set, which can turn an emoji into a question mark.
+`DefaultConnection` is the website's database, which holds the armor, the blacklist and each server's channels, and the tables of the [website feed](#-website-feed). `BotConnection` is MinerBot's own database, which the web dashboard uses and where the bot records its status and history and keeps a copy of its servers ([Status and history](#-status-and-history)). It can be left out: the bot then runs and posts as before, records nothing, and says so once in its log as it starts. Both end in `CharSet=utf8mb4`, the tables' own character set: without it, MySql.Data sends text in the server's default character set, which can turn an emoji into a question mark.
 
 The dashboard writes its audit and review rows in the same transaction as the website change they record, on the website's connection. So the login in `DefaultConnection` also needs `INSERT` on MinerBot's `audit_log` and `armor_reviews` tables, or both strings can use one login with rights on both databases.
 
@@ -263,6 +264,22 @@ Each request is signed with a key only the two apps hold, `REQUEST_SIGNING_KEY` 
 | `owner.signin_alert` | Sends the owner a direct message about a dashboard sign-in, with no address | Owner, Admin | 20 an hour | 10 minutes |
 
 A request the bot hasn't taken by its time expires, and one it takes ends within a minute at most. The pause and the status text are kept in `bot_settings`, which only the bot writes, so a restart keeps both: while the bot hasn't read whether posts are paused, as just after a start, and for as long as MinerBot's database doesn't answer then, its posts wait. What a paused run found is kept only in memory, though, so a restart during a pause loses it, as a restart loses any post not yet sent. A map that waited is posted only if the first run that posts still finds it within the three pages of Steam's latest list a read takes, so a long pause through a busy spell of map updates can lose the oldest, as can a long start while MinerBot's database doesn't answer: that run's detail on the Bot page says how many.
+
+---
+
+## 🌐 Website feed
+
+The website's Lobbies and Maps pages can't ask Steam themselves, so the bot writes what it reads from Steam into three tables of the website's database, on `DefaultConnection`. The website makes the tables, in its own migration, and only reads them; the bot only writes their rows, and never makes or changes a table. [`docs/schema/wordpress-tables.sql`](docs/schema/wordpress-tables.sql) has their structure. Every time in them is UTC, in whole seconds.
+
+- `mmh_feed_lobbies`: the public lobbies that are open right now, read every 30 seconds: every lobby `/murder-miners lobbies` would list, on every game version. Each answer from Steam replaces the whole set in one transaction: a lobby that's still open keeps its `first_seen` and takes everything else from the answer, a new one is added, and one that closed is deleted. `host_name` is the name the bot's own list shows, `Gamenight` or `Official` for a lobby of the game's own host, and `host_kind` says which it is: `player`, `gamenight` or `official`, so a player who took one of those names is still a `player`. Where the list would say Host Unknown, Map Unknown or Modes Unknown, `host_name`, `map_name` and `modes` are empty, and `modes` is never a guess. `version_label` is the branch's name, such as `Update 41`, when the version is a branch's own, and empty otherwise; `is_current` is 1 on the version the bot counts as the game's current one.
+- `mmh_feed_maps`: Steam's latest public maps, new or updated, about 30 of them every 5 minutes, one row a map. A map that's read again keeps its `first_seen` and takes everything else from Steam. A map that was hidden or removed on Steam since the last good read is deleted: a row that read held, that this one doesn't, and whose `time_updated` is no earlier than this read reaches down Steam's list, which is the newest update among its last three maps. Every other row stays, as the page's history. Steam's list is ordered by last update, but not exactly by `time_updated`: now and then it ranks a map far above its place, so the rule never goes by a read's oldest map, and never touches a row the last read didn't hold. The price is that a hidden map among a read's last two stays. `description` is plain text: Steam's BBCode is taken out as for the bot's map embeds, nothing is escaped, and it's cut at 2,000 characters; a map without one has `NULL`. `tags` are separated by commas, without spaces around them. `time_created` and `time_updated` are Steam's own, and `first_seen` and `last_seen` the bot's.
+- `mmh_feed_state`: one row for each feed, `lobbies` and `maps`. `checked_at` is when the bot last tried, `ok_at` when it last got an answer from Steam and wrote it, and `item_count` how many rows that wrote. A read where Steam gave no answer changes no lobby or map, only `checked_at`, so a page can tell a feed that's behind from an empty one.
+
+The feed is no Discord post, so pausing the bot's posts ([Requests to the bot](#-requests-to-the-bot)) doesn't pause it, and it shares nothing with the notification job: it reads Steam itself and keeps no list of what it has seen. It isn't a scheduled job either, so it has no rows in `job_runs`. It reads the lobby list ten times as often as the notification job, so the line a failed read of it writes to the log comes once every 5 minutes for the feed's reads, not at each one.
+
+Nothing else the bot does depends on it. While the website's database is down, the tables aren't made yet, or the bot's login lacks a right on them, the bot runs as ever and each feed logs one warning with MariaDB's error number, 1146 for a missing table and 1142 for a missing right, then tries again after 30 seconds, then less often, up to every 5 minutes, and logs one line when its writes go through again. So the bot can be deployed before the website has made the tables, and starts writing within 5 minutes of them being there, without a restart.
+
+The bot's website login, the one in `DefaultConnection`, needs `SELECT`, `INSERT`, `UPDATE` and `DELETE` on the three tables, and nothing else for the feed. Where it holds rights table by table, they're given once, as root, after the website has made the tables, since MariaDB refuses a right on a table that doesn't exist yet. [`deploy/README.md`](deploy/README.md) has the statements.
 
 ---
 
@@ -390,6 +407,7 @@ The direct message arrives only if that user shares a server with the bot and ac
 - **Database connection issues**
   - Verify host/port/credentials in `DefaultConnection`.
   - For the bot's status and history and its copy of the servers only, the same in `BotConnection`: the bot's log has one warning for each when its writes start failing, with the error's number.
+  - For the website's Lobbies and Maps pages only: the bot's log has one warning for each feed when its writes start failing, with the error's number and what it means ([Website feed](#-website-feed)).
 
 - **Steam features not working**
   - Verify `STEAMWEB_KEY` (and publisher keys if applicable).
@@ -415,7 +433,7 @@ Contributions are welcome!
 - `MinerBot.Shared`: rules and formats that the bot and the dashboard share, such as the armor approval rules, SteamID formats, Discord's limits, and the list of requests to the bot with its signing code. It references nothing outside .NET.
 - `MinerBot.Dashboard`: the web dashboard. It references `DataAccessLibrary` and `MinerBot.Shared`, and nothing of the bot's or of Steam's.
 - `MinerBot.Tests`, `SteamWebAPIAccess.Tests`, `DataAccessLibrary.Tests`, `MinerBot.Shared.Tests` and `MinerBot.Dashboard.Tests`: the tests.
-- `docs/schema/wordpress-tables.sql`: the structure of the three website tables MinerBot uses.
+- `docs/schema/wordpress-tables.sql`: the structure of the website tables MinerBot uses: the armor, the blacklist, each server's channels, and the three tables of the website feed.
 
 ### Tests
 

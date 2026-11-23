@@ -158,6 +158,46 @@ namespace SteamWebAPIAccess.Tests
             Assert.Equal([Query, Query, Query, Details], Calls);
         }
 
+        // The website feed asks for more maps than three pages may hold, and says how many pages its read may take. The
+        // pages are still twenty items each, and the details still come from one call.
+        [Fact]
+        public async Task ReadTakesAsManyPagesAsItsCallerAllows()
+        {
+            var ids = Enumerable.Range(0, 5).Select(page => 500ul - (ulong)page * 100).ToList();
+
+            foreach (var id in ids)
+                web.Answer(HttpStatusCode.OK, Page(null, Item(id, 0), Item(id + 1, 2)));
+
+            web.Answer(HttpStatusCode.OK, DetailsReply(ids.Select(id => Map(id)).ToArray()));
+
+            var maps = await data.GetLatestWorkshopItems(30, maxPages: 5).WaitAsync(WaitLimit, TestContext.Current.CancellationToken);
+
+            Assert.Equal(ids, maps.Select(map => map.PublishedFileId));
+            Assert.Equal([Query, Query, Query, Query, Query, Details], Calls);
+            Assert.Contains("&page=5&", web.Requests[4].Uri!.Query);
+            Assert.All(web.Requests.Take(5), request => Assert.Contains("&numperpage=20&", request.Uri!.Query));
+            Assert.Equal(ids, DetailsIds());
+        }
+
+        // Thirty public maps on two full pages are read in two queries, however many pages the read may take
+        [Fact]
+        public async Task ReadOfThirtyMapsStopsOnceItHasThem()
+        {
+            var first = Enumerable.Range(0, 20).Select(index => 2000ul - (ulong)index).ToList();
+            var second = Enumerable.Range(0, 20).Select(index => 1980ul - (ulong)index).ToList();
+            var wanted = first.Concat(second).Take(30).ToList();
+
+            web.Answer(HttpStatusCode.OK, Page(5000, FullPage(2000, [.. first])))
+               .Answer(HttpStatusCode.OK, Page(5000, FullPage(1980, [.. second])))
+               .Answer(HttpStatusCode.OK, DetailsReply(wanted.Select(id => Map(id)).ToArray()));
+
+            var maps = await data.GetLatestWorkshopItems(30, maxPages: 10).WaitAsync(WaitLimit, TestContext.Current.CancellationToken);
+
+            Assert.Equal(wanted, maps.Select(map => map.PublishedFileId));
+            Assert.Equal([Query, Query, Details], Calls);
+            Assert.Equal(wanted, DetailsIds());
+        }
+
         // total counts every item of the query, so the page that reaches it is the last
         [Fact]
         public async Task TotalStopsTheReadWithFewerMapsThanAsked()

@@ -897,6 +897,37 @@ How the file grows. The approved plan's list is the ceiling:
 | PR 10, the controls and the Sessions page | `SELECT` on `schema_version`, each migration's number, name, checksum and time, which only the migrations write, for the Sessions page's check of MinerBot's database structure |
 | The dashboard's switch and note tables | `SELECT, INSERT, UPDATE, DELETE` on the dashboard's switches and notes, each in the PR that creates the table |
 
+## The website feed's rights
+
+The bot writes the open lobbies and Steam's latest maps for the website's Lobbies and Maps pages into three tables of
+the website's database: `mmh_feed_lobbies`, `mmh_feed_maps` and `mmh_feed_state` (the root README, "Website feed"). The
+website makes them, in its own migration, and no script here does: no deploy, setup or migration of MinerBot's touches
+them, and `dashboard-rights.sql` gives the dashboard's login nothing on them.
+
+The bot's website login, the cPanel login in `bot.env`'s `ConnectionStrings__DefaultConnection`, needs `SELECT`,
+`INSERT`, `UPDATE` and `DELETE` on the three, and nothing else for the feed. Give them once, by hand, as root, after
+the website has made the tables, since MariaDB refuses a right on a table that doesn't exist yet. `<botlogin>` is that
+login's name, on both hosts, as for the other logins:
+
+```sql
+GRANT SELECT, INSERT, UPDATE, DELETE ON `<sitedb>`.`mmh_feed_lobbies` TO '<botlogin>'@'localhost', '<botlogin>'@'127.0.0.1';
+GRANT SELECT, INSERT, UPDATE, DELETE ON `<sitedb>`.`mmh_feed_maps` TO '<botlogin>'@'localhost', '<botlogin>'@'127.0.0.1';
+GRANT SELECT, INSERT, UPDATE, DELETE ON `<sitedb>`.`mmh_feed_state` TO '<botlogin>'@'localhost', '<botlogin>'@'127.0.0.1';
+```
+
+- A login that cPanel gave every right in `<sitedb>` already has them, and needs none of this.
+- The order doesn't matter to the bot. Until the tables are there, and the rights with them, each feed logs one warning,
+  with MariaDB's error 1146 for a missing table or 1142 for a missing right, and the bot runs as ever. It tries again
+  at least once every 5 minutes, so it starts writing without a restart, and logs one line for each feed when it does:
+  `docker logs --since 10m minerbot 2>&1 | grep -F 'website'`.
+- To check what the login holds, never `SHOW GRANTS`, which prints the password's hash:
+  `SELECT GRANTEE, TABLE_NAME, PRIVILEGE_TYPE FROM information_schema.TABLE_PRIVILEGES WHERE TABLE_SCHEMA = '<sitedb>' AND TABLE_NAME IN ('mmh_feed_lobbies', 'mmh_feed_maps', 'mmh_feed_state');`
+- To stop the feed's writes without a deploy, take the rights away again, with `REVOKE` in place of `GRANT` and `FROM`
+  in place of `TO`. The pages then show their feeds as behind, by `ok_at`.
+- The website owns the tables' structure. A change to it is made in the website's migration first, then copied to
+  `docs/schema/wordpress-tables.sql`, which the database tests build their copy from, with the bot's code. A new column
+  needs a default until the bot writes it, and a column goes from the bot's code before it goes from the table.
+
 ## The settings rule
 
 `rollback.sh` keeps the current `dashboard.env`, so the previous image must accept it. A setting is never renamed or

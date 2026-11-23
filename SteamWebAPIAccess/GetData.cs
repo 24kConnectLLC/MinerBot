@@ -62,7 +62,40 @@ namespace SteamWebAPIAccess
 
         // Get
 
-        public async Task<LobbyListResult> GetServerList()
+        // The lines a lobby read writes when it fails or skips lobbies. The notification job and the slash command read
+        // the list every 5 minutes or when someone asks, and every one of their reads writes its line. The website feed
+        // reads it every 30 seconds, where a Steam outage, or one lobby whose metadata can't be read, would write the
+        // same line 2,880 times a day. So a caller that says it reads often has each kind of line written once, then
+        // not again for 5 minutes, which is as often as the notification job would write it.
+        internal static readonly TimeSpan FrequentLineEvery = TimeSpan.FromMinutes(5);
+
+        // Other tests swap the console while the lobby tests run, so they read the lines here, on a time they move
+        internal Action<string> LobbyLog { get; set; } = Console.WriteLine;
+        internal TimeProvider Clock { get; set; } = TimeProvider.System;
+
+        readonly Dictionary<string, long> frequentLines = new();
+
+        void LogLobbyRead(bool frequent, string kind, string line)
+        {
+            if (frequent)
+            {
+                var now = Clock.GetTimestamp();
+
+                lock (frequentLines)
+                {
+                    if (frequentLines.TryGetValue(kind, out var last) && Clock.GetElapsedTime(last, now) < FrequentLineEvery)
+                        return;
+
+                    frequentLines[kind] = now;
+                }
+            }
+
+            LobbyLog(line);
+        }
+
+        // frequent is for a caller that reads the list far more often than every 5 minutes, as the website feed does: its
+        // reads write a line that repeats only once every 5 minutes. The list itself is the same for every caller.
+        public async Task<LobbyListResult> GetServerList(bool frequent = false)
         {
             // Working With -
             // Host Name
@@ -101,14 +134,14 @@ namespace SteamWebAPIAccess
             catch (Exception e)
             {
                 // The job fails or is canceled when Steam times out or the connection drops
-                Console.WriteLine("Error getting the lobby list: " + e.Message);
+                LogLobbyRead(frequent, "error", "Error getting the lobby list: " + e.Message);
                 return unavailable;
             }
 
             // NoMatch is Steam finding nothing, the same answer as an empty game
             if (callback.Result != EResult.OK && callback.Result != EResult.NoMatch)
             {
-                Console.WriteLine($"Steam didn't return the lobby list: {callback.Result}");
+                LogLobbyRead(frequent, "result", $"Steam didn't return the lobby list: {callback.Result}");
                 return unavailable;
             }
 
@@ -136,11 +169,18 @@ namespace SteamWebAPIAccess
                 spResult.GetIntProperty(PropertyUsage.NetSettingsBoolsExtended));
 
                 string hostName = CleanHostName(ownerUsername);
+                var hostKind = LobbyHostKind.Player;
 
                 if (spResult.GetIntProperty(PropertyUsage.Gamenight) > 0)
+                {
                     hostName = "Gamenight";
+                    hostKind = LobbyHostKind.Gamenight;
+                }
                 else if (spResult.GetIntProperty(PropertyUsage.Official) > 0)
+                {
                     hostName = "Official";
+                    hostKind = LobbyHostKind.Official;
+                }
 
                 uint versionNumber = spResult.GetVersion();
 
@@ -157,6 +197,7 @@ namespace SteamWebAPIAccess
                 lobbyList.Add(new LobbyInfo()
                 {
                     HostName = hostName,
+                    HostKind = hostKind,
                     OwnerID = GetSteamID3To64(ownerAccountID),
                     MapName = CleanMapName(spResult.GetMapName()),
                     CurrentPlayers = lobby.NumMembers,
@@ -194,7 +235,7 @@ namespace SteamWebAPIAccess
             }
 
             if (skippedLobbies > 0)
-                Console.WriteLine($"Skipped {skippedLobbies} lobbies with unreadable metadata");
+                LogLobbyRead(frequent, "skipped", $"Skipped {skippedLobbies} lobbies with unreadable metadata");
 
             return new LobbyListResult { Available = true, Lobbies = lobbyList };
         }
@@ -258,14 +299,16 @@ namespace SteamWebAPIAccess
         // Each page of QueryFiles also holds private and unlisted items, so a page of 20 almost always holds five public maps
         const int QueryPageSize = 20;
 
-        // Steam can list fewer public maps than asked for, so the read stops here with what it has
-        const int MaxQueryPages = 3;
+        // Steam can list fewer public maps than asked for, so the read stops here with what it has. The notification job
+        // and /maps latest read this far; the website feed, which asks for more maps, gives its own number of pages.
+        public const int MaxQueryPages = 3;
 
         // Use WEBAPI Query Files, k_PublishedFileQueryType_RankedByLastUpdatedDate (21), k_PFI_MatchingFileType_Items (0)
         // Learn more: https://partner.steamgames.com/doc/webapi/IPublishedFileService#EPublishedFileInfoMatchingFileType
         // The first page has the most recently updated maps, whether they're new or updated. Pages are read until there
-        // are numPerPage public maps, and all of their details come from one GetPublishedFileDetails call.
-        public async Task<List<PublishedFileDetailsModel>> GetLatestWorkshopItems(int numPerPage)
+        // are numPerPage public maps, or maxPages were read, and all of their details come from one
+        // GetPublishedFileDetails call.
+        public async Task<List<PublishedFileDetailsModel>> GetLatestWorkshopItems(int numPerPage, int maxPages = MaxQueryPages)
         {
             var uriArgs = new Dictionary<string, object?>
             {
@@ -306,7 +349,7 @@ namespace SteamWebAPIAccess
 
                 using (var steamuser = GetSteamInterface("IPublishedFileService"))
                 {
-                    for (int pageNum = 1; pageNum <= MaxQueryPages && ids.Count < numPerPage; pageNum++)
+                    for (int pageNum = 1; pageNum <= maxPages && ids.Count < numPerPage; pageNum++)
                     {
                         uriArgs["page"] = pageNum;
                         var callback = await steamuser.CallAsync(HttpMethod.Get, "QueryFiles", args: uriArgs);

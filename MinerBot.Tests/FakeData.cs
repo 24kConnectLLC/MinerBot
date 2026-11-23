@@ -3,6 +3,8 @@ using DataAccessLibrary.Armor;
 using DataAccessLibrary.Armor.Models;
 using DataAccessLibrary.Discord;
 using DataAccessLibrary.Discord.Models;
+using DataAccessLibrary.Feed;
+using DataAccessLibrary.Feed.Models;
 using DataAccessLibrary.Guilds;
 using DataAccessLibrary.Guilds.Models;
 using DataAccessLibrary.Status;
@@ -40,6 +42,10 @@ namespace MinerBot.Tests
         public List<LobbyInfo> Lobbies { get; set; } = new();
         public bool LobbiesAvailable { get; set; } = true;
         public Exception? LobbyFailure { get; set; }
+
+        // Holds the lobby list's answer until it completes, as a read of Steam that hangs
+        public Task? LobbyHold { get; set; }
+
         public Exception? Failure { get; set; }
         public ulong? RequestedId { get; private set; }
         public string? RequestedName { get; private set; }
@@ -63,7 +69,14 @@ namespace MinerBot.Tests
             TimeUpdated = DateTime.UnixEpoch.AddDays(id)
         };
 
-        public Task<List<PublishedFileDetailsModel>> GetLatestWorkshopItems(int numPerPage) => Call(LatestItems.Take(numPerPage).ToList());
+        // How many maps and pages the last read asked for
+        public (int Maps, int Pages)? LatestAsked { get; private set; }
+
+        public Task<List<PublishedFileDetailsModel>> GetLatestWorkshopItems(int numPerPage, int maxPages = GetData.MaxQueryPages)
+        {
+            LatestAsked = (numPerPage, maxPages);
+            return Call(LatestItems.Take(numPerPage).ToList());
+        }
 
         public Task<PublishedFileDetailsModel?> GetWorkshopItem(ulong id)
         {
@@ -83,9 +96,22 @@ namespace MinerBot.Tests
             return Call(VanityId);
         }
 
-        public Task<LobbyListResult> GetServerList() => LobbyFailure != null
-            ? Task.FromException<LobbyListResult>(LobbyFailure)
-            : Call(new LobbyListResult { Available = LobbiesAvailable, Lobbies = Lobbies });
+        // Whether each read of the lobby list said it reads often, in the order they came
+        public List<bool> LobbyReads { get; } = new();
+
+        public async Task<LobbyListResult> GetServerList(bool frequent = false)
+        {
+            lock (LobbyReads)
+                LobbyReads.Add(frequent);
+
+            if (LobbyHold is { } hold)
+                await hold;
+
+            if (LobbyFailure != null)
+                throw LobbyFailure;
+
+            return await Call(new LobbyListResult { Available = LobbiesAvailable, Lobbies = Lobbies });
+        }
 
         Task<T> Call<T>(T value, [CallerMemberName] string name = "")
         {
@@ -484,6 +510,88 @@ namespace MinerBot.Tests
 
             if (saveHold != null)
                 await saveHold;
+
+            lock (this)
+                return save();
+        }
+    }
+
+    // The website's feed tables for the feed writer. It keeps the rows as the tables would, by the feed's own rules: a
+    // good read of the lobbies replaces the set, a row keeps when it was first seen, a good read of the maps deletes the
+    // rows of the read before that it should have held, and a read that failed moves only when the bot tried. A test
+    // can make every call fail, or one feed's, or wait.
+    internal sealed class FakeFeedData : IWebsiteFeedData
+    {
+        int calls;
+
+        public readonly Dictionary<ulong, (FeedLobby Row, DateTime FirstSeen, DateTime LastSeen)> Lobbies = new();
+        public readonly Dictionary<ulong, (FeedMap Row, DateTime FirstSeen, DateTime LastSeen)> Maps = new();
+        public readonly Dictionary<string, (DateTime CheckedAt, DateTime? OkAt, int Count)> State = new();
+
+        public Exception? Failure { get; set; }
+        public Exception? LobbyFailure { get; set; }
+        public Exception? MapFailure { get; set; }
+        public Task? Hold { get; set; }
+
+        public int Calls => Volatile.Read(ref calls);
+
+        // How many feeds have their row, for a test that reads it while the writer's loops run
+        public int FeedsWritten
+        {
+            get
+            {
+                lock (this)
+                    return State.Count;
+            }
+        }
+
+        public Task<int> ReplaceLobbies(IReadOnlyList<FeedLobby> lobbies, DateTime at) => Answer(FeedName.Lobbies, () =>
+        {
+            foreach (var id in Lobbies.Keys.Except(lobbies.Select(lobby => lobby.lobby_id)).ToList())
+                Lobbies.Remove(id);
+
+            foreach (var lobby in lobbies)
+                Lobbies[lobby.lobby_id] = (lobby, Lobbies.TryGetValue(lobby.lobby_id, out var before) ? before.FirstSeen : at, at);
+
+            State[FeedName.Lobbies] = (at, at, lobbies.Count);
+            return lobbies.Count;
+        });
+
+        public Task<int> SaveMaps(IReadOnlyList<FeedMap> maps, DateTime at) => Answer(FeedName.Maps, () =>
+        {
+            if (maps.Count == 0)
+                throw new ArgumentException("A read with no maps isn't written");
+
+            foreach (var map in maps)
+                Maps[map.file_id] = (map, Maps.TryGetValue(map.file_id, out var before) ? before.FirstSeen : at, at);
+
+            // The rows of the last good read that this one doesn't hold and reaches down to
+            var lastRead = State.TryGetValue(FeedName.Maps, out var state) ? state.OkAt : null;
+            var reach = maps.TakeLast(WebsiteFeedData.ReachMaps).Max(map => map.time_updated);
+
+            foreach (var id in Maps.Where(row => row.Value.LastSeen == lastRead && row.Value.Row.time_updated >= reach && !maps.Any(map => map.file_id == row.Key))
+                .Select(row => row.Key).ToList())
+                Maps.Remove(id);
+
+            State[FeedName.Maps] = (at, at, maps.Count);
+            return maps.Count;
+        });
+
+        public Task MarkChecked(string feed, DateTime at) => Answer(feed, () =>
+        {
+            State[feed] = State.TryGetValue(feed, out var before) ? before with { CheckedAt = at } : (at, null, 0);
+            return 0;
+        });
+
+        async Task<T> Answer<T>(string feed, Func<T> save)
+        {
+            Interlocked.Increment(ref calls);
+
+            if ((Failure ?? (feed == FeedName.Lobbies ? LobbyFailure : MapFailure)) is { } failure)
+                throw failure;
+
+            if (Hold is { } hold)
+                await hold;
 
             lock (this)
                 return save();

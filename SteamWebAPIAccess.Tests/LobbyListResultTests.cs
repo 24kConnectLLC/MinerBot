@@ -2,6 +2,8 @@ using System.Net;
 using System.Reflection;
 using SteamKit2;
 using SteamKit2.Internal;
+using SteamWebAPIAccess.Models;
+using SteamWebAPIAccess.Murder_Miners_Networking;
 
 namespace SteamWebAPIAccess.Tests
 {
@@ -96,6 +98,102 @@ namespace SteamWebAPIAccess.Tests
             Assert.True(result.Available);
             Assert.Equal([1UL, 2UL], result.Lobbies.Select(lobby => lobby.LobbyId));
             Assert.Equal("Host", result.Lobbies[0].HostName);
+        }
+
+        // The lobby list names the game's own hosts in place of the host, so the kind is carried apart from the name, and
+        // a player who is named Gamenight isn't taken for one. A lobby that says both counts as a Gamenight.
+        [Fact]
+        public async Task HostKindIsReadApartFromTheHostsName()
+        {
+            var result = await AnswerWith(EResult.OK,
+                Lobby(1),
+                Lobby(2, host: "Gamenight"),
+                Lobby(3, properties: [(PropertyUsage.Gamenight, 1)]),
+                Lobby(4, properties: [(PropertyUsage.Official, 1)]),
+                Lobby(5, properties: [(PropertyUsage.Gamenight, 1), (PropertyUsage.Official, 1)]),
+                Lobby(6, properties: [(PropertyUsage.Gamenight, 0), (PropertyUsage.Official, 0)]));
+
+            Assert.Equal(
+                [("Host", LobbyHostKind.Player), ("Gamenight", LobbyHostKind.Player), ("Gamenight", LobbyHostKind.Gamenight), ("Official", LobbyHostKind.Official),
+                    ("Gamenight", LobbyHostKind.Gamenight), ("Host", LobbyHostKind.Player)],
+                result.Lobbies.Select(lobby => (lobby.HostName, lobby.HostKind)));
+        }
+
+        // The lines of a failed read
+
+        // The notification job and the slash command read the list every 5 minutes or when asked, and each of their reads
+        // that fails, or skips a lobby it can't read, says so, as before
+        [Fact]
+        public async Task EveryFailedReadIsLoggedForACallerThatReadsNowAndThen()
+        {
+            var lines = LobbyLines();
+
+            for (var read = 0; read < 3; read++)
+            {
+                await AnswerWith(EResult.Fail);
+                await AnswerWith(EResult.OK, Unreadable(1), Lobby(2));
+            }
+
+            Assert.Equal(Enumerable.Repeat(new[] { "Steam didn't return the lobby list: Fail", "Skipped 1 lobbies with unreadable metadata" }, 3).SelectMany(pair => pair), lines);
+        }
+
+        // The website feed reads the list every 30 seconds. Through a Steam outage, or with one lobby it can't read, its
+        // reads would write the same line 2,880 times a day, so a line of one kind is written once, then again after 5
+        // minutes. The other callers' lines aren't held back by it, and don't hold its lines back.
+        [Fact]
+        public async Task FrequentReaderLogsARepeatedLineOnceEvery5Minutes()
+        {
+            var lines = LobbyLines();
+            var time = new ManualTime();
+            data.Clock = time;
+
+            for (var read = 0; read < 9; read++)
+            {
+                await AnswerWith(EResult.Fail, frequent: true);
+                await AnswerWith(EResult.OK, frequent: true, Unreadable(1), Lobby(2));
+                time.Advance(TimeSpan.FromSeconds(30));
+            }
+
+            Assert.Equal(["Steam didn't return the lobby list: Fail", "Skipped 1 lobbies with unreadable metadata"], lines);
+
+            // The notification job's read, in the same outage
+            await AnswerWith(EResult.Timeout);
+            await AnswerWith(EResult.Timeout, frequent: true);
+
+            Assert.Equal("Steam didn't return the lobby list: Timeout", Assert.Single(lines.Skip(2)));
+
+            // 5 minutes after the feed's first line
+            time.Advance(TimeSpan.FromSeconds(30));
+            await AnswerWith(EResult.Timeout, frequent: true);
+            await AnswerWith(EResult.Timeout, frequent: true);
+
+            Assert.Equal(["Steam didn't return the lobby list: Timeout"], lines.Skip(3));
+
+            // The lobbies of a frequent read are the same as any other's
+            var result = await AnswerWith(EResult.OK, frequent: true, Lobby(1), Lobby(2));
+
+            Assert.True(result.Available);
+            Assert.Equal([1UL, 2UL], result.Lobbies.Select(lobby => lobby.LobbyId));
+        }
+
+        // A job that Steam fails or cancels says so in the same way
+        [Fact]
+        public async Task CanceledJobOfAFrequentReaderIsLoggedOnce()
+        {
+            var lines = LobbyLines();
+            data.Clock = new ManualTime();
+
+            for (var read = 0; read < 3; read++)
+            {
+                LogOn();
+
+                var pending = data.GetServerList(frequent: true);
+                Invoke("CancelPendingJobs");
+
+                Assert.False((await pending.WaitAsync(WaitLimit, TestContext.Current.CancellationToken)).Available);
+            }
+
+            Assert.StartsWith("Error getting the lobby list: ", Assert.Single(lines));
         }
 
         // SteamKit fails a job straight away when the connection is gone
@@ -238,12 +336,14 @@ namespace SteamWebAPIAccess.Tests
             Assert.Single(result.Lobbies);
         }
 
-        async Task<Models.LobbyListResult> AnswerWith(EResult answer, params SteamMatchmaking.Lobby[] lobbies)
+        Task<Models.LobbyListResult> AnswerWith(EResult answer, params SteamMatchmaking.Lobby[] lobbies) => AnswerWith(answer, frequent: false, lobbies);
+
+        async Task<Models.LobbyListResult> AnswerWith(EResult answer, bool frequent, params SteamMatchmaking.Lobby[] lobbies)
         {
             LogOn();
 
             var jobId = NextJobId();
-            var pending = data.GetServerList();
+            var pending = data.GetServerList(frequent);
 
             var constructor = typeof(SteamMatchmaking.GetLobbyListCallback).GetConstructors(NonPublicInstance).Single();
             steam.steamClient.PostCallback((CallbackMsg)constructor.Invoke([jobId, steam.appID, answer, lobbies.ToList()]));
@@ -274,15 +374,51 @@ namespace SteamWebAPIAccess.Tests
             jobManager.GetType().GetMethod(jobManagerMethod)!.Invoke(jobManager, arguments);
         }
 
-        static SteamMatchmaking.Lobby Lobby(ulong id, uint version = 105) => Lobby(id, version.ToString());
-
-        // A null version is left out, the way a host that writes none leaves it
-        static SteamMatchmaking.Lobby Lobby(ulong id, string? version)
+        // The lines the lobby reads write, in the order they came
+        List<string> LobbyLines()
         {
-            var metadata = new Dictionary<string, string> { ["host_steam_id"] = "1", ["host_gamertag"] = "Host" };
+            var lines = new List<string>();
+
+            data.LobbyLog = line =>
+            {
+                lock (lines)
+                    lines.Add(line);
+            };
+
+            return lines;
+        }
+
+        // A lobby whose host wrote no account number the bot can read, which the read skips
+        static SteamMatchmaking.Lobby Unreadable(ulong id) =>
+            (SteamMatchmaking.Lobby)typeof(SteamMatchmaking.Lobby).GetConstructors(NonPublicInstance).Single()
+                .Invoke([new SteamID(id), ELobbyType.Public, 0, null, new Dictionary<string, string> { ["host_steam_id"] = "nobody", ["host_gamertag"] = "Host" }, 8, 1, null, 0f, 0L]);
+
+        // A time the test moves, for the lines a frequent reader repeats
+        sealed class ManualTime : TimeProvider
+        {
+            long ticks;
+
+            public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+
+            public override long GetTimestamp() => Volatile.Read(ref ticks);
+
+            public void Advance(TimeSpan time) => Interlocked.Add(ref ticks, time.Ticks);
+        }
+
+        static SteamMatchmaking.Lobby Lobby(ulong id, uint version = 105, string host = "Host", (PropertyUsage Property, uint Value)[]? properties = null) =>
+            Lobby(id, version.ToString(), host, properties);
+
+        // A null version is left out, the way a host that writes none leaves it. The properties are the game's own, by
+        // their place in its list.
+        static SteamMatchmaking.Lobby Lobby(ulong id, string? version, string host = "Host", (PropertyUsage Property, uint Value)[]? properties = null)
+        {
+            var metadata = new Dictionary<string, string> { ["host_steam_id"] = "1", ["host_gamertag"] = host };
 
             if (version != null)
                 metadata["prop_7"] = version;
+
+            foreach (var (property, value) in properties ?? [])
+                metadata[$"prop_{(int)property}"] = value.ToString();
 
             return (SteamMatchmaking.Lobby)typeof(SteamMatchmaking.Lobby).GetConstructors(NonPublicInstance).Single()
                 .Invoke([new SteamID(id), ELobbyType.Public, 0, null, metadata, 8, 1, null, 0f, 0L]);

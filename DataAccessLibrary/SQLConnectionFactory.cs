@@ -8,7 +8,10 @@ namespace DataAccessLibrary
         Armor,
         Blacklist,
         Guild,
-        Bot
+        Bot,
+
+        // The website's database again, for the tables of the feed the bot writes for the website's pages
+        Feed
     }
 
     public sealed class SQLConnectionFactory : ISQLConnectionFactory
