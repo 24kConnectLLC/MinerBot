@@ -63,11 +63,15 @@ namespace DataAccessLibrary.Status
             // row's run and stop comes before the two that set them.
             const string Stopped = "run_id = VALUES(run_id) AND stopped_at IS NOT NULL";
 
+            // posting_run_id is this run's too: this bot keeps its posts in notification_queue. An older bot's upsert doesn't
+            // name the column and leaves it as it was, so the dashboard can tell from a run_id that differs that the bot that
+            // runs keeps them only in memory.
             string sql = $@"INSERT INTO {_names.Bot}.bot_status (id, run_id, version, started_at, heartbeat_at, stopped_at, discord_state, discord_since,
-                            discord_latency_ms, discord_guilds, steam_state, steam_since, steam_last_result, steam_token_expires)
+                            discord_latency_ms, discord_guilds, steam_state, steam_since, steam_last_result, steam_token_expires, posting_run_id)
                             VALUES (1, @run_id, @version, @started_at, @heartbeat_at, @stopped_at, @discord_state, @discord_since,
-                            @discord_latency_ms, @discord_guilds, @steam_state, @steam_since, @steam_last_result, @steam_token_expires)
+                            @discord_latency_ms, @discord_guilds, @steam_state, @steam_since, @steam_last_result, @steam_token_expires, @run_id)
                             ON DUPLICATE KEY UPDATE version = IF({Stopped}, version, VALUES(version)),
+                            posting_run_id = IF({Stopped}, posting_run_id, VALUES(posting_run_id)),
                             started_at = IF({Stopped}, started_at, VALUES(started_at)), heartbeat_at = IF({Stopped}, heartbeat_at, VALUES(heartbeat_at)),
                             discord_state = IF({Stopped}, discord_state, VALUES(discord_state)), discord_since = IF({Stopped}, discord_since, VALUES(discord_since)),
                             discord_latency_ms = IF({Stopped}, discord_latency_ms, VALUES(discord_latency_ms)),
@@ -257,9 +261,54 @@ namespace DataAccessLibrary.Status
                 ("discord_up", row => row.discord_up),
                 ("steam_up", row => row.steam_up));
 
+            // A minute is up when any run's sample of it is, so a restart inside a minute the run before sampled up doesn't
+            // turn it down. Still safe to repeat.
             string sql = $@"INSERT INTO {_names.Bot}.uptime_samples (minute, discord_up, steam_up)
                             VALUES {values}
-                            ON DUPLICATE KEY UPDATE discord_up = VALUES(discord_up), steam_up = VALUES(steam_up)";
+                            ON DUPLICATE KEY UPDATE discord_up = GREATEST(discord_up, VALUES(discord_up)), steam_up = GREATEST(steam_up, VALUES(steam_up))";
+
+            return SaveDataCount(sql, parameters);
+        }
+
+        // The open lobbies' counts at a notification run's read, by its minute. A second sample of a minute, such as a requested
+        // run's, keeps the first. Steam's lack of an answer is a sample with no counts at all, so it never reads as an empty
+        // game, and an answer has every count.
+        public Task SaveLobbySamples(IReadOnlyList<LobbySample> samples)
+        {
+            RequireBatch(samples);
+
+            foreach (var row in samples)
+            {
+                RequireUtc(row.minute, nameof(row.minute));
+
+                if (row.minute.Ticks % TimeSpan.TicksPerMinute != 0)
+                    throw new ArgumentException("A sample's minute is the minute's start, with no seconds", nameof(samples));
+
+                ushort?[] counts = [row.lobbies, row.players, row.slots, row.current_lobbies, row.current_players, row.full_lobbies, row.gamenight_lobbies, row.official_lobbies];
+
+                if (row.steam_answered ? counts.Any(count => count == null) : counts.Any(count => count != null))
+                    throw new ArgumentException("A lobby sample has every count when Steam answered, and none when it didn't", nameof(samples));
+            }
+
+            if (samples.Count == 0)
+                return Task.CompletedTask;
+
+            var (values, parameters) = Rows(samples,
+                ("minute", row => row.minute),
+                ("steam_answered", row => row.steam_answered),
+                ("lobbies", row => row.lobbies),
+                ("players", row => row.players),
+                ("slots", row => row.slots),
+                ("current_lobbies", row => row.current_lobbies),
+                ("current_players", row => row.current_players),
+                ("full_lobbies", row => row.full_lobbies),
+                ("gamenight_lobbies", row => row.gamenight_lobbies),
+                ("official_lobbies", row => row.official_lobbies));
+
+            string sql = $@"INSERT INTO {_names.Bot}.lobby_samples (minute, steam_answered, lobbies, players, slots, current_lobbies, current_players, full_lobbies,
+                            gamenight_lobbies, official_lobbies)
+                            VALUES {values}
+                            ON DUPLICATE KEY UPDATE minute = minute";
 
             return SaveDataCount(sql, parameters);
         }

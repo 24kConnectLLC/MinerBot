@@ -409,7 +409,7 @@ namespace MinerBot.Dashboard.Tests
 
                 Assert.Equal("OK: The login has exactly the rights this version uses, with at most 15 connections and 20 seconds a statement.", Check(SelfChecks.Rights));
                 Assert.Equal($"OK: Writable: {factory.KeysFolder}, with {keys}, and so is the temporary folder each new key passes through.", Check(SelfChecks.Keys));
-                Assert.Equal("OK: Up to date: migrations 1 to 4.", Check(SelfChecks.Structure));
+                Assert.Equal("OK: Up to date: migrations 1 to 5.", Check(SelfChecks.Structure));
                 Assert.Equal("Note: Off: /admin opens with a Discord sign-in alone. The plan recommends Access.", Check(SelfChecks.Access));
                 Assert.Equal("OK: On: the dashboard signs its requests.", Check(SelfChecks.Requests));
                 Assert.Equal("Note: The bot hasn't recorded a direct message to the owner yet.", Check(SelfChecks.DirectMessages));

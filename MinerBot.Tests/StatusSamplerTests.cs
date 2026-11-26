@@ -125,6 +125,65 @@ namespace MinerBot.Tests
             Assert.All(samples, sample => Assert.Equal(DateTimeKind.Utc, sample.minute.Kind));
         }
 
+        // A run's first tick comes before the gateway connects, so the minute it starts in is sampled at its first tick that
+        // reads Discord connected, with Steam as read then, never down from before the connection: a restart inside a minute
+        // the run before sampled up keeps that minute up, and one across a minute's start records it up once the new run
+        // connects in it. Every later minute is sampled at its first tick, as before.
+        [Fact]
+        public void StartMinuteIsSampledAtTheFirstConnectedTick()
+        {
+            steam.Status = new SteamStatus(SteamConnection.Offline, Noon);
+
+            sampler.Tick();
+
+            clock.UtcNow = Noon.AddSeconds(6);
+            discord.Reading = new DiscordReading(DiscordState.Connecting, false, null, null);
+            sampler.Tick();
+
+            Assert.Empty(recorder.PeekSamples(10));
+
+            clock.UtcNow = Noon.AddSeconds(11);
+            discord.Reading = FakeDiscordStatus.Up;
+            steam.Status = new SteamStatus(SteamConnection.LoggedOn, Noon.AddSeconds(10));
+            sampler.Tick();
+
+            clock.UtcNow = Noon.AddSeconds(16);
+            discord.Reading = FakeDiscordStatus.Down;
+            sampler.Tick();
+
+            clock.UtcNow = Noon.AddMinutes(1).AddSeconds(1);
+            sampler.Tick();
+
+            Assert.Equal([(Noon.UtcDateTime, true, true), (Noon.UtcDateTime.AddMinutes(1), false, true)],
+                recorder.PeekSamples(10).Select(sample => (sample.minute, sample.discord_up, sample.steam_up)));
+        }
+
+        // A start minute in which the gateway never connected is down, as its first tick read it, sampled at the next minute's
+        // first tick, before that minute's own sample
+        [Fact]
+        public void StartMinuteWithoutAConnectionIsSampledDown()
+        {
+            steam.Status = new SteamStatus(SteamConnection.Offline, Noon);
+
+            sampler.Tick();
+
+            clock.UtcNow = Noon.AddSeconds(31);
+            steam.Status = new SteamStatus(SteamConnection.LoggedOn, Noon.AddSeconds(30));
+            sampler.Tick();
+
+            Assert.Empty(recorder.PeekSamples(10));
+
+            clock.UtcNow = Noon.AddMinutes(1).AddSeconds(1);
+            discord.Reading = FakeDiscordStatus.Up;
+            sampler.Tick();
+
+            clock.UtcNow = Noon.AddMinutes(1).AddSeconds(6);
+            sampler.Tick();
+
+            Assert.Equal([(Noon.UtcDateTime, false, false), (Noon.UtcDateTime.AddMinutes(1), true, true)],
+                recorder.PeekSamples(10).Select(sample => (sample.minute, sample.discord_up, sample.steam_up)));
+        }
+
         // Docker's health check reads it: only while the bot is up on Discord, so a bot that lost Discord turns unhealthy
         [Fact]
         public void HeartbeatOnlyWhileDiscordIsUp()

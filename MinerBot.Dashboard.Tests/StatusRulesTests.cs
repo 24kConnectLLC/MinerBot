@@ -12,10 +12,12 @@ namespace MinerBot.Dashboard.Tests
     {
         static readonly DateTime Now = new(2026, 11, 19, 14, 3, 30, 250, DateTimeKind.Utc);
 
+        // A bot that keeps its posts in MinerBot's database, as the bot this dashboard ships with writes its row
         static BotStatusRow Row(DateTime heartbeat, DateTime? stopped = null, string discord = DiscordState.Connected, DateTime? discordSince = null,
             string steam = SteamState.LoggedOn, DateTime? tokenEnds = null) => new()
         {
             run_id = 1,
+            posting_run_id = 1,
             version = StatusSteps.Commit,
             started_at = heartbeat.AddHours(-1),
             heartbeat_at = heartbeat,
@@ -301,7 +303,7 @@ namespace MinerBot.Dashboard.Tests
                 $"SteamStatus.cs declare {kinds.Count}: a kind declared in another file needs that file among the bot-source items in " +
                 "MinerBot.Dashboard.Tests.csproj, and a list written another way needs BotSource to read it");
 
-            Assert.Equal(23, kinds.Count);
+            Assert.Equal(25, kinds.Count);
             Assert.Equal(kinds, EventWords.Kinds.Select(word => word.Kind).Order(StringComparer.Ordinal));
             Assert.Equal(EventWords.Kinds.Count, EventWords.Kinds.Select(word => word.Label).Distinct().Count());
             Assert.All(EventWords.Kinds, word => Assert.NotEqual(word.Kind, EventWords.Label(word.Kind, null)));
@@ -318,28 +320,62 @@ namespace MinerBot.Dashboard.Tests
             Assert.Equal(["Info", "Warning", "Error"], EventLevel.All.Select(level => EventWords.LevelLabel(level, "bot.started", null)));
         }
 
-        // The five schedules the bot has, and the forms around them, in Eastern time as the bot runs them
+        // The seven schedules the bot has, and the forms around them, in Eastern time as the bot runs them
         [Theory]
         [InlineData("0 * * * *", "every hour, on the hour")]
         [InlineData("21 4 * * *", "every day at 04:21 Eastern")]
         [InlineData("*/5 * * * *", "every 5 minutes")]
         [InlineData("30 4 * * *", "every day at 04:30 Eastern")]
         [InlineData("0 12 * * *", "every day at 12:00 Eastern")]
+        [InlineData("2-59/5 * * * *", "every 5 minutes, from 2 minutes past the hour")]
+        [InlineData("33 4 * * *", "every day at 04:33 Eastern")]
         [InlineData("* * * * *", "every minute")]
         [InlineData("*/1 * * * *", "every minute")]
         [InlineData("15 * * * *", "every hour at 15 minutes past")]
         [InlineData("0 0 * * *", "every day at 00:00 Eastern")]
+        [InlineData("0-59/5 * * * *", "every 5 minutes")]
+        [InlineData("1-59/10 * * * *", "every 10 minutes, from 1 minute past the hour")]
+        [InlineData("7-59/1 * * * *", "every minute, from 7 minutes past the hour")]
         [InlineData("0 0 1 * *", null)]
         [InlineData("0 4 * * 1", null)]
         [InlineData("*/0 * * * *", null)]
         [InlineData("60 * * * *", null)]
         [InlineData("0 24 * * *", null)]
         [InlineData("+5 * * * *", null)]
+        [InlineData("2-58/5 * * * *", null)]
+        [InlineData("60-59/5 * * * *", null)]
+        [InlineData("2-59/0 * * * *", null)]
+        [InlineData("-59/5 * * * *", null)]
+        [InlineData("2-59/5/5 * * * *", null)]
+        [InlineData("2-59/5 4 * * *", null)]
         [InlineData("0 * * *", null)]
         [InlineData("", null)]
         public void SchedulesInWords(string cron, string? words)
         {
             Assert.Equal(words, JobWords.Schedule(cron));
+        }
+
+        // Every job the bot runs has a name of its own on the Bot page and its schedule in words, read from the bot's own job
+        // classes without referencing the bot, so a job the bot gains without them fails here
+        [Fact]
+        public void EveryJobTheBotRunsHasANameAndASchedule()
+        {
+            var jobs = BotSource.Jobs();
+
+            Assert.Equal(
+            [
+                ("ArmorJob.AddColorArrays", "0 * * * *"),
+                ("GuildMembersJob.CountMembers", "21 4 * * *"),
+                ("GuildNotificationJob.NotifyAllGuilds", "*/5 * * * *"),
+                ("HousekeepingJob.ApplyRetention", "30 4 * * *"),
+                ("PostingRetentionJob.ApplyRetention", "33 4 * * *"),
+                ("SteamTokenJob.RenewSteamToken", "0 12 * * *"),
+                ("SubmissionAlertJob.AlertOwner", "2-59/5 * * * *")
+            ], jobs);
+            Assert.All(jobs, job => Assert.NotEqual(job.Job, JobWords.Name(job.Job)));
+            Assert.All(jobs, job => Assert.NotNull(JobWords.Schedule(job.Cron)));
+            Assert.Equal(jobs.Count, jobs.Select(job => JobWords.Name(job.Job)).Distinct().Count());
+            Assert.Equal(["New-submission alerts", "Post records clean-up"], new[] { "SubmissionAlertJob.AlertOwner", "PostingRetentionJob.ApplyRetention" }.Select(JobWords.Name));
         }
 
         [Theory]

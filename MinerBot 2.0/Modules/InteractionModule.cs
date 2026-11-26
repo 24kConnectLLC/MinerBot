@@ -11,7 +11,6 @@ public class InteractionModule : InteractionModuleBase<SocketInteractionContext>
 {
     // Dependencies can be accessed through Property injection, public properties with public setters will be set by the service provider
     // Dependency Injection will fill this value in for us
-    public AnnounceService _AnnounceService { get; set; }
     public SteamAPIService _SteamAPIService { get; set; }
     public ArmorService _ArmorService { get; set; }
     public DiscordService _DiscordService { get; set; }
@@ -390,7 +389,10 @@ public class AdminGroupModule() : InteractionModuleBase<SocketInteractionContext
             return;
         }
 
-        await FollowupAsync($"Saved. This is where I'll post in this server:\n{DiscordService.ChannelList(guild)}\nAny kind you leave out of /admin set_channels is turned off. See these again with /admin show_channels.", ephemeral: true);
+        // The Owner's switches on MinerBot's dashboard, which set_channels never changes, so a kind switched off there says so
+        var (switches, read) = await _DiscordService.GetSwitches(Context.Guild.Id);
+
+        await FollowupAsync($"Saved. This is where I'll post in this server:\n{DiscordService.ChannelList(guild, switches, read)}\nAny kind you leave out of /admin set_channels is turned off. See these again with /admin show_channels.", ephemeral: true);
     }
 
     [RequireUserPermission(GuildPermission.Administrator)]
@@ -400,8 +402,9 @@ public class AdminGroupModule() : InteractionModuleBase<SocketInteractionContext
         await DeferAsync(ephemeral: true);
 
         var guild = await _DiscordService.GetGuild(Context.Guild.Id);
+        var (switches, read) = await _DiscordService.GetSwitches(Context.Guild.Id);
 
-        await FollowupAsync($"This is where I post in this server:\n{DiscordService.ChannelList(guild)}\nChange these with /admin set_channels. Any kind you leave out there is turned off.", ephemeral: true);
+        await FollowupAsync($"This is where I post in this server:\n{DiscordService.ChannelList(guild, switches, read)}\nChange these with /admin set_channels. Any kind you leave out there is turned off.", ephemeral: true);
     }
 
     [RequireUserPermission(GuildPermission.Administrator)]

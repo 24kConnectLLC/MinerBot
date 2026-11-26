@@ -20,6 +20,9 @@ namespace MinerBot_2._0.Services
         // Discord's limit for the description of an attachment
         const int MaxAttachmentDescriptionLength = 1024;
 
+        // The title of every message of a post of new armor, by which the notification run knows its own post in a channel
+        public const string NewArmorTitle = "New Armor Styles:";
+
         public ArmorService(IArmorData armorData, HttpClient httpClient)
         {
             _armorData = armorData;
@@ -154,7 +157,7 @@ namespace MinerBot_2._0.Services
         private static Embed NewArmorListEmbed(string armorNames)
         {
             var embed = new EmbedBuilderTemplate()
-            .WithTitle($"New Armor Styles:")
+            .WithTitle(NewArmorTitle)
             .WithDescription(FormatArmorNames(armorNames))
             .WithFields([
             new EmbedFieldBuilder() {

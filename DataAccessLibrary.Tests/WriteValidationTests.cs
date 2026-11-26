@@ -8,10 +8,13 @@ using DataAccessLibrary.Dashboard;
 using DataAccessLibrary.Dashboard.Models;
 using DataAccessLibrary.Guilds;
 using DataAccessLibrary.Guilds.Models;
+using DataAccessLibrary.Posting;
+using DataAccessLibrary.Posting.Models;
 using DataAccessLibrary.Requests;
 using DataAccessLibrary.Status;
 using DataAccessLibrary.Status.Models;
 using MinerBot.Shared.Armor;
+using MinerBot.Shared.Delivery;
 using MinerBot.Shared.Requests;
 
 namespace DataAccessLibrary.Tests
@@ -352,6 +355,7 @@ namespace DataAccessLibrary.Tests
             Assert.ThrowsAny<ArgumentException>(() => { _ = status.SaveJobRuns([run]); });
             Assert.ThrowsAny<ArgumentException>(() => { _ = status.SaveJobStatus([job]); });
             Assert.ThrowsAny<ArgumentException>(() => { _ = status.SaveSamples([new UptimeSample { minute = new DateTime(2026, 11, 14, 12, 0, 1, DateTimeKind.Utc) }]); });
+            Assert.ThrowsAny<ArgumentException>(() => { _ = status.SaveLobbySamples([new LobbySample { minute = new DateTime(2026, 11, 14, 12, 0, 1, DateTimeKind.Utc) }]); });
             Assert.Equal(0, database.Created);
         }
 
@@ -626,6 +630,122 @@ namespace DataAccessLibrary.Tests
             await Assert.ThrowsAsync<InvalidOperationException>(() => missing.SavePause(false, null, now, 1, 1, now));
             await Assert.ThrowsAsync<InvalidOperationException>(() => missing.SaveStatus(new string('s', 127) + char.ConvertFromUtf32(0x1F600), now, 1, 1, now));
             await Assert.ThrowsAsync<InvalidOperationException>(() => missing.SaveStatus(null, now, 1, 1, now));
+            Assert.Equal(0, database.Created);
+        }
+
+        // A lobby sample is a minute's start, UTC, with every count when Steam answered and none when it didn't, in batches of
+        // at most 100
+        [Fact]
+        public async Task LobbySampleThatCantBeSavedIsRefused()
+        {
+            var status = new BotStatusData(database, NoDatabase.Names);
+            var minute = new DateTime(2026, 11, 14, 12, 0, 0, DateTimeKind.Utc);
+
+            await RefusedAsync(() => status.SaveLobbySamples([new LobbySample { minute = minute.AddSeconds(1) }]));
+            await RefusedAsync(() => status.SaveLobbySamples([new LobbySample { minute = DateTime.SpecifyKind(minute, DateTimeKind.Local) }]));
+            await RefusedAsync(() => status.SaveLobbySamples([new LobbySample { minute = minute, steam_answered = false, official_lobbies = 0 }]));
+            await RefusedAsync(() => status.SaveLobbySamples([new LobbySample { minute = minute, steam_answered = true, lobbies = 1, players = 2, slots = 3, current_lobbies = 4,
+                current_players = 5, full_lobbies = 6, gamenight_lobbies = 7 }]));
+            await RefusedAsync(() => status.SaveLobbySamples(Enumerable.Range(0, 101).Select(i => new LobbySample { minute = minute.AddMinutes(i) }).ToList()));
+
+            var missing = new BotStatusData(database, new DatabaseNames(new Dictionary<DBConnectionName, string>()));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => missing.SaveLobbySamples(Enumerable.Range(0, 100).Select(i => new LobbySample { minute = minute.AddMinutes(i) })
+                .ToList()));
+            Assert.Equal(0, database.Created);
+        }
+
+        // The posting store refuses before any SQL: a write past its limits, and anything NotificationStoreContractTests shows
+        // both stores refusing, which here reaches no database
+        [Fact]
+        public async Task PostingWritesThatCantBeSavedAreRefused()
+        {
+            var store = new NotificationData(database, NoDatabase.Names);
+            var now = DateTime.UtcNow;
+            QueueItem Item(int id) => new() { guild_id = 1, source = PostSource.Lobbies, item_id = (ulong)id, queued_at = now };
+
+            await RefusedAsync(() => store.SaveDetectionAsync(new Detection { At = now, Queue = [.. Enumerable.Range(1, NotificationData.DetectionLimit + 1).Select(Item)] }));
+            await RefusedAsync(() => store.SaveDetectionAsync(new Detection { At = DateTime.Now, ReopenArmor = [1] }));
+            await RefusedAsync(() => store.SaveDetectionAsync(new Detection { At = now, Queue = [Item(1) with { guild_id = 0 }] }));
+            await RefusedAsync(() => store.SaveDetectionAsync(new Detection { At = now, Queue = [Item(1) with { queued_at = DateTime.Now }] }));
+            await RefusedAsync(() => store.SaveDetectionAsync(new Detection { At = now, ReopenArmor = [0] }));
+            await RefusedAsync(() => store.SaveDetectionAsync(new Detection { At = now, ReopenMaps = [1, 1] }));
+            await RefusedAsync(() => store.ListHiddenAsync([.. Enumerable.Range(1, NotificationData.IdLimit + 1).Select(id => (ulong)id)]));
+            await RefusedAsync(() => store.SaveDetectionAsync(new Detection { At = now, Seen = [new SeenRow { source = PostSource.Maps, item_id = 1, state = "posted", first_seen_at = now,
+                last_seen_at = now }] }));
+            await RefusedAsync(() => store.ClaimAsync(new DeliveryClaim { AttemptKey = 1, RunStartedAt = now, GuildId = 1, ChannelId = 1, Source = PostSource.Armor, Part = 1,
+                AttemptedAt = now, QueueIds = [.. Enumerable.Range(1, NotificationData.ClaimLimit + 1).Select(id => (ulong)id)] }));
+            await RefusedAsync(() => store.ClaimAsync(new DeliveryClaim { AttemptKey = 1, RunStartedAt = DateTime.Now, GuildId = 1, ChannelId = 1, Source = PostSource.Armor,
+                Part = 1, AttemptedAt = now, QueueIds = [1] }));
+            await RefusedAsync(() => store.ClaimAsync(new DeliveryClaim { AttemptKey = 1, RunStartedAt = now, GuildId = 1, ChannelId = 1, Source = PostSource.Maps, Part = 1,
+                AttemptedAt = now, QueueIds = [1], Shows = [.. Enumerable.Range(1, NotificationData.ClaimLimit + 1).Select(id => new ShownUpdate((ulong)id, 1))] }));
+            await RefusedAsync(() => store.ClaimAsync(new DeliveryClaim { AttemptKey = 1, RunStartedAt = now, GuildId = 1, ChannelId = 1, Source = PostSource.Lobbies, Part = 1,
+                AttemptedAt = now, QueueIds = [1], Shows = [new ShownUpdate(1, 1)] }));
+            await RefusedAsync(() => store.DropAsync([.. Enumerable.Range(1, NotificationData.DropLimit + 1).Select(id => (ulong)id)], DeliveryReasons.TooOld, now));
+            await RefusedAsync(() => store.SettleAsync(new Settlement { AttemptKey = 1, Outcome = DeliveryState.Failed, At = now, Reason = DeliveryReasons.NoAnswer,
+                Counts = true, NextTryAt = DateTime.Now }));
+            await RefusedAsync(() => store.SettleAsync(new Settlement { AttemptKey = 1, Outcome = DeliveryState.Unconfirmed, At = now, Reason = DeliveryReasons.NotSent }));
+            await RefusedAsync(() => store.RecordRefusalAsync(new Refusal { AttemptKey = 1, RunStartedAt = now, GuildId = 1, ChannelId = 1, Source = PostSource.Armor,
+                ItemCount = 0, At = now, Reason = DeliveryReasons.NoChannel }));
+            await RefusedAsync(() => store.RecordRefusalAsync(new Refusal { AttemptKey = 1, RunStartedAt = now, GuildId = 1, ChannelId = 1, Source = PostSource.Armor,
+                ItemCount = 1, At = now, Reason = DeliveryReasons.MissingPermissions, Missing = 16 }));
+            await RefusedAsync(() => store.EndWaitsAsync(1, null, DateTime.Now));
+            await RefusedAsync(() => store.ClearFailingAsync(1, PostSource.Armor, DateTime.Now));
+            await RefusedAsync(() => store.CountOlderBotRunsAsync(new string('j', 101), now));
+            await RefusedAsync(() => store.CountOlderBotRunsAsync("GuildNotificationJob.NotifyAllGuilds", DateTime.Now));
+            await RefusedAsync(() => store.MarkCheckedAsync(0, 1));
+        }
+
+        // A save of switches is a server's, by the Owner or a server's admin, at a UTC time, in the caller's transaction. An Admin
+        // can't save them at all.
+        [Fact]
+        public async Task SwitchesThatCantBeSavedAreRefused()
+        {
+            var switches = new GuildSwitchData(database, NoDatabase.Names);
+            SwitchChange Change(ulong guildId = 1, ulong by = 1, string role = "owner", DateTime? at = null) => new()
+            {
+                GuildId = guildId,
+                ArmorOn = false,
+                At = at ?? DateTime.UtcNow,
+                ChangedBy = by,
+                Role = role
+            };
+
+            await RefusedAsync(() => switches.SaveSwitches(Change(role: "admin"), NoTransaction()));
+            await RefusedAsync(() => switches.SaveSwitches(Change(role: "Owner"), NoTransaction()));
+            await RefusedAsync(() => switches.SaveSwitches(Change(guildId: 0), NoTransaction()));
+            await RefusedAsync(() => switches.SaveSwitches(Change(by: 0), NoTransaction()));
+            await RefusedAsync(() => switches.SaveSwitches(Change(at: DateTime.Now), NoTransaction()));
+            await RefusedAsync(() => switches.SaveSwitches(Change(), null!));
+            await RefusedAsync(() => switches.SaveSwitches(null!, NoTransaction()));
+
+            // A server admin's, for the servers' own pages to come, gets as far as its SQL
+            var missing = new GuildSwitchData(database, new DatabaseNames(new Dictionary<DBConnectionName, string>()));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => missing.SaveSwitches(Change(role: "server_admin"), NoTransaction()));
+            Assert.Equal(0, database.Created);
+        }
+
+        // A chunk of the posts' clean-up takes from 1 to 5,000 rows before a UTC cutoff, and the totals go by whole UTC days
+        [Fact]
+        public async Task PostingRetentionOutsideItsLimitsIsRefused()
+        {
+            var retention = new PostingRetentionData(database, NoDatabase.Names);
+            var day = new DateTime(2026, 11, 14, 0, 0, 0, DateTimeKind.Utc);
+            var calls = new Func<DateTime, int, Task<int>>[] { retention.DeleteDeliveries, retention.DeleteSettledQueueRows, retention.DeleteSeenLobbies, retention.DeleteLobbySamples };
+
+            foreach (var call in calls)
+            {
+                await RefusedAsync(() => call(day, 0));
+                await RefusedAsync(() => call(day, PostingRetentionData.ChunkLimit + 1));
+                await RefusedAsync(() => call(DateTime.SpecifyKind(day, DateTimeKind.Local), 1));
+            }
+
+            await RefusedAsync(() => retention.TotalDeliveryDays(day.AddHours(1), day.AddDays(1)));
+            await RefusedAsync(() => retention.TotalDeliveryDays(day, day.AddMinutes(1)));
+            await RefusedAsync(() => retention.TotalDeliveryDays(day, day.AddDays(-1)));
+
+            var missing = new PostingRetentionData(database, new DatabaseNames(new Dictionary<DBConnectionName, string>()));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => missing.TotalDeliveryDays(day, day));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => missing.DeleteDeliveries(day, PostingRetentionData.ChunkLimit));
             Assert.Equal(0, database.Created);
         }
     }

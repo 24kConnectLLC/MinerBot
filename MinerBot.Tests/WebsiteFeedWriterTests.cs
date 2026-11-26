@@ -550,15 +550,15 @@ namespace MinerBot.Tests
             await writer.MapTickAsync(TestContext.Current.CancellationToken);
         }
 
-        // The feed reads a new lobby and a new map before the notification job does. The job still finds them new and posts
-        // them, once: what the feed has written isn't what the job has seen.
+        // The feed reads a new lobby and a new map before the notification job does. It writes nothing of the job's record,
+        // so the job still finds them new and posts them, once: what the feed has written isn't what the job has seen.
         [Fact]
-        public async Task FeedLeavesTheNotificationJobWhatItHasNotPosted()
+        public async Task FeedLeavesTheQueueAndTheSeenItemsAlone()
         {
             await using var discord = await FakeDiscord.StartAsync();
             await FeedTicksAsync(discord);
             await discord.RunNotificationJobAsync();
-            var seen = (discord.Notifications.Maps.Count, discord.Notifications.Lobbies.Count, discord.Notifications.Maps.ReadCount);
+            var record = (discord.Store.Seen, discord.Store.Queue, discord.Store.Baselines);
 
             discord.Steam.LatestItems.Insert(0, FakeGetData.CreateItem(NewId));
             discord.Steam.Lobbies.Add(WebsiteFeedWriterTests.Lobby(NewId));
@@ -567,7 +567,9 @@ namespace MinerBot.Tests
 
             Assert.Contains((ulong)NewId, data.Lobbies.Keys);
             Assert.Contains((ulong)NewId, data.Maps.Keys);
-            Assert.Equal(seen, (discord.Notifications.Maps.Count, discord.Notifications.Lobbies.Count, discord.Notifications.Maps.ReadCount));
+            Assert.Equal(record.Seen, discord.Store.Seen);
+            Assert.Equal(record.Queue, discord.Store.Queue);
+            Assert.Equal(record.Baselines, discord.Store.Baselines);
 
             await discord.RunNotificationJobAsync();
             await FeedTicksAsync(discord);

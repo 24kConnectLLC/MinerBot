@@ -117,6 +117,9 @@ namespace MinerBot.Tests
             for (var i = 0; i < 365; i++)
                 recorder.Sample(Noon.UtcDateTime.AddMinutes(i), true, true);
 
+            for (var i = 0; i < 75; i++)
+                recorder.SampleLobbies(new LobbySample { minute = Noon.UtcDateTime.AddMinutes(5 * i), steam_answered = false });
+
             var events = recorder.PeekEvents(int.MaxValue);
 
             Assert.Equal(BotRecorder.EventLimit, events.Count);
@@ -127,8 +130,13 @@ namespace MinerBot.Tests
             Assert.Equal(BotRecorder.SampleLimit, recorder.PeekSamples(int.MaxValue).Count);
             Assert.Equal(Noon.UtcDateTime.AddMinutes(5), recorder.PeekSamples(1)[0].minute);
 
-            Assert.Equal((6, 5, 5), recorder.TakeDropped());
-            Assert.Equal((0, 0, 0), recorder.TakeDropped());
+            // Six hours of a lobby sample every 5 minutes
+            Assert.Equal(72, BotRecorder.LobbySampleLimit);
+            Assert.Equal(BotRecorder.LobbySampleLimit, recorder.PeekLobbySamples(int.MaxValue).Count);
+            Assert.Equal(Noon.UtcDateTime.AddMinutes(15), recorder.PeekLobbySamples(1)[0].minute);
+
+            Assert.Equal((6, 5, 5, 3), recorder.TakeDropped());
+            Assert.Equal((0, 0, 0, 0), recorder.TakeDropped());
         }
 
         // An item leaves only once its write went through, and what arrived while it was written stays
@@ -265,8 +273,60 @@ namespace MinerBot.Tests
             recorder.UpdateStatus(new DiscordReading(DiscordState.Connected, true, 1, 1), new SteamStatus(SteamConnection.LoggedOn, DateTimeOffset.UtcNow));
             recorder.UpdateStatus(new DiscordReading(DiscordState.Connected, true, 1, 1), null!);
             recorder.Sample(DateTime.UtcNow, true, true);
+            recorder.SampleLobbies(null!);
 
             Assert.Equal([BotEvents.BotStarted], Kinds(recorder));
+            Assert.Empty(recorder.PeekLobbySamples(10));
+        }
+
+        // Back on Discord at the moment the status handler saw the connection, not at the sampler's next tick up to 5 seconds
+        // later, and off it from the first drop of the spell. Connecting has no event of its own, so it's the tick's time.
+        [Fact]
+        public void DiscordSinceIsTheConnectionsOwnTime()
+        {
+            var recorder = Recorder();
+            var steam = new SteamStatus(SteamConnection.LoggedOn, Noon);
+
+            clock.UtcNow = Noon.AddSeconds(5);
+            recorder.UpdateStatus(new DiscordReading(DiscordState.Connecting, false, null, null), steam);
+            Assert.Equal(Noon.AddSeconds(5).UtcDateTime, recorder.StatusToWrite().Row.discord_since);
+
+            // Connected at 12:00:07.25, read at the tick at 12:00:10
+            clock.UtcNow = Noon.AddSeconds(10);
+            recorder.UpdateStatus(new DiscordReading(DiscordState.Connected, true, 40, 3) { ChangedAt = Noon.AddSeconds(7.25).UtcDateTime }, steam);
+            Assert.Equal(Noon.AddSeconds(7.25).UtcDateTime, recorder.StatusToWrite().Row.discord_since);
+
+            // Dropped at 12:05:01.5, read at 12:05:05
+            clock.UtcNow = Noon.AddMinutes(5).AddSeconds(5);
+            recorder.UpdateStatus(new DiscordReading(DiscordState.Disconnected, false, null, null) { ChangedAt = Noon.AddMinutes(5).AddSeconds(1.5).UtcDateTime }, steam);
+            Assert.Equal(Noon.AddMinutes(5).AddSeconds(1.5).UtcDateTime, recorder.StatusToWrite().Row.discord_since);
+
+            // Connecting again, with the drop's time on the reading
+            clock.UtcNow = Noon.AddMinutes(5).AddSeconds(10);
+            recorder.UpdateStatus(new DiscordReading(DiscordState.Connecting, false, null, null) { ChangedAt = Noon.AddMinutes(5).AddSeconds(1.5).UtcDateTime }, steam);
+            Assert.Equal(Noon.AddMinutes(5).AddSeconds(10).UtcDateTime, recorder.StatusToWrite().Row.discord_since);
+        }
+
+        // A reading can show the connection a moment before the handler's event runs, carrying no time yet, or the time of the
+        // connection before the last drop: neither is newer than the since before it, so the tick's time stands
+        [Fact]
+        public void ReadingBeforeTheHandlerKeepsTheTickTime()
+        {
+            var recorder = Recorder();
+            var steam = new SteamStatus(SteamConnection.LoggedOn, Noon);
+
+            clock.UtcNow = Noon.AddSeconds(5);
+            recorder.UpdateStatus(new DiscordReading(DiscordState.Connected, true, 40, 3), steam);
+            Assert.Equal(Noon.AddSeconds(5).UtcDateTime, recorder.StatusToWrite().Row.discord_since);
+
+            clock.UtcNow = Noon.AddMinutes(1).AddSeconds(5);
+            recorder.UpdateStatus(new DiscordReading(DiscordState.Disconnected, false, null, null) { ChangedAt = Noon.AddMinutes(1).UtcDateTime }, steam);
+            Assert.Equal(Noon.AddMinutes(1).UtcDateTime, recorder.StatusToWrite().Row.discord_since);
+
+            // Connected again before the handler's event ran: the reading still has the first connection's time
+            clock.UtcNow = Noon.AddMinutes(1).AddSeconds(10);
+            recorder.UpdateStatus(new DiscordReading(DiscordState.Connected, true, 40, 3) { ChangedAt = Noon.AddSeconds(2).UtcDateTime }, steam);
+            Assert.Equal(Noon.AddMinutes(1).AddSeconds(10).UtcDateTime, recorder.StatusToWrite().Row.discord_since);
         }
 
         [Fact]
@@ -293,7 +353,7 @@ namespace MinerBot.Tests
             Assert.All(BotEvents.All, kind => Assert.True(EventLevel.IsKnown(BotEvents.LevelOf(kind)), kind));
 
             Assert.Equal(["alert.failed", "alert.sent", "bot.started", "bot.stopping", "bot.unclean_end", "database.unreachable", "discord.connected",
-                "discord.disconnected", "job.cut_off", "job.failed", "posts.paused", "posts.resumed", "records.dropped", "request.interrupted", "request.rejected",
+                "discord.disconnected", "job.cut_off", "job.failed", "posts.baseline", "posts.paused", "posts.resumed", "posts.unconfirmed", "records.dropped", "request.interrupted", "request.rejected",
                 "requests.off", "steam.logged_off", "steam.logged_on", "steam.logon_failed", "steam.needs_sign_in", "steam.offline", "steam.token_renewed",
                 "steam.token_saved"], BotEvents.All.Order(StringComparer.Ordinal));
             Assert.Equal(
@@ -302,8 +362,11 @@ namespace MinerBot.Tests
                 (BotEvents.RequestsOff, EventLevel.Warning),
                 (BotEvents.RequestInterrupted, EventLevel.Warning),
                 (BotEvents.PostsPaused, EventLevel.Warning),
-                (BotEvents.PostsResumed, EventLevel.Info)
-            ], new[] { BotEvents.RequestRejected, BotEvents.RequestsOff, BotEvents.RequestInterrupted, BotEvents.PostsPaused, BotEvents.PostsResumed }
+                (BotEvents.PostsResumed, EventLevel.Info),
+                (BotEvents.PostsBaseline, EventLevel.Info),
+                (BotEvents.PostsUnconfirmed, EventLevel.Warning)
+            ], new[] { BotEvents.RequestRejected, BotEvents.RequestsOff, BotEvents.RequestInterrupted, BotEvents.PostsPaused, BotEvents.PostsResumed, BotEvents.PostsBaseline,
+                BotEvents.PostsUnconfirmed }
                 .Select(kind => (kind, BotEvents.LevelOf(kind))));
         }
 

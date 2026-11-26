@@ -1,6 +1,7 @@
 using System.Globalization;
 using DataAccessLibrary.Status;
 using DataAccessLibrary.Status.Models;
+using MinerBot.Dashboard.Servers;
 
 namespace MinerBot.Dashboard.Status
 {
@@ -32,8 +33,14 @@ namespace MinerBot.Dashboard.Status
 
         public static readonly TimeSpan ArmorWait = TimeSpan.FromDays(3);
 
+        // The bot that runs keeps its posts only in memory, so the words and promises of the pages about posts that survive a
+        // restart aren't true of it: an older bot, as ./rollback.sh bot puts back
+        public const string OlderBot = "The bot that runs now is older than this dashboard: it ignores the switches, records no posts, and keeps what it hasn't "
+            + "posted only in memory, so a restart loses it. Deploy the current bot.";
+
+        // serversFailing is null when the record of the bot's posts couldn't be read
         public static IReadOnlyList<Banner> Of(StatusBox box, IReadOnlyList<JobStatusRow> jobs, PendingArmor? armor, int? serversCantPost,
-            WebsiteReads failedReads = WebsiteReads.None)
+            WebsiteReads failedReads = WebsiteReads.None, int? serversFailing = null)
         {
             var banners = new List<Banner>();
             var (status, state, now) = (box.Status, box.State, box.Now);
@@ -47,6 +54,11 @@ namespace MinerBot.Dashboard.Status
             else if (BotStates.StoppedTooLong(status, state, now))
                 banners.Add(new Banner($"MinerBot stopped {TimeWords.Ago(status.stopped_at!.Value, now)}, at {TimeWords.Utc(status.stopped_at.Value)}, and hasn't started again, though a deploy's swap stops it for seconds only. Check it on the server with ./status.sh.",
                     "The deploy notes", DeployNotes));
+
+            // Only while that bot runs: a row it left as it stopped, or one it hasn't written for 10 minutes, says nothing of
+            // the bot that runs next
+            if (status != null && state is (BotState.Online or BotState.Late) && !PostingRules.KeepsPosts(status))
+                banners.Add(new Banner(OlderBot, "The deploy notes", DeployNotes));
 
             // Only while MinerBot's own database answers, which the page needs. status.sh never asks the website's database
             // anything: its look asks MariaDB nothing, and its nightly --check only looks for triggers, events and routines in
@@ -108,6 +120,9 @@ namespace MinerBot.Dashboard.Status
 
             if (serversCantPost is int count && count > 0)
                 banners.Add(new Banner($"{TimeWords.Count(count, "server")} {(count == 1 ? "has" : "have")} a setting MinerBot can't post in.", "See them", ProblemsLink));
+
+            if (serversFailing is int failing && failing > 0)
+                banners.Add(new Banner(DeliveryWords.Banner(failing), "See them", ProblemsLink));
 
             if (armor is { Oldest: { } oldest } && WebsiteClock.ToUtc(oldest) is { } sent && now - sent >= ArmorWait)
                 banners.Add(new Banner($"{armor.Count.ToString("N0", CultureInfo.InvariantCulture)} armor {(armor.Count == 1 ? "is" : "are")} waiting for a review, the oldest since {oldest.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)} by the website's clock, {TimeWords.Span(now - sent)} ago.",

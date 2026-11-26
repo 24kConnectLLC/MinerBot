@@ -71,22 +71,27 @@ the_rights() {   # what the rights file gives, one per line, as deploy/rights-li
         "column INSERT minerbot_db bot_commands channel_id" "column INSERT minerbot_db bot_commands created_at" \
         "column INSERT minerbot_db bot_commands expires_at" "column INSERT minerbot_db bot_commands guild_id" \
         "column INSERT minerbot_db bot_commands kind" "column INSERT minerbot_db bot_commands request_key" \
-        "column INSERT minerbot_db bot_commands signature" \
-        "column SELECT website_db ihvph_discord_servers guild_id" "column UPDATE website_db ihvph_armor_styles Status" \
-        "column UPDATE website_db ihvph_blacklist expire_date" "column UPDATE website_db ihvph_blacklist notes" \
-        "column UPDATE website_db ihvph_blacklist reason" "column UPDATE website_db ihvph_blacklist username" \
-        "global USAGE" "limits 15 20.000000 0 0 0" \
+        "column INSERT minerbot_db bot_commands signature" "column SELECT website_db ihvph_discord_servers guild_id" \
+        "column UPDATE website_db ihvph_armor_styles Status" "column UPDATE website_db ihvph_blacklist expire_date" \
+        "column UPDATE website_db ihvph_blacklist notes" "column UPDATE website_db ihvph_blacklist reason" \
+        "column UPDATE website_db ihvph_blacklist username" "global USAGE" "limits 15 20.000000 0 0 0" \
         "table DELETE minerbot_db dashboard_sessions" "table DELETE website_db ihvph_blacklist" \
         "table INSERT minerbot_db armor_reviews" "table INSERT minerbot_db audit_log" \
-        "table INSERT minerbot_db dashboard_sessions" "table INSERT website_db ihvph_blacklist" \
-        "table SELECT minerbot_db armor_reviews" "table SELECT minerbot_db audit_log" "table SELECT minerbot_db bot_commands" \
-        "table SELECT minerbot_db bot_events" "table SELECT minerbot_db bot_settings" "table SELECT minerbot_db bot_status" \
-        "table SELECT minerbot_db dashboard_sessions" "table SELECT minerbot_db guild_channels" \
-        "table SELECT minerbot_db guild_daily" "table SELECT minerbot_db guild_events" "table SELECT minerbot_db guilds" \
-        "table SELECT minerbot_db job_runs" "table SELECT minerbot_db job_status" "table SELECT minerbot_db uptime_daily" \
-        "table SELECT minerbot_db uptime_samples" "table SELECT website_db ihvph_armor_styles" \
-        "table SELECT website_db ihvph_blacklist" "table SELECT website_db ihvph_discord_servers" \
-        "table UPDATE minerbot_db dashboard_sessions"
+        "table INSERT minerbot_db dashboard_sessions" "table INSERT minerbot_db guild_settings" \
+        "table INSERT website_db ihvph_blacklist" "table SELECT minerbot_db armor_reviews" \
+        "table SELECT minerbot_db audit_log" "table SELECT minerbot_db bot_commands" \
+        "table SELECT minerbot_db bot_events" "table SELECT minerbot_db bot_settings" \
+        "table SELECT minerbot_db bot_status" "table SELECT minerbot_db dashboard_sessions" \
+        "table SELECT minerbot_db guild_channels" "table SELECT minerbot_db guild_daily" \
+        "table SELECT minerbot_db guild_delivery_status" "table SELECT minerbot_db guild_events" \
+        "table SELECT minerbot_db guild_settings" "table SELECT minerbot_db guilds" \
+        "table SELECT minerbot_db job_runs" "table SELECT minerbot_db job_status" \
+        "table SELECT minerbot_db notification_deliveries" "table SELECT minerbot_db notification_queue" \
+        "table SELECT minerbot_db notification_seen" "table SELECT minerbot_db schema_version" \
+        "table SELECT minerbot_db uptime_daily" "table SELECT minerbot_db uptime_samples" \
+        "table SELECT website_db ihvph_armor_styles" "table SELECT website_db ihvph_blacklist" \
+        "table SELECT website_db ihvph_discord_servers" "table UPDATE minerbot_db dashboard_sessions" \
+        "table UPDATE minerbot_db guild_settings"
 }
 
 refuse() {   # refuse <message>

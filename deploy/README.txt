@@ -247,7 +247,7 @@ that would run with the rights of whoever restores it, and the bot's login can m
 that owned MinerBot's database before move-database.sh moved it.
   1. ./backup.sh manual, a dump of the current state first.
   2. docker compose stop dashboard bot (the bot writes its status and history in this database too). Don't run
-     ./setup-dashboard.sh before step 6: it starts a stopped dashboard.
+     ./setup-dashboard.sh before step 8: it starts a stopped dashboard.
   3. gzip -t <file>, and gzip -dc <file> | tail -n 1 must show: -- Dump completed
      gzip -dc <file> | grep -c '^DELIMITER' must print 0. Otherwise the dump holds a trigger, event or routine, which
      no migration makes: never restore it, as anyone. Look at it with gzip -dc <file> | less, and find out who made it.
@@ -272,11 +272,26 @@ that owned MinerBot's database before move-database.sh moved it.
      If MariaDB refuses the login as it connects (ERROR 1045, with no "at line"), its password was changed outside
      bot.env: find out why first.
   6. If step 4 showed fewer migrations in the dump than in the live database, the restore took them back. Either
-     migrate again, from the commit the dashboard runs (./status.sh shows it), since every migration can run twice:
+     migrate again, from the later of the commits the bot and the dashboard run (./status.sh shows both; a deploy of
+     the bot alone brings migrations too), since every migration can run twice:
        ./deploy.sh <that commit> --only dashboard --no-start      it builds, dumps and migrates, and swaps nothing
-     or, to undo the last dashboard deploy's migration, go back to the image from before it: ./rollback.sh dashboard
-     Then: docker compose up -d --no-build --no-deps dashboard bot; then ./status.sh. The bot may record
-     bot.unclean_end for the run in the dump's status row, which was no crash.
+     or go back to the images from before the newest migration it took back: ./rollback.sh for each service whose
+     commit has it, for migration 5 the bot, and the dashboard too once it runs a commit that has it. ./rollback.sh
+     starts the service it swaps, so when the dump has migration 5, do step 7 before it.
+  7. If the dump has migration 5 (0005_posting), the restore took the bot's record of its posts back to the dump too,
+     so its first run would post again, in every server, what it posted since the dump, and a message the dump caught
+     being sent or in doubt, as its look in the channel reads only the two minutes after that try and misses the post
+     the live bot sent again after the dump. With the owner's yes, take that record's baselines away, give up what
+     waited, and record what was being sent as a post that may not have arrived, before the start:
+       mariadb <BOT_DB from server.conf> -e "DELETE FROM notification_baseline; UPDATE notification_queue SET state = 'dropped', reason = 'too_old', settled_at = UTC_TIMESTAMP(3) WHERE state = 'pending'"
+       mariadb <BOT_DB from server.conf> -e "UPDATE notification_queue SET state = 'sent', reason = 'unconfirmed', settled_at = UTC_TIMESTAMP(3) WHERE state = 'sending'; UPDATE notification_deliveries SET state = 'unconfirmed', reason = 'unconfirmed', settled_at = UTC_TIMESTAMP(3) WHERE state IN ('sending', 'in_doubt')"
+     The first run then takes new baselines and posts nothing it finds; what wasn't posted by the restore never is, and
+     what the dump caught being sent isn't sent again. An armor taken down, or a map hidden on Steam, before the dump
+     while its posts waited is still posted where it never went once it's approved or shown again, as without a
+     restore. So one the live bot posted there after the dump, and that was taken down or hidden again by the restore,
+     or, for a map, wasn't among the 20 maps that first run read, is posted there a second time.
+  8. docker compose up -d --no-build --no-deps dashboard bot; then ./status.sh. The bot may record bot.unclean_end for
+     the run in the dump's status row, which was no crash.
 
 
 Housekeeping

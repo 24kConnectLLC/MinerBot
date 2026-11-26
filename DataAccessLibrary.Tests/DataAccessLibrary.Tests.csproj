@@ -28,6 +28,18 @@
     <None Include="..\deploy\rights-list.sql" Link="deploy\rights-list.sql" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!-- The two runbooks, whose reset of the bot's record of its posts after a restore RestoreResetTests runs as the owner would -->
+  <ItemGroup>
+    <None Include="..\deploy\README.md" Link="deploy\README.md" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\deploy\README.txt" Link="deploy\README.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- README.md and env.example, whose rights for a dashboard with two logins DashboardRightsTests gives a login of its own -->
+  <ItemGroup>
+    <None Include="..\README.md" Link="README.md" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\env.example" Link="env.example" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Configuration" Version="10.0.13" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.13" />

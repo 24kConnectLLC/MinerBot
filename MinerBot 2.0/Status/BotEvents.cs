@@ -50,6 +50,14 @@ namespace MinerBot_2._0.Status
         public const string PostsPaused = "posts.paused";
         public const string PostsResumed = "posts.resumed";
 
+        // A source of the notification job's posts took what's there as already posted: its first good read, or after an
+        // older bot posted since this bot last checked, with how many items and why
+        public const string PostsBaseline = "posts.baseline";
+
+        // A post Discord didn't answer about, or whose process stopped before it wrote the answer down, that the bot couldn't
+        // look for in its channel: counted as sent so it's never sent twice, with its server, channel and time
+        public const string PostsUnconfirmed = "posts.unconfirmed";
+
         static readonly Dictionary<string, string> Levels = new()
         {
             [BotStarted] = EventLevel.Info,
@@ -68,6 +76,8 @@ namespace MinerBot_2._0.Status
             [RequestInterrupted] = EventLevel.Warning,
             [PostsPaused] = EventLevel.Warning,
             [PostsResumed] = EventLevel.Info,
+            [PostsBaseline] = EventLevel.Info,
+            [PostsUnconfirmed] = EventLevel.Warning,
             [SteamEvents.LoggedOn] = EventLevel.Info,
             [SteamEvents.Offline] = EventLevel.Warning,
             [SteamEvents.LoggedOff] = EventLevel.Warning,

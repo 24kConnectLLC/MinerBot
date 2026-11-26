@@ -8,7 +8,10 @@ using DataAccessLibrary.Armor;
 using DataAccessLibrary.Armor.Models;
 using DataAccessLibrary.Blacklist;
 using DataAccessLibrary.Blacklist.Models;
+using DataAccessLibrary.Audit;
+using DataAccessLibrary.Audit.Models;
 using DataAccessLibrary.Discord.Models;
+using DataAccessLibrary.Posting;
 using DataAccessLibrary.Requests;
 using DataAccessLibrary.Tests.Database;
 using Microsoft.AspNetCore.Diagnostics;
@@ -17,6 +20,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 using MinerBot.Dashboard.Armor;
+using MinerBot.Dashboard.Audit;
 using MinerBot.Dashboard.Blacklist;
 using MinerBot.Dashboard.Pages;
 using MinerBot.Dashboard.Requests;
@@ -44,6 +48,7 @@ namespace MinerBot.Dashboard.Tests
         const string Leave = "leave";
         const string Review = "review";
         const string Add = "add";
+        const string Switches = "switches";
 
         // The answers that aren't a notice: sent, or an armor action done, refused for the role, and a form someone made up
         const string Sent = "Sent";
@@ -73,6 +78,16 @@ namespace MinerBot.Dashboard.Tests
         const string Exists = "Exists";
         const string AlreadyAdded = "AlreadyAdded";
         const string AddUnsure = "AddUnsure";
+
+        // A move back to pending from Approved of armor the bot's record shows posted, and the switches' own answers: nothing
+        // to save, nothing to save from a form whose change was saved since it was drawn, a form drawn before another save,
+        // the person's limit, and a save the database didn't confirm
+        const string Posted = "Posted";
+        const string Unchanged = "Unchanged";
+        const string SwitchesAlready = "SwitchesAlready";
+        const string Stale = "Stale";
+        const string Limit = "Limit";
+        const string SwitchesUnsure = "SwitchesUnsure";
 
         // Each page's forms, pressed for each way they can be answered: every one of the controls page's, and for the other
         // pages, the sender's answers by their families and every answer of the page's own
@@ -120,6 +135,7 @@ namespace MinerBot.Dashboard.Tests
             { Review, Blocked },
             { Review, Unticked },
             { Review, ActionUnsure },
+            { Review, Posted },
             { Add, Sent },
             { Add, MadeUp },
             { Add, Fields },
@@ -129,7 +145,16 @@ namespace MinerBot.Dashboard.Tests
             { Add, LookupUnsure },
             { Add, Exists },
             { Add, AlreadyAdded },
-            { Add, AddUnsure }
+            { Add, AddUnsure },
+            { Switches, Done },
+            { Switches, Forbidden },
+            { Switches, MadeUp },
+            { Switches, NotIn },
+            { Switches, Unchanged },
+            { Switches, SwitchesAlready },
+            { Switches, Stale },
+            { Switches, Limit },
+            { Switches, SwitchesUnsure }
         };
 
         // A form pressed, and for a form's notice the status its GET answers with, the words it shows, and the key it draws
@@ -172,6 +197,7 @@ namespace MinerBot.Dashboard.Tests
                 Leave => await PressLeaveAsync(db, factory, outcome),
                 Review => await PressReviewAsync(db, factory, outcome),
                 Add => await PressAddAsync(db, factory, outcome),
+                Switches => await PressSwitchesAsync(db, factory, outcome),
                 _ => throw new ArgumentException($"There's no page called {page}", nameof(page))
             };
             var response = pressed.Response;
@@ -229,6 +255,11 @@ namespace MinerBot.Dashboard.Tests
             {
                 Services = services => services.Replace(ServiceDescriptor.Transient<IBlacklistData>(provider =>
                     new LateBlacklist(ActivatorUtilities.CreateInstance<BlacklistData>(provider))))
+            },
+            SwitchesUnsure => new DashboardFactoryOptions
+            {
+                Services = services => services.Replace(ServiceDescriptor.Transient<IGuildSwitchData>(provider =>
+                    new LateSwitches(ActivatorUtilities.CreateInstance<GuildSwitchData>(provider))))
             },
             _ => null
         };
@@ -466,10 +497,12 @@ namespace MinerBot.Dashboard.Tests
                 case NotApprovedNow:
                     return new(admin, await Announce(102), HttpStatusCode.Conflict, ArmorWords.NotApprovedNow);
 
-                // Drawn before the bot started again, which the status row then shows, with no notification run since
+                // Drawn before the bot stopped, which the status row then shows
                 case AnnounceNotNow:
                     var drawn = await ApprovedAsync();
-                    await db.Status().SaveStatus(StatusSteps.Status(now));
+                    var stopped = StatusSteps.Status(now);
+                    stopped.stopped_at = now;
+                    await db.Status().SaveStatus(stopped);
                     return new(admin, await Announce(101, KeyOf(drawn, "/admin/armor/101?handler=Announce")), HttpStatusCode.Conflict, ArmorWords.AnnounceNotNow);
 
                 case Done:
@@ -497,9 +530,90 @@ namespace MinerBot.Dashboard.Tests
 
                 case ActionUnsure:
                     return new(admin, await Approve(await ArmorSteps.OpenAsync(admin, 102)), HttpStatusCode.ServiceUnavailable, ArmorWords.Unsure);
+
+                // Drawn before the bot posted it, which its record then shows
+                case Posted:
+                    var before = await ApprovedAsync();
+                    var queued = await PostSteps.QueueAsync(db, PostSource.Armor, 101, now, RequestSteps.ServerId);
+                    await PostSteps.SentAsync(db, queued, 3001, now, 5000000000000000101);
+                    return new(admin, await ArmorSteps.PostAsync(admin, 101, "BackToPending", ArmorSteps.Read(before)), HttpStatusCode.Conflict, ArmorWords.WasPosted);
             }
 
             throw new ArgumentException($"The review page has no press for {outcome}", nameof(outcome));
+        }
+
+        // The switches' form on a server's page, the Owner's, on StatusSteps' server, whose armor, maps and lobbies each have a
+        // channel set: armor posts turned off, from the version the page drew
+        static async Task<Pressed> PressSwitchesAsync(MariaDbFixture db, DashboardFactory factory, string outcome)
+        {
+            await StatusSteps.ServersAsync(db);
+            var owner = await SignedInAsync(factory, TestUsers.Owner, "198.51.100.189");
+            var now = factory.Clock.GetUtcNow().UtcDateTime;
+            var page = ServerPage(RequestSteps.ServerId);
+
+            async Task<HttpResponseMessage> Press(TestBrowser browser, string? version = null, bool armor = false, ulong? server = null)
+            {
+                var html = await browser.Client.GetStringAsync(page, Token);
+                var drawn = version ?? Regex.Match(html, "name=\"version\" value=\"([0-9]+)\"").Groups[1].Value;
+                List<KeyValuePair<string, string>> fields = [new("version", drawn), new("maps", "on"), new("lobbies", "on")];
+
+                if (armor)
+                    fields.Add(new("armor", "on"));
+
+                return await SignInSteps.PostAsync(browser, ServerPage(server ?? RequestSteps.ServerId) + "?handler=Switches", SignInSteps.FormToken(html),
+                    origin: DashboardFactory.PublicOrigin, fields: fields);
+            }
+
+            switch (outcome)
+            {
+                case Done:
+                    return new(owner, await Press(owner));
+
+                // Refused by the page's gate before the handler
+                case Forbidden:
+                    var admin = await SignedInAsync(factory, TestUsers.Admin, "198.51.100.190");
+                    return new(admin, await Press(admin, "0"));
+
+                case MadeUp:
+                    return new(owner, await Press(owner, "zero"));
+
+                case NotIn:
+                    return new(owner, await Press(owner, "0", server: StatusSteps.Id(StatusSteps.SettingsOnlyId)), HttpStatusCode.Conflict, SwitchWords.NotInNow);
+
+                case Unchanged:
+                    return new(owner, await Press(owner, armor: true), HttpStatusCode.OK, SwitchWords.Unchanged);
+
+                // What the form asks for was saved after the page was drawn from no switches: an earlier send of it, say
+                case SwitchesAlready:
+                    await PostSteps.SwitchesAsync(db, RequestSteps.ServerId, armor: false, maps: true, lobbies: true, now);
+                    return new(owner, await Press(owner, "0"), HttpStatusCode.OK, SwitchWords.Already);
+
+                case Stale:
+                    await PostSteps.SwitchesAsync(db, RequestSteps.ServerId, armor: true, maps: false, lobbies: true, now);
+                    return new(owner, await Press(owner, "0"), HttpStatusCode.Conflict, SwitchWords.Stale);
+
+                case Limit:
+                    for (var minute = 1; minute <= SwitchLimits.PerHour; minute++)
+                    {
+                        await db.Audit().AddAudit(new AuditEntry
+                        {
+                            at = now.AddMinutes(-minute),
+                            actor_id = TestUsers.Owner.Id,
+                            actor_name = "Test Owner",
+                            actor_role = AuditRole.Owner,
+                            action = AuditWords.SwitchesChange,
+                            outcome = AuditOutcome.Ok,
+                            guild_id = RequestSteps.ServerId
+                        });
+                    }
+
+                    return new(owner, await Press(owner), HttpStatusCode.TooManyRequests, "You've changed switches 30 times in the last hour, so nothing was saved.");
+
+                case SwitchesUnsure:
+                    return new(owner, await Press(owner), HttpStatusCode.ServiceUnavailable, SwitchWords.Unsure);
+            }
+
+            throw new ArgumentException($"The switches' form has no press for {outcome}", nameof(outcome));
         }
 
         // The blacklist's add form, an Admin's, with the boxes a person typed: an account number, or a custom profile link,

@@ -104,6 +104,42 @@ namespace MinerBot.Tests
             ], Recorded(recorder));
             Assert.Equal(EventLevel.Warning, recorder.PeekEvents(100).First(row => row.kind == BotEvents.DiscordDisconnected).level);
         }
+
+        // The status row's since comes from the reading: the time of the last connection for a connected one, and of the
+        // first drop of the spell otherwise, whatever failed attempts came after it; none before either
+        [Fact]
+        public async Task ReadingCarriesWhenItsStateBegan()
+        {
+            using var client = new TestClient();
+            var handler = new DiscordStatusHandler(client, new BotRecorder(clock, BotRecorderTests.Settings()), clock);
+
+            Assert.Null(handler.Read().ChangedAt);
+
+            clock.UtcNow = Noon.AddSeconds(3);
+            client.State = ConnectionState.Connected;
+            await handler.OnConnected();
+            clock.UtcNow = Noon.AddSeconds(8);
+
+            Assert.Equal(Noon.AddSeconds(3).UtcDateTime, handler.Read().ChangedAt);
+
+            clock.UtcNow = Noon.AddHours(1);
+            client.State = ConnectionState.Disconnected;
+            await handler.OnDisconnected(new TimeoutException());
+            clock.UtcNow = Noon.AddHours(1).AddSeconds(30);
+            await handler.OnDisconnected(new TimeoutException());
+
+            Assert.Equal(Noon.AddHours(1).UtcDateTime, handler.Read().ChangedAt);
+
+            client.State = ConnectionState.Connecting;
+            Assert.Equal(Noon.AddHours(1).UtcDateTime, handler.Read().ChangedAt);
+
+            clock.UtcNow = Noon.AddHours(1).AddSeconds(90);
+            client.State = ConnectionState.Connected;
+            await handler.OnConnected();
+
+            Assert.Equal(Noon.AddHours(1).AddSeconds(90).UtcDateTime, handler.Read().ChangedAt);
+            Assert.Equal(DateTimeKind.Utc, handler.Read().ChangedAt!.Value.Kind);
+        }
     }
 
     // The real Discord.Net, on a gateway that answers as Discord does, with the handlers attached as Program.cs attaches them
@@ -120,8 +156,12 @@ namespace MinerBot.Tests
             await discord.ReleaseReadyAsync();
             await WaitUntilAsync(() => discord.DiscordStatus.Read().Up);
 
-            Assert.Equal(new DiscordReading(DiscordState.Connected, true, 0, 1), discord.DiscordStatus.Read());
-            Assert.Contains(discord.Recorder.PeekEvents(100), row => row.kind == BotEvents.DiscordConnected);
+            // With the connection's own time, which its event has too
+            var reading = discord.DiscordStatus.Read();
+            var connected = Assert.Single(discord.Recorder.PeekEvents(100), row => row.kind == BotEvents.DiscordConnected);
+
+            Assert.Equal(new DiscordReading(DiscordState.Connected, true, 0, 1), reading with { ChangedAt = null });
+            Assert.Equal(connected.at, reading.ChangedAt);
         }
 
         static async Task WaitUntilAsync(Func<bool> condition)

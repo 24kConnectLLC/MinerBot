@@ -25,7 +25,7 @@ namespace DataAccessLibrary.Status
         public Task<BotStatusRow?> GetStatus()
         {
             string sql = $@"SELECT run_id, version, started_at, heartbeat_at, stopped_at, discord_state, discord_since, discord_latency_ms,
-                            discord_guilds, steam_state, steam_since, steam_last_result, steam_token_expires
+                            discord_guilds, steam_state, steam_since, steam_last_result, steam_token_expires, posting_run_id
                             FROM {_names.Bot}.bot_status
                             WHERE id = 1";
 

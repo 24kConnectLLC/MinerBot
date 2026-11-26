@@ -1,70 +1,19 @@
 using DataAccessLibrary.Discord.Models;
+using DataAccessLibrary.Posting;
 using Discord;
-using MinerBot_2._0.Jobs;
-using Steam.Models;
-using SteamWebAPIAccess.Models;
+using MinerBot.Shared.Delivery;
+using MinerBot_2._0.Models;
+using MinerBot_2._0.Posting;
+using static MinerBot.Tests.Posts;
 
 namespace MinerBot.Tests
 {
-    // Each run is a new job object on the real Discord.Net pipeline, the same as JobHandler runs it
+    // Each run is a new job object on the real Discord.Net pipeline, the same as JobHandler runs it, over MinerBot's
+    // database in memory
     [Collection("Discord")]
     public class NotificationJobTests
     {
-        const string ArmorTitle = "New Armor Styles:";
-        const string LobbyTitle = "__NEW__ Murder Miners Public Lobbies";
-        const string SendStep = "send message";
-        const string WaitingLine = "Couldn't send the notifications yet, because Discord hasn't sent the bot's servers";
-
-        const int NewId = 100;
-        const string NewMapTitle = "Map 100";
-
-        const string NewMapHeading = "__**New Map!**__";
-        const string UpdatedMapHeading = "__**Updated Map!**__";
-
-        static LobbyInfo Lobby(ulong id, uint version = 105) => new()
-        {
-            LobbyId = id,
-            VersionNumber = version,
-            HostName = $"Host {id}",
-            MapName = "Map",
-            Modes = "Mode",
-            CurrentPlayers = 1,
-            MaxPlayers = 8,
-            JoinURL = "https://example.com/join"
-        };
-
-        static List<string> SentTitles(FakeDiscord discord) => discord.Steps
-            .Where(step => step.Name == SendStep)
-            .SelectMany(step => step.EmbedTitles)
-            .ToList();
-
-        // Only the first message of a map post has text
-        static List<string> MapHeadings(FakeDiscord discord) => discord.Steps
-            .Where(step => step.Name == SendStep && !string.IsNullOrEmpty(step.Content))
-            .Select(step => step.Content!)
-            .ToList();
-
-        // An update puts a map on top of Steam's list
-        static void UpdateMap(FakeDiscord discord, PublishedFileDetailsModel map, int day)
-        {
-            map.TimeUpdated = DateTime.UnixEpoch.AddDays(day);
-            discord.Steam.LatestItems.Remove(map);
-            discord.Steam.LatestItems.Insert(0, map);
-        }
-
-        static void AddNewItems(FakeDiscord discord)
-        {
-            discord.Armor.AllArmor.Add(FakeArmorData.CreateArmor(NewId));
-            discord.Steam.LatestItems.Insert(0, FakeGetData.CreateItem(NewId));
-            discord.Steam.Lobbies.Add(Lobby(NewId));
-        }
-
-        static async Task<FakeDiscord> StartWithBaselineAsync()
-        {
-            var discord = await FakeDiscord.StartAsync();
-            await discord.RunNotificationJobAsync();
-            return discord;
-        }
+        const string WaitingDetail = "Discord hasn't sent the bot's servers yet, so this run found and posted nothing";
 
         [Fact]
         public async Task FirstRunAnnouncesNothing()
@@ -87,19 +36,34 @@ namespace MinerBot.Tests
             await discord.RunNotificationJobAsync();
 
             Assert.Equal([ArmorTitle, NewMapTitle, LobbyTitle], SentTitles(discord));
-            Assert.Contains("Armor 100", discord.Steps.First(step => step.Name == SendStep).EmbedDescriptions.Single());
+            Assert.Contains("Armor 100", Sends(discord)[0].EmbedDescriptions.Single());
         }
 
+        // No post pings anyone, whatever a name in it says
         [Fact]
-        public async Task EveryGuildGetsTheNewItems()
+        public async Task EveryPostPingsNobody()
         {
             await using var discord = await StartWithBaselineAsync();
-            discord.Guilds.AllGuilds.Add(FakeGuildData.CreateGuild(FakeDiscord.ChannelId));
             AddNewItems(discord);
 
             await discord.RunNotificationJobAsync();
 
-            Assert.Equal([ArmorTitle, NewMapTitle, LobbyTitle, ArmorTitle, NewMapTitle, LobbyTitle], SentTitles(discord));
+            Assert.Equal(3, Sends(discord).Count);
+            Assert.All(Sends(discord), step => Assert.True(step.AllowsNoMentions));
+        }
+
+        // Each server gets its own posts, kind by kind
+        [Fact]
+        public async Task EveryGuildGetsTheNewItems()
+        {
+            await using var discord = await StartWithBaselineAsync();
+            await AddSecondServerAsync(discord);
+            AddNewItems(discord);
+
+            await discord.RunNotificationJobAsync();
+
+            foreach (var channel in new[] { FakeDiscord.ChannelId, FakeDiscord.JoinedChannelId })
+                Assert.Equal([ArmorTitle, NewMapTitle, LobbyTitle], Sends(discord).Where(step => step.SentTo == channel).SelectMany(step => step.EmbedTitles));
         }
 
         // Every lobby the list shows is announced, under the same heading
@@ -118,11 +82,12 @@ namespace MinerBot.Tests
 
             await discord.RunNotificationJobAsync();
 
-            var announced = Assert.Single(discord.Steps, step => step.Name == SendStep).EmbedDescriptions.Single();
+            var announced = Assert.Single(Sends(discord)).EmbedDescriptions.Single();
             Assert.Contains("__Update 41 (v105):__\n\n- **Host:** `Host 2`", announced);
             Assert.Contains($"__{heading}:__\n\n- **Host:** `Host 1`", announced);
         }
 
+        // Every one of them counts as posted, the ones past the embed's room too
         [Fact]
         public async Task LobbiesThatPassTheEmbedLimitAreStillAnnounced()
         {
@@ -132,8 +97,9 @@ namespace MinerBot.Tests
             await discord.RunNotificationJobAsync();
             await discord.RunNotificationJobAsync();
 
-            var announced = Assert.Single(discord.Steps, step => step.Name == SendStep);
+            var announced = Assert.Single(Sends(discord));
             Assert.Contains("more lobbies", announced.EmbedDescriptions.Single());
+            Assert.All(Queue(discord, FakeDiscord.GuildId, PostSource.Lobbies), row => Assert.Equal(QueueState.Sent, row.state));
         }
 
         [Fact]
@@ -151,11 +117,11 @@ namespace MinerBot.Tests
         public async Task MapsThatPassTheMessageLimitAreAnnouncedInSeveralMessages()
         {
             await using var discord = await StartWithBaselineAsync();
-            discord.Steam.LatestItems = Enumerable.Range(NewId, 5).Select(id => MapEmbedFlowTests.LongMap(id)).ToList();
+            discord.Steam.LatestItems = Enumerable.Range(NewId, 5).Reverse().Select(NewLongMap).ToList();
 
             await discord.RunNotificationJobAsync();
 
-            var messages = discord.Steps.Where(step => step.Name == SendStep).ToList();
+            var messages = Sends(discord);
 
             Assert.Equal(2, messages.Count);
             Assert.All(messages, message => Assert.InRange(message.EmbedsLength, 1, EmbedBuilder.MaxEmbedLength));
@@ -182,7 +148,7 @@ namespace MinerBot.Tests
             discord.Steam.Lobbies.Add(Lobby(NewId));
             await discord.RunNotificationJobAsync();
 
-            var announced = Assert.Single(discord.Steps, step => step.Name == SendStep).EmbedDescriptions.Single();
+            var announced = Assert.Single(Sends(discord)).EmbedDescriptions.Single();
             Assert.Contains($"Host {NewId}", announced);
             Assert.DoesNotContain("Host 1`", announced);
         }
@@ -199,17 +165,6 @@ namespace MinerBot.Tests
             await discord.RunNotificationJobAsync();
 
             Assert.Empty(SentTitles(discord));
-        }
-
-        [Fact]
-        public async Task EmptyLobbyListIsAGoodFirstRead()
-        {
-            await using var discord = await StartWithBaselineAsync();
-
-            discord.Steam.Lobbies.Add(Lobby(NewId));
-            await discord.RunNotificationJobAsync();
-
-            Assert.Equal([LobbyTitle], SentTitles(discord));
         }
 
         [Fact]
@@ -266,26 +221,7 @@ namespace MinerBot.Tests
             Assert.Empty(SentTitles(discord));
         }
 
-        [Fact]
-        public async Task EachSourceHasItsOwnBaseline()
-        {
-            await using var discord = await FakeDiscord.StartAsync();
-            discord.Steam.Lobbies.Add(Lobby(1));
-            discord.Steam.LobbiesAvailable = false;
-            var maps = discord.Steam.LatestItems;
-            discord.Steam.LatestItems = new();
-            await discord.RunNotificationJobAsync();
-
-            // Armor has its baseline by now, but the other two get theirs on this run
-            discord.Steam.LobbiesAvailable = true;
-            discord.Steam.LatestItems = maps;
-            discord.Armor.AllArmor.Add(FakeArmorData.CreateArmor(NewId));
-            await discord.RunNotificationJobAsync();
-
-            Assert.Equal([ArmorTitle], SentTitles(discord));
-        }
-
-        // Keeping what wasn't delivered
+        // A source that fails waits for its next good read
 
         [Fact]
         public async Task FailedLobbyReadLeavesTheOtherSourcesAlone()
@@ -357,6 +293,8 @@ namespace MinerBot.Tests
             Assert.Equal([ArmorTitle, LobbyTitle, NewMapTitle], SentTitles(discord));
         }
 
+        // The website's channel rows are read before anything is found, so the run fails having queued nothing, and the
+        // next one finds the same items
         [Fact]
         public async Task FailedGuildListKeepsEverythingForTheNextRun()
         {
@@ -364,7 +302,8 @@ namespace MinerBot.Tests
             AddNewItems(discord);
             discord.Guilds.Failure = new TimeoutException("Database timed out");
 
-            await Assert.ThrowsAsync<TimeoutException>(discord.RunNotificationJobAsync);
+            var failed = await Assert.ThrowsAsync<JobFailedException>(discord.RunNotificationJobAsync);
+            Assert.Equal("posts wait: the website's database didn't give the servers' channels (TimeoutException)", failed.Message);
 
             discord.Guilds.Failure = null;
             await discord.RunNotificationJobAsync();
@@ -372,21 +311,26 @@ namespace MinerBot.Tests
             Assert.Equal([ArmorTitle, NewMapTitle, LobbyTitle], SentTitles(discord));
         }
 
+        // Nothing of that run is saved, so the next run takes the baselines
         [Fact]
-        public async Task FailedGuildListKeepsTheBaselinesOfThatRun()
+        public async Task FailedGuildListLeavesTheBaselinesToTheNextRun()
         {
             await using var discord = await FakeDiscord.StartAsync();
             discord.Steam.Lobbies.Add(Lobby(1));
             discord.Guilds.Failure = new TimeoutException("Database timed out");
 
-            await Assert.ThrowsAsync<TimeoutException>(discord.RunNotificationJobAsync);
+            await Assert.ThrowsAsync<JobFailedException>(discord.RunNotificationJobAsync);
+
+            Assert.Empty(discord.Store.Baselines);
 
             discord.Guilds.Failure = null;
             await discord.RunNotificationJobAsync();
 
             Assert.Empty(SentTitles(discord));
+            Assert.Equal([PostSource.Armor, PostSource.Lobbies, PostSource.Maps], discord.Store.Baselines.Select(row => row.source));
         }
 
+        // A refusal puts the items back to waiting, and the next run sends them
         [Fact]
         public async Task BatchThatReachedNoGuildIsSentOnTheNextRun()
         {
@@ -405,6 +349,7 @@ namespace MinerBot.Tests
             Assert.Equal([ArmorTitle, NewMapTitle, LobbyTitle], sent);
         }
 
+        // A post that can't be made, such as a map whose title is too long for an embed, waits, and the others go
         [Fact]
         public async Task BadEmbedKeepsItsBatchAndLeavesTheOtherSourcesAlone()
         {
@@ -415,6 +360,7 @@ namespace MinerBot.Tests
             await discord.RunNotificationJobAsync();
 
             Assert.Equal([ArmorTitle, LobbyTitle], SentTitles(discord));
+            Assert.Contains($"Couldn't make the map notification for guild {FakeDiscord.GuildId} (ArgumentException), so its items wait for the next run", discord.ConsoleText);
 
             discord.Steam.LatestItems[0].Title = NewMapTitle;
             await discord.RunNotificationJobAsync();
@@ -423,81 +369,21 @@ namespace MinerBot.Tests
             Assert.Equal([ArmorTitle, LobbyTitle, NewMapTitle], SentTitles(discord));
         }
 
-        [Theory]
-        [InlineData(true)]
-        [InlineData(false)]
-        public async Task BatchThatReachedOneGuildIsNotSentAgain(bool brokenGuildFirst)
-        {
-            await using var discord = await StartWithBaselineAsync();
-            discord.Guilds.AllGuilds.Insert(brokenGuildFirst ? 0 : 1, FakeGuildData.CreateGuild(FakeDiscord.DeletedChannelId));
-            AddNewItems(discord);
-
-            await discord.RunNotificationJobAsync();
-            await discord.RunNotificationJobAsync();
-
-            Assert.Equal([ArmorTitle, NewMapTitle, LobbyTitle], SentTitles(discord));
-        }
-
+        // An item waits for each server by its own age, so a newer one isn't given up with an older one that keeps failing
         [Fact]
-        public async Task BatchIsStillSentOnTheLastTry()
-        {
-            await using var discord = await StartWithBaselineAsync();
-            AddNewItems(discord);
-            discord.FailStep = SendStep;
-
-            for (int run = 1; run < NotificationState.MaxFailedRuns; run++)
-                await discord.RunNotificationJobAsync();
-
-            discord.FailStep = null;
-            var refused = discord.Steps.Count;
-            await discord.RunNotificationJobAsync();
-
-            Assert.Equal(3, discord.Steps.Skip(refused).Count(step => step.Name == SendStep));
-            Assert.DoesNotContain("Gave up", discord.ConsoleText);
-        }
-
-        [Fact]
-        public async Task BatchThatKeepsFailingIsDroppedSoItCanNotBlockItsSource()
-        {
-            await using var discord = await StartWithBaselineAsync();
-            AddNewItems(discord);
-            discord.FailStep = SendStep;
-
-            for (int run = 0; run < NotificationState.MaxFailedRuns; run++)
-                await discord.RunNotificationJobAsync();
-
-            Assert.Contains("Gave up on 1 new armor styles", discord.ConsoleText);
-            Assert.Contains("Gave up on 1 new or updated maps", discord.ConsoleText);
-            Assert.Contains("Gave up on 1 new lobbies", discord.ConsoleText);
-
-            discord.FailStep = null;
-            var refused = discord.Steps.Count;
-            discord.Armor.AllArmor.Add(FakeArmorData.CreateArmor(NewId + 1));
-
-            await discord.RunNotificationJobAsync();
-
-            var sent = Assert.Single(discord.Steps.Skip(refused), step => step.Name == SendStep);
-            Assert.Equal([ArmorTitle], sent.EmbedTitles);
-            Assert.Contains("Armor 101", sent.EmbedDescriptions.Single());
-            Assert.DoesNotContain("Armor 100", sent.EmbedDescriptions.Single());
-        }
-
-        [Fact]
-        public async Task NewItemIsNotDroppedWithAnOlderOneThatKeepsFailing()
+        public async Task EachItemIsGivenUpByItsOwnAge()
         {
             await using var discord = await StartWithBaselineAsync();
             discord.Armor.AllArmor.Add(FakeArmorData.CreateArmor(NewId));
             discord.FailStep = SendStep;
+            await discord.RunNotificationJobAsync();
 
-            for (int run = 1; run < NotificationState.MaxFailedRuns; run++)
-                await discord.RunNotificationJobAsync();
-
-            // The older armor gets its last try on this run, and the newer one its first
+            discord.MoveClock(TimeSpan.FromDays(6));
             discord.Armor.AllArmor.Add(FakeArmorData.CreateArmor(NewId + 1));
             await discord.RunNotificationJobAsync();
 
-            Assert.Contains("Gave up on 1 new armor styles", discord.ConsoleText);
-
+            // A week after the first armor was found, and a day after the second
+            discord.MoveClock(TimeSpan.FromDays(1));
             discord.FailStep = null;
             var refused = discord.Steps.Count;
             await discord.RunNotificationJobAsync();
@@ -505,123 +391,142 @@ namespace MinerBot.Tests
             var sent = Assert.Single(discord.Steps.Skip(refused), step => step.Name == SendStep).EmbedDescriptions.Single();
             Assert.Contains("Armor 101", sent);
             Assert.DoesNotContain("Armor 100", sent);
+            Assert.Equal([(QueueState.Dropped, DeliveryReasons.TooOld), (QueueState.Sent, null)],
+                Queue(discord, FakeDiscord.GuildId, PostSource.Armor).Select(row => (row.state, row.reason)));
         }
 
-        // A map given up on is found again when it's updated, and that update gets its own runs, as a new item does
+        // Armor after 7 days, maps after 2, lobbies after 30 minutes, by the time each waited, not the runs that tried it
         [Theory]
-        [InlineData(false)]
-        [InlineData(true)]
-        public async Task UpdateOfAMapThatWasGivenUpGetsRunsOfItsOwn(bool readFailsInBetween)
+        [InlineData(PostSource.Armor, 7 * 24 * 60)]
+        [InlineData(PostSource.Maps, 2 * 24 * 60)]
+        [InlineData(PostSource.Lobbies, 30)]
+        public async Task PendingItemsAreGivenUpAtTheirLimits(string source, int minutes)
         {
             await using var discord = await StartWithBaselineAsync();
-            var map = discord.Steam.LatestItems[2];
-            UpdateMap(discord, map, day: 200);
+            AddNewItems(discord);
             discord.FailStep = SendStep;
-
-            for (int run = 0; run < NotificationState.MaxFailedRuns; run++)
-                await discord.RunNotificationJobAsync();
-
-            // A failed read in between changes no counts
-            if (readFailsInBetween)
-            {
-                discord.Steam.Failure = new TimeoutException("Steam timed out");
-                await discord.RunNotificationJobAsync();
-                discord.Steam.Failure = null;
-            }
-
-            // Updated again, and the next run still can't send
-            UpdateMap(discord, map, day: 201);
             await discord.RunNotificationJobAsync();
 
+            // The last try inside the limit: the run comes 5 minutes after the clock's move
+            discord.MoveClock(TimeSpan.FromMinutes(minutes - 5));
+            await discord.RunNotificationJobAsync();
+
+            Assert.Equal(QueueState.Pending, Assert.Single(Queue(discord, FakeDiscord.GuildId, source)).state);
+
+            await discord.RunNotificationJobAsync();
+
+            var row = Assert.Single(Queue(discord, FakeDiscord.GuildId, source));
+            Assert.Equal((QueueState.Dropped, DeliveryReasons.TooOld), (row.state, row.reason));
+        }
+
+        // A lobby that closed before its post is dropped once a good read no longer lists it, and never posted later
+        [Fact]
+        public async Task LobbyClosedBeforeItsPostIsDropped()
+        {
+            await using var discord = await StartWithBaselineAsync();
+            discord.Steam.Lobbies.Add(Lobby(NewId));
+            discord.FailStep = SendStep;
+            await discord.RunNotificationJobAsync();
+
+            discord.Steam.Lobbies.Clear();
             discord.FailStep = null;
             var refused = discord.Steps.Count;
             await discord.RunNotificationJobAsync();
 
-            Assert.Single(discord.ConsoleText.Split("Gave up on 1 new or updated maps").Skip(1));
-            var sent = Assert.Single(discord.Steps.Skip(refused), step => step.Name == SendStep);
-            Assert.Equal(["Map 3"], sent.EmbedTitles);
-            Assert.Equal(UpdatedMapHeading, sent.Content);
-        }
-
-        [Fact]
-        public async Task ItemThatLeftItsSourceStartsAgainIfItComesBack()
-        {
-            await using var discord = await StartWithBaselineAsync();
-            discord.Steam.Lobbies.Add(Lobby(NewId));
-            discord.FailStep = SendStep;
-
-            for (int run = 1; run < NotificationState.MaxFailedRuns; run++)
-                await discord.RunNotificationJobAsync();
-
-            discord.Steam.Lobbies.Clear();
-            await discord.RunNotificationJobAsync();
-
             discord.Steam.Lobbies.Add(Lobby(NewId));
             await discord.RunNotificationJobAsync();
 
-            Assert.DoesNotContain("Gave up", discord.ConsoleText);
+            Assert.DoesNotContain(discord.Steps.Skip(refused), step => step.Name == SendStep);
+            Assert.Equal((QueueState.Dropped, DeliveryReasons.Closed), Queue(discord, FakeDiscord.GuildId, PostSource.Lobbies).Select(row => (row.state, row.reason)).Single());
         }
 
-        // Maps count their runs apart from SeenItems
+        // An open lobby's record says when it was last seen, which its retention goes by: written again once an hour while it
+        // stays open, not at every run
         [Fact]
-        public async Task MapThatLeftTheReadStartsAgainIfItComesBack()
+        public async Task OpenLobbyIsSeenAgainOnceAnHour()
         {
             await using var discord = await StartWithBaselineAsync();
-            var map = FakeGetData.CreateItem(NewId);
-            discord.Steam.LatestItems.Insert(0, map);
-            discord.FailStep = SendStep;
-
-            for (int run = 1; run < NotificationState.MaxFailedRuns; run++)
-                await discord.RunNotificationJobAsync();
-
-            discord.Steam.LatestItems.Remove(map);
+            discord.Steam.Lobbies.Add(Lobby(NewId));
             await discord.RunNotificationJobAsync();
 
-            discord.Steam.LatestItems.Insert(0, map);
+            var posted = Seen(discord, PostSource.Lobbies, NewId)!.last_seen_at;
+            discord.MoveClock(TimeSpan.FromMinutes(50));
             await discord.RunNotificationJobAsync();
 
-            Assert.DoesNotContain("Gave up", discord.ConsoleText);
+            Assert.Equal(posted, Seen(discord, PostSource.Lobbies, NewId)!.last_seen_at);
+
+            await discord.RunNotificationJobAsync();
+
+            Assert.Equal(posted.AddHours(1), Seen(discord, PostSource.Lobbies, NewId)!.last_seen_at);
+            Assert.Equal(posted, Seen(discord, PostSource.Lobbies, NewId)!.first_seen_at);
+            Assert.Single(Sends(discord));
         }
 
+        // A map that waits and is pushed out of the read is posted from its own details, and dropped once Steam doesn't show
+        // it any more; while Steam doesn't answer the look-up, it waits
+        [Fact]
+        public async Task MapThatWaitsOutOfTheReadIsPostedFromItsDetails()
+        {
+            await using var discord = await StartWithBaselineAsync();
+            discord.Steam.LatestItems.Insert(0, NewMap(NewId));
+            discord.FailStep = SendStep;
+            await discord.RunNotificationJobAsync();
+
+            for (var id = NewId + 1; id <= NewId + PostingLimits.LatestMaps; id++)
+                discord.Steam.LatestItems.Insert(0, NewMap(id));
+
+            discord.Steam.ItemsFailure = new HttpRequestException("Steam didn't answer");
+            discord.FailStep = null;
+            var refused = discord.Steps.Count;
+            await discord.RunNotificationJobAsync();
+
+            Assert.Equal(["Map 105", "Map 104", "Map 103", "Map 102", "Map 101"], discord.Steps.Skip(refused).Where(step => step.Name == SendStep).SelectMany(step => step.EmbedTitles));
+            Assert.Equal(QueueState.Pending, Queue(discord, FakeDiscord.GuildId, PostSource.Maps).Single(row => row.item_id == NewId).state);
+            Assert.Contains("Couldn't look up the maps that wait on Steam (HttpRequestException), so they wait for the next run", discord.ConsoleText);
+
+            discord.Steam.ItemsFailure = null;
+            await discord.RunNotificationJobAsync();
+
+            Assert.Equal([NewMapTitle], Sends(discord)[^1].EmbedTitles);
+            Assert.Equal([(ulong)NewId], Assert.Single(discord.Steam.ItemsAsked.Skip(1)));
+        }
+
+        [Fact]
+        public async Task MapHiddenWhileItWaitsIsDropped()
+        {
+            await using var discord = await StartWithBaselineAsync();
+            discord.Steam.LatestItems.Insert(0, NewMap(NewId));
+            discord.FailStep = SendStep;
+            await discord.RunNotificationJobAsync();
+
+            discord.Steam.LatestItems.RemoveAt(0);
+            discord.FailStep = null;
+            await discord.RunNotificationJobAsync();
+
+            Assert.Equal((QueueState.Dropped, DeliveryReasons.Hidden), Queue(discord, FakeDiscord.GuildId, PostSource.Maps).Select(row => (row.state, row.reason)).Single());
+        }
+
+        // A post of several messages whose later one was refused sends only that one's maps again
         [Fact]
         public async Task MapsOfAMessageThatFailedAreSentWithoutRepeatingTheOthers()
         {
             await using var discord = await StartWithBaselineAsync();
-            discord.Steam.LatestItems = Enumerable.Range(NewId, 5).Select(id => MapEmbedFlowTests.LongMap(id)).ToList();
+            discord.Steam.LatestItems = Enumerable.Range(NewId, 5).Reverse().Select(NewLongMap).ToList();
             discord.FailStep = SendStep;
             discord.FailStepAfter = 1;
 
             await discord.RunNotificationJobAsync();
 
-            var firstRun = discord.Steps.Where(step => step.Name == SendStep).ToList();
+            var firstRun = Sends(discord);
             Assert.Equal(2, firstRun.Count);
 
             discord.FailStep = null;
             await discord.RunNotificationJobAsync();
             await discord.RunNotificationJobAsync();
 
-            var delivered = firstRun.Take(1).Concat(discord.Steps.Where(step => step.Name == SendStep).Skip(2));
+            var delivered = firstRun.Take(1).Concat(Sends(discord).Skip(2));
 
             Assert.Equal(discord.Steam.LatestItems.Select(map => map.Title), delivered.SelectMany(step => step.EmbedTitles));
-        }
-
-        [Fact]
-        public async Task MapsOfTheGuildThatGotTheMostAreRecorded()
-        {
-            await using var discord = await StartWithBaselineAsync();
-            discord.Guilds.AllGuilds.Add(FakeGuildData.CreateGuild(FakeDiscord.ChannelId));
-            discord.Steam.LatestItems = Enumerable.Range(NewId, 5).Select(id => MapEmbedFlowTests.LongMap(id)).ToList();
-            discord.FailStep = SendStep;
-            discord.FailStepAfter = 3;
-
-            // The first guild gets both messages, and the second one only the first
-            await discord.RunNotificationJobAsync();
-
-            var firstRun = discord.Steps.Count;
-            discord.FailStep = null;
-            await discord.RunNotificationJobAsync();
-
-            Assert.DoesNotContain(discord.Steps.Skip(firstRun), step => step.Name == SendStep);
         }
 
         // Seen IDs
@@ -640,9 +545,10 @@ namespace MinerBot.Tests
             for (int run = 0; run < 5; run++)
                 await discord.RunNotificationJobAsync();
 
-            Assert.Equal(3, discord.Notifications.Armor.Count);
-            Assert.Equal(6, discord.Notifications.Maps.Count);
-            Assert.Equal(2, discord.Notifications.Lobbies.Count);
+            Assert.Equal(3, discord.Store.Seen.Count(row => row.source == PostSource.Armor));
+            Assert.Equal(6, discord.Store.Seen.Count(row => row.source == PostSource.Maps));
+            Assert.Equal(2, discord.Store.Seen.Count(row => row.source == PostSource.Lobbies));
+            Assert.Equal(3, discord.Store.Queue.Count);
         }
 
         [Fact]
@@ -654,7 +560,7 @@ namespace MinerBot.Tests
 
             await discord.RunNotificationJobAsync();
 
-            var announced = Assert.Single(discord.Steps, step => step.Name == SendStep).EmbedDescriptions.Single();
+            var announced = Assert.Single(Sends(discord)).EmbedDescriptions.Single();
             Assert.Single(announced.Split($"Host {NewId}").Skip(1));
         }
 
@@ -668,7 +574,6 @@ namespace MinerBot.Tests
             discord.Steam.LatestItems.Insert(0, FakeGetData.CreateItem(NewId));
             discord.Steam.LatestItems.Insert(1, FakeGetData.CreateItem(NewId));
 
-            // Then the map is in the part of the batch that reached no guild, where a second copy would make Commit throw
             if (firstTryFails)
             {
                 discord.FailStep = SendStep;
@@ -694,13 +599,16 @@ namespace MinerBot.Tests
             discord.Steam.LatestItems.RemoveAt(0);
             await discord.RunNotificationJobAsync();
 
+            discord.Steam.LatestItems.Insert(0, FakeGetData.CreateItem(NewId));
+            await discord.RunNotificationJobAsync();
+
             Assert.Equal([NewMapTitle], SentTitles(discord));
         }
 
         // Maps from under the five of a read
 
         // Steam ranks maps by their last update, so a map under a read is no newer than the oldest map of that read
-        static PublishedFileDetailsModel MapUnderTheRead(int id, int daysOlder = 1)
+        static Steam.Models.PublishedFileDetailsModel MapUnderTheRead(int id, int daysOlder = 1)
         {
             var map = FakeGetData.CreateItem(id);
             map.TimeCreated = map.TimeUpdated = FakeGetData.CreateItem(1).TimeUpdated.AddDays(-daysOlder);
@@ -720,6 +628,37 @@ namespace MinerBot.Tests
             await discord.RunNotificationJobAsync();
 
             Assert.Empty(SentTitles(discord));
+        }
+
+        // A baseline reads twenty deep, so the maps above are seen at it. One from under those twenty moves up into them when a
+        // map above is removed, and a deep read after a gap finds it: never seen, but made and updated before the baseline's
+        // time, so it moved up from below, which isn't news, though it's no older than the others
+        [Fact]
+        public async Task MapFromUnderTheBaselinesTwentyThatADeepReadFindsIsNotAnnounced()
+        {
+            const ulong Below = PostingLimits.DeepMaps + 1;
+            await using var discord = await FakeDiscord.StartAsync();
+            var newest = FakeGetData.CreateItem(1).TimeUpdated.AddDays(30);
+
+            // Steam's latest first, a minute apart, so none is old news beside the newest
+            discord.Steam.LatestItems = Enumerable.Range(1, (int)Below).Select(id =>
+            {
+                var map = FakeGetData.CreateItem(id);
+                map.TimeCreated = map.TimeUpdated = newest.AddMinutes(-id);
+                return map;
+            }).ToList();
+
+            await discord.RunNotificationJobAsync();
+
+            Assert.Equal(PostingLimits.DeepMaps, discord.Steam.LatestAsked!.Value.Maps);
+            Assert.Null(Seen(discord, PostSource.Maps, Below));
+
+            discord.Steam.LatestItems.RemoveAt(2);
+            await discord.RunNotificationJobAsync(PostingLimits.RecentRead + TimeSpan.FromMinutes(1));
+
+            Assert.Equal(PostingLimits.DeepMaps, discord.Steam.LatestAsked!.Value.Maps);
+            Assert.Empty(SentTitles(discord));
+            Assert.Equal(SeenState.Baseline, Seen(discord, PostSource.Maps, Below)?.state);
         }
 
         [Fact]
@@ -810,6 +749,7 @@ namespace MinerBot.Tests
             Assert.Equal([UpdatedMapHeading], MapHeadings(discord));
         }
 
+        // Two days older than the newest of the read, which a read minutes after the last still posts
         [Fact]
         public async Task MapMadePublicAfterTheFirstReadIsAnnounced()
         {
@@ -817,7 +757,7 @@ namespace MinerBot.Tests
 
             // It was hidden during the first read, so its time can be older than that read
             var map = FakeGetData.CreateItem(6);
-            map.TimeCreated = map.TimeUpdated = FakeGetData.CreateItem(3).TimeUpdated;
+            map.TimeCreated = map.TimeUpdated = FakeGetData.CreateItem(2).TimeUpdated;
             discord.Steam.LatestItems.Insert(0, map);
             await discord.RunNotificationJobAsync();
 
@@ -833,12 +773,37 @@ namespace MinerBot.Tests
 
             var map = FakeGetData.CreateItem(6);
             map.TimeCreated = FakeGetData.CreateItem(1).TimeCreated.AddDays(-1);
-            map.TimeUpdated = FakeGetData.CreateItem(3).TimeUpdated;
+            map.TimeUpdated = FakeGetData.CreateItem(2).TimeUpdated;
             discord.Steam.LatestItems.Insert(0, map);
             await discord.RunNotificationJobAsync();
 
             Assert.Equal(["Map 6"], SentTitles(discord));
             Assert.Equal([UpdatedMapHeading], MapHeadings(discord));
+        }
+
+        // A map posted, then updated while it was hidden, and shown again two days later, when another map's update is 30 hours
+        // newer: the read minutes after the last posts the update, however old Steam dates it
+        [Fact]
+        public async Task PostedMapUpdatedWhileHiddenAndShownADayLaterIsAnnouncedAgain()
+        {
+            await using var discord = await StartWithBaselineAsync();
+            var map = NewMap(NewId);
+            discord.Steam.LatestItems.Insert(0, map);
+            await discord.RunNotificationJobAsync();
+
+            discord.Steam.LatestItems.Remove(map);
+            discord.MoveClock(TimeSpan.FromDays(2));
+            map.TimeUpdated = map.TimeUpdated.AddHours(1);
+            var other = NewMap(NewId + 1);
+            other.TimeCreated = other.TimeUpdated = map.TimeUpdated.AddHours(30);
+            discord.Steam.LatestItems.Insert(0, other);
+            await discord.RunNotificationJobAsync();
+
+            discord.Steam.LatestItems.Insert(1, map);
+            await discord.RunNotificationJobAsync();
+
+            Assert.Equal([NewMapTitle, "Map 101", NewMapTitle], SentTitles(discord));
+            Assert.Equal([NewMapHeading, NewMapHeading, UpdatedMapHeading], MapHeadings(discord));
         }
 
         // New and updated maps
@@ -864,7 +829,7 @@ namespace MinerBot.Tests
             discord.Steam.LatestItems.Insert(0, map);
             await discord.RunNotificationJobAsync();
 
-            discord.MoveClock(SeenMaps.Cooldown);
+            discord.MoveClock(PostingLimits.Cooldown);
             UpdateMap(discord, map, day: NewId + 1);
             await discord.RunNotificationJobAsync();
             await discord.RunNotificationJobAsync();
@@ -887,7 +852,7 @@ namespace MinerBot.Tests
 
             // The last run before the day is over
             UpdateMap(discord, map, day: 300);
-            discord.MoveClock(SeenMaps.Cooldown - TimeSpan.FromMinutes(15));
+            discord.MoveClock(PostingLimits.Cooldown - TimeSpan.FromMinutes(15));
             await discord.RunNotificationJobAsync();
 
             Assert.Equal([NewMapHeading], MapHeadings(discord));
@@ -916,7 +881,7 @@ namespace MinerBot.Tests
 
             Assert.Equal([UpdatedMapHeading], MapHeadings(discord));
 
-            discord.MoveClock(SeenMaps.Cooldown);
+            discord.MoveClock(PostingLimits.Cooldown);
             await discord.RunNotificationJobAsync();
             await discord.RunNotificationJobAsync();
 
@@ -934,7 +899,7 @@ namespace MinerBot.Tests
             await discord.RunNotificationJobAsync();
 
             map.TimeUpdated = map.TimeUpdated.AddSeconds(1);
-            discord.MoveClock(SeenMaps.Cooldown - TimeSpan.FromMinutes(5));
+            discord.MoveClock(PostingLimits.Cooldown - TimeSpan.FromMinutes(5));
             await discord.RunNotificationJobAsync();
 
             Assert.Equal([NewMapHeading, UpdatedMapHeading], MapHeadings(discord));
@@ -953,7 +918,7 @@ namespace MinerBot.Tests
             await discord.RunNotificationJobAsync();
 
             discord.Steam.LatestItems.Remove(map);
-            discord.MoveClock(SeenMaps.Cooldown);
+            discord.MoveClock(PostingLimits.Cooldown);
             await discord.RunNotificationJobAsync();
 
             Assert.Equal([NewMapHeading], MapHeadings(discord));
@@ -986,30 +951,6 @@ namespace MinerBot.Tests
             Assert.Equal([UpdatedMapHeading], MapHeadings(discord));
         }
 
-        // It wasn't posted either, so its next update goes out at once
-        [Fact]
-        public async Task MapGivenUpOnStartsNoCooldown()
-        {
-            await using var discord = await StartWithBaselineAsync();
-            var map = discord.Steam.LatestItems[2];
-            UpdateMap(discord, map, day: 200);
-            discord.FailStep = SendStep;
-
-            for (int run = 0; run < NotificationState.MaxFailedRuns; run++)
-                await discord.RunNotificationJobAsync();
-
-            Assert.Contains("Gave up on 1 new or updated maps", discord.ConsoleText);
-
-            discord.FailStep = null;
-            var refused = discord.Steps.Count;
-            UpdateMap(discord, map, day: 201);
-            await discord.RunNotificationJobAsync();
-
-            var sent = Assert.Single(discord.Steps.Skip(refused), step => step.Name == SendStep);
-            Assert.Equal(["Map 3"], sent.EmbedTitles);
-            Assert.Equal(UpdatedMapHeading, sent.Content);
-        }
-
         [Theory]
         [InlineData(1, 0, "__**New Map!**__")]
         [InlineData(2, 0, "__**New Maps!**__")]
@@ -1021,16 +962,16 @@ namespace MinerBot.Tests
         {
             await using var discord = await StartWithBaselineAsync();
 
-            // Maps of the first read, which stay in the read under the new ones
+            // Maps of the first read, which stay in the read under the new ones, updated just before them
             for (int id = 1; id <= updatedMaps; id++)
-                discord.Steam.LatestItems[id - 1].TimeUpdated = DateTime.UnixEpoch.AddDays(200 + id);
+                discord.Steam.LatestItems[id - 1].TimeUpdated = DateTime.UnixEpoch.AddDays(NewId).AddMinutes(-id);
 
             for (int id = NewId; id < NewId + newMaps; id++)
-                discord.Steam.LatestItems.Insert(0, FakeGetData.CreateItem(id));
+                discord.Steam.LatestItems.Insert(0, NewMap(id));
 
             await discord.RunNotificationJobAsync();
 
-            var post = Assert.Single(discord.Steps, step => step.Name == SendStep);
+            var post = Assert.Single(Sends(discord));
             Assert.Equal(heading, post.Content);
             Assert.Equal(newMaps + updatedMaps, post.EmbedTitles.Count());
 
@@ -1048,15 +989,15 @@ namespace MinerBot.Tests
             discord.Steam.LatestItems = Enumerable.Range(1, 5).Select(id => MapEmbedFlowTests.LongMap(id)).ToList();
             await discord.RunNotificationJobAsync();
 
-            discord.Steam.LatestItems[0].TimeUpdated = DateTime.UnixEpoch.AddDays(200);
-            discord.Steam.LatestItems[1].TimeUpdated = DateTime.UnixEpoch.AddDays(201);
+            discord.Steam.LatestItems[0].TimeUpdated = DateTime.UnixEpoch.AddDays(NewId).AddMinutes(-2);
+            discord.Steam.LatestItems[1].TimeUpdated = DateTime.UnixEpoch.AddDays(NewId).AddMinutes(-1);
 
             for (int id = NewId; id < NewId + 3; id++)
-                discord.Steam.LatestItems.Insert(0, MapEmbedFlowTests.LongMap(id));
+                discord.Steam.LatestItems.Insert(0, NewLongMap(id));
 
             await discord.RunNotificationJobAsync();
 
-            var messages = discord.Steps.Where(step => step.Name == SendStep).ToList();
+            var messages = Sends(discord);
 
             Assert.Equal(2, messages.Count);
             Assert.All(messages, message => Assert.InRange(message.EmbedsLength, 1, EmbedBuilder.MaxEmbedLength));
@@ -1068,7 +1009,7 @@ namespace MinerBot.Tests
 
         // Each guild's channels
 
-        // For as many runs as it takes to give up on items that reached no guild. Items that no guild wants aren't a failure.
+        // Items that no guild wants aren't a failure, and nothing waits for it
         [Theory]
         [InlineData("armor", ArmorTitle)]
         [InlineData("map", NewMapTitle)]
@@ -1085,12 +1026,12 @@ namespace MinerBot.Tests
             }];
             AddNewItems(discord);
 
-            for (int run = 0; run < NotificationState.MaxFailedRuns; run++)
+            for (int run = 0; run < 3; run++)
                 await discord.RunNotificationJobAsync();
 
             Assert.Equal(new[] { ArmorTitle, NewMapTitle, LobbyTitle }.Where(sent => sent != title), SentTitles(discord));
             Assert.DoesNotContain($"{kind} notification", discord.ConsoleText, StringComparison.OrdinalIgnoreCase);
-            Assert.DoesNotContain("Gave up", discord.ConsoleText);
+            Assert.Equal(2, discord.Store.Queue.Count);
         }
 
         // Otherwise the first server to turn lobbies on would get the ones that opened while no server had them on, as new
@@ -1108,13 +1049,13 @@ namespace MinerBot.Tests
             discord.Steam.Lobbies.Add(Lobby(NewId));
             await discord.RunNotificationJobAsync();
 
-            var announced = Assert.Single(discord.Steps, step => step.Name == SendStep).EmbedDescriptions.Single();
+            var announced = Assert.Single(Sends(discord)).EmbedDescriptions.Single();
             Assert.Contains($"Host {NewId}", announced);
             Assert.DoesNotContain("Host 1`", announced);
         }
 
         // A row's channel must be one of its own server's: the bot is in that server too, so the channel is in the cache, but
-        // the post would go to another server. No channel is looked up over Discord's API either.
+        // the post would go to another server. No channel is looked up over Discord's API either, and it's a refusal.
         [Fact]
         public async Task RowNamingAnotherServersChannelGetsNoPost()
         {
@@ -1133,9 +1074,12 @@ namespace MinerBot.Tests
             foreach (var kind in new[] { "armor", "map", "lobby" })
                 Assert.Contains($"Couldn't send the {kind} notification to channel {FakeDiscord.ChannelId} of guild {FakeDiscord.JoinedGuildId}, because that channel isn't in that server",
                     discord.ConsoleText);
+
+            Assert.All(discord.Store.Deliveries, delivery => Assert.Equal((DeliveryState.Failed, DeliveryReasons.NoChannel), (delivery.state, delivery.reason)));
         }
 
-        // A server the bot isn't in, or left, which keeps its row on the website until it's removed while the bot runs
+        // A server the bot isn't in, or left, keeps its row on the website until it's removed while the bot runs: it's owed
+        // nothing, so nothing is queued or tried for it
         [Fact]
         public async Task RowOfAServerTheBotIsntInGetsNoPost()
         {
@@ -1149,11 +1093,11 @@ namespace MinerBot.Tests
 
             Assert.DoesNotContain(SendStep, discord.StepNames);
             Assert.DoesNotContain("get channel", discord.StepNames);
-            Assert.Contains($"Couldn't send the armor notification to channel {FakeDiscord.ChannelId} of guild 9999, because the bot isn't in that server", discord.ConsoleText);
+            Assert.Empty(discord.Store.Queue);
         }
 
-        // Discord.Net keeps the channels of a server in an outage, but Discord reports it unavailable. As the only server with
-        // posts on, its items wait for it, as for a post that failed.
+        // Discord.Net keeps the channels of a server in an outage, but Discord reports it unavailable. Its items wait for it,
+        // with no failure recorded.
         [Fact]
         public async Task OnlyServerWithPostsOnGetsThemOnceItsBack()
         {
@@ -1174,50 +1118,23 @@ namespace MinerBot.Tests
             Assert.Equal([ArmorTitle, NewMapTitle, LobbyTitle], SentTitles(discord));
         }
 
-        // As for a post that failed, the items aren't tried again once another server got them, so a server in an outage
-        // misses them
-        [Fact]
-        public async Task ServerInAnOutageMissesWhatAnotherServerGot()
-        {
-            await using var discord = await StartWithBaselineAsync();
-            await discord.JoinGuildAsync($"[{FakeDiscord.BotMemberJson(FakeDiscord.BotRoleId)}]");
-            var other = FakeGuildData.CreateGuild(FakeDiscord.JoinedChannelId);
-            other.guild_id = FakeDiscord.JoinedGuildId;
-            discord.Guilds.AllGuilds.Add(other);
-            AddNewItems(discord);
-            await discord.MakeGuildUnavailableAsync();
-
-            // After the welcome the join sent
-            var from = discord.Steps.Count;
-            await discord.RunNotificationJobAsync();
-            await discord.MakeGuildAvailableAsync();
-            await discord.RunNotificationJobAsync();
-
-            Assert.Equal([FakeDiscord.JoinedChannelId, FakeDiscord.JoinedChannelId, FakeDiscord.JoinedChannelId],
-                discord.Steps.Skip(from).Where(step => step.Name == SendStep).Select(step => step.SentTo));
-        }
-
         // Until the gateway's first READY since the start, Discord.Net has none of the bot's servers, so no post can be checked
-        // against its server. Those runs post nothing and don't count against the new items, which go out once READY comes.
-        // A run that found nothing new says nothing, such as the first, which only takes the baselines.
+        // against its server. Those runs find and post nothing, and the items go out once READY comes.
         [Fact]
         public async Task RunsBeforeTheFirstReadyWaitForIt()
         {
-            await using var discord = await FakeDiscord.StartAsync(holdReady: true);
-            await discord.RunNotificationJobAsync();
-            await discord.RunNotificationJobAsync();
+            await using var before = await StartWithBaselineAsync();
+            await using var discord = await before.RestartAsync(TimeSpan.FromMinutes(1), holdReady: true);
 
-            Assert.DoesNotContain(WaitingLine, discord.ConsoleText);
+            Assert.Equal(WaitingDetail, await discord.RunNotificationJobAsync());
 
             AddNewItems(discord);
 
-            for (var run = 0; run < NotificationState.MaxFailedRuns; run++)
-                await discord.RunNotificationJobAsync();
+            for (var run = 0; run < 3; run++)
+                Assert.Equal(WaitingDetail, await discord.RunNotificationJobAsync());
 
             Assert.DoesNotContain(SendStep, discord.StepNames);
-            Assert.DoesNotContain("Gave up", discord.ConsoleText);
-            Assert.DoesNotContain("because the bot isn't in that server", discord.ConsoleText);
-            Assert.Contains(WaitingLine, discord.ConsoleText);
+            Assert.Empty(discord.Store.Queue);
 
             await discord.ReleaseReadyAsync();
             await discord.RunNotificationJobAsync();
@@ -1227,27 +1144,24 @@ namespace MinerBot.Tests
 
         // From a READY until Discord sends each server, at a start or a new session, Discord.Net has nothing of the servers but
         // their IDs. When the gateway drops in that window and stays down while Discord's API still works, as in an incident,
-        // the runs wait as they do before the first READY, rather than count against the new items as posts to channels that
-        // aren't there. The items go out once Discord has sent a server.
+        // the runs wait as they do before the first READY. The items go out once Discord has sent a server.
         [Fact]
         public async Task RunsWhileDiscordHasSentNoneOfTheServersWaitForThem()
         {
-            await using var discord = await FakeDiscord.StartAsync(unavailableGuilds: [FakeDiscord.GuildId]);
+            await using var before = await StartWithBaselineAsync();
+            await using var discord = await before.RestartAsync(TimeSpan.FromMinutes(1), unavailableGuilds: [FakeDiscord.GuildId]);
             await discord.StopGatewayAsync();
 
             Assert.NotNull(discord.Client.CurrentUser);
             Assert.Null(discord.Client.GetGuild(FakeDiscord.GuildId).Name);
 
-            await discord.RunNotificationJobAsync();
             AddNewItems(discord);
 
-            for (var run = 0; run < NotificationState.MaxFailedRuns; run++)
-                await discord.RunNotificationJobAsync();
+            for (var run = 0; run < 3; run++)
+                Assert.Equal(WaitingDetail, await discord.RunNotificationJobAsync());
 
             Assert.DoesNotContain(SendStep, discord.StepNames);
-            Assert.DoesNotContain("Gave up", discord.ConsoleText);
             Assert.DoesNotContain("that channel isn't in that server", discord.ConsoleText);
-            Assert.Contains(WaitingLine, discord.ConsoleText);
 
             await discord.StartNewSessionAsync();
             await discord.RunNotificationJobAsync();
@@ -1264,9 +1178,7 @@ namespace MinerBot.Tests
             await discord.RunNotificationJobAsync();
             await discord.StopGatewayAsync();
 
-            var joined = FakeGuildData.CreateGuild(FakeDiscord.JoinedChannelId);
-            joined.guild_id = FakeDiscord.JoinedGuildId;
-            discord.Guilds.AllGuilds = [FakeGuildData.CreateGuild(FakeDiscord.ChannelId), joined];
+            discord.Guilds.AllGuilds = [FakeGuildData.CreateGuild(FakeDiscord.ChannelId), SecondServer()];
             AddNewItems(discord);
 
             await discord.RunNotificationJobAsync();
@@ -1280,7 +1192,7 @@ namespace MinerBot.Tests
         }
 
         // A channel the cache doesn't have, such as one that was deleted, isn't asked of Discord's API, which a lookup of the
-        // channel alone would do: the row gets no post
+        // channel alone would do: the row gets no post, and it's a refusal
         [Fact]
         public async Task ChannelTheCacheDoesntHaveIsntLookedUp()
         {
@@ -1321,7 +1233,7 @@ namespace MinerBot.Tests
 
             await discord.RunNotificationJobAsync();
 
-            Assert.Contains($"Couldn't send the armor notification to channel {FakeDiscord.ChannelId} of guild {FakeDiscord.GuildId}", discord.ConsoleText);
+            Assert.Contains($"Couldn't send the armor notification to channel {FakeDiscord.ChannelId} of guild {FakeDiscord.GuildId}: discord_permissions (HTTP 403, Discord 50013)", discord.ConsoleText);
             Assert.Contains($"Couldn't send the map notification to channel {FakeDiscord.ChannelId} of guild {FakeDiscord.GuildId}", discord.ConsoleText);
             Assert.Contains($"Couldn't send the lobby notification to channel {FakeDiscord.ChannelId} of guild {FakeDiscord.GuildId}", discord.ConsoleText);
         }

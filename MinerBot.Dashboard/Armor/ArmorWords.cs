@@ -1,5 +1,7 @@
+using System.Globalization;
 using DataAccessLibrary.Armor;
 using MinerBot.Shared.Armor;
+using MinerBot.Shared.Delivery;
 
 namespace MinerBot.Dashboard.Armor
 {
@@ -66,6 +68,18 @@ namespace MinerBot.Dashboard.Armor
         public const string MovedBackToPending = "Moved back to Pending. If the bot already posted it, that post stays in Discord, and approving it again may not post it again.";
         public const string MovedBackFromApproved = "Moved back to Pending, so the bot stops showing it, as after Take down: /armor lookup stops finding it now. A post the bot already made stays in Discord, and approving it again may not post it again.";
 
+        // The same, for a bot that keeps what it finds and what each server is owed in MinerBot's database, from PR 11 on,
+        // which posts an armor at most once in each server, restarts included. The page picks these while the bot that
+        // runs is one (PostingRules), and the words above for an older one.
+        public const string ApprovedKept = "Approved. The bot posts new armor at its next five-minute check, in every server with armor posts on, with any other armor approved by then, even if it restarts first. /armor lookup finds it by its exact name now.";
+        public const string ApprovedAgainKept = "Approved again. /armor lookup finds it by its exact name now. The bot posts an armor at most once in each server: it won't post this one again where it already did, and where its post still waited when the armor was withdrawn, it posts it at its next five-minute check.";
+        public const string MovedBackToPendingKept = "Moved back to Pending. If the bot already posted it, that post stays in Discord, and approving it again won't post it there again.";
+        public const string MovedBackFromApprovedKept = "Moved back to Pending, so the bot stops showing it, as after Take down: /armor lookup stops finding it now. If the bot already posted it, that post stays in Discord, and approving it again won't post it there again.";
+
+        // An action's notice that the cache clear's line follows
+        public static bool ClearsCache(string? notice) => notice is Approved or ApprovedAgain or TakenDown or MovedBackFromApproved or ApprovedKept or ApprovedAgainKept
+            or MovedBackFromApprovedKept;
+
         // The line after an approval, a take-down or a move back from Approved: the bot was asked to clear its name cache,
         // followed by the request's box, or why it wasn't, by the word the redirect carries. A word this version doesn't
         // know says nothing.
@@ -93,6 +107,11 @@ namespace MinerBot.Dashboard.Armor
         public const string AnnouncePaused = "Posts are paused, so the bot posts this armor once they're resumed, unless the bot restarts first, which loses it. Announce now isn't offered while they are.";
         public const string AnnounceOff = "Requests to the bot are off, so the bot posts it at its next five-minute check.";
         public static string AnnounceRunning(string since) => $"The notification job is running now, since {since}, and may post this armor, unless the bot restarts or stops first, which loses it. Announce now isn't offered while it runs.";
+
+        // The same for a bot that keeps what it finds, whose next run posts what this one didn't, restarts included
+        public const string AnnouncePausedKept = "Posts are paused, so the bot posts this armor once they're resumed, even if it restarts first. Announce now isn't offered while they are.";
+        public static string AnnounceRunningKept(string since) => $"The notification job is running now, since {since}, and may post this armor; if it doesn't, the bot's next run does, even if it restarts first. Announce now isn't offered while it runs.";
+        public const string AnnounceStoppedKept = "MinerBot is stopped, so nothing can run now. It posts this armor at its first notification run once it's back.";
 
         // In its place when the bot's next notification run is its first since a start, which only notes the approved armor
         // it finds: what the bot has seen lives only in its memory, so a restart loses this armor if it wasn't posted before,
@@ -140,9 +159,43 @@ namespace MinerBot.Dashboard.Armor
         public const string BackToPendingHelp = "Puts the armor back in the queue, undoing the last decision. The dashboard can't tell whether the bot already posted it, and a post stays in Discord.";
         public const string BackToPendingFromApprovedHelp = "Puts the armor back in the queue, undoing the approval, so the bot stops showing it, as after Take down: /armor lookup at once, and /armor list and the name suggestions within 5 minutes. The dashboard can't tell whether the bot already posted it, and a post stays in Discord.";
 
+        // The same for a bot that keeps what it finds. Back to pending from Approved is offered only while MinerBot's record
+        // shows no post of the armor.
+        public const string ApproveHelpKept = "The bot shows it in /armor list and /armor lookup, and posts it at its next five-minute check in every server with armor posts on, or sooner with Announce now, even if it restarts first.";
+        public const string ApproveAgainHelpKept = "The bot shows it in /armor list and /armor lookup. It posts an armor at most once in each server, so it won't post this one again where it already did.";
+        public const string TakeDownHelpKept = "The bot stops showing it. The post it made stays in Discord, and the bot never posts it again there.";
+        public const string BackToPendingFromApprovedHelpKept = "Puts the armor back in the queue, undoing the approval, so the bot stops showing it, as after Take down: /armor lookup at once, and /armor list and the name suggestions within 5 minutes. MinerBot's record shows no post of it yet.";
+
         // The previews' note on the new-armor post
         public const string PostNote = "The bot posts it at its next five-minute check after an approval, or sooner with Announce now, in every server with armor posts turned on" + NotAtTheFirstCheck + ". Other armor approved by then shares the message.";
         public const string PostMayNotComeNote = "The bot posts new armor at its next five-minute check after an approval, in every server with armor posts turned on, but may not post this one: " + PostedOnce + ".";
+        public const string PostNoteKept = "The bot posts it at its next five-minute check after an approval, or sooner with Announce now, in every server with armor posts on, even if it restarts first. Other armor approved by then shares the message.";
+        public const string PostMayNotComeNoteKept = "The bot posts an armor at most once in each server, so where it already posted this one it won't post it again.";
+
+        // Where it was posted: MinerBot's record of the armor in each server it was owed to, for a bot that keeps one
+        public static string PostedAt(DateTime at) => "posted " + at.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC";
+        public const string MayNotHaveArrived = "may not have arrived: MinerBot didn't learn whether it went and couldn't read the channel to check, so it counts it as posted";
+        public const string BeingChecked = "being checked: MinerBot hasn't learned yet whether the post went";
+        public const string Waiting = "waiting for the bot's next run";
+        public static string WaitingUntil(DateTime next) => "waiting, with the next try at " + next.ToString("HH:mm", CultureInfo.InvariantCulture) + " UTC";
+        public static string NotPosted(string? reason) => "not posted: " + DeliveryReasons.Words(reason);
+        public const string UnknownPostState = "in a state this version of the dashboard doesn't know";
+
+        public const string PostsIntro = "Each server it was owed to, as MinerBot's record has it:";
+        public static string Baseline(DateTime since) => $"MinerBot started its record of posts on {since.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)} UTC, when this armor was already approved, so it counts it as posted and doesn't post it again.";
+        public static string NoServerOwed(DateTime found) => $"Not posted: no server had armor posts on when the bot found it approved, on {found.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)} UTC, and the bot doesn't post it later.";
+        public const string NotPostedYet = "Not posted yet: the bot posts it at its next five-minute run, in every server with armor posts on, restarts included.";
+        public const string PostsUnknown = "MinerBot can't tell now whether this armor was posted.";
+
+        // In Back to pending's place, for approved armor the record shows posted, or can't tell about
+        public static string PostedIn(int servers) =>
+            $"Posted in {(servers == 1 ? "1 server" : servers.ToString("N0", CultureInfo.InvariantCulture) + " servers")}, so this can't be undone: Take down removes it from /armor lookup and /armor list, and the posts stay in Discord.";
+        public const string CountedAsPosted = "MinerBot counts this armor as posted since before its record began, so this can't be undone: Take down removes it from /armor lookup and /armor list.";
+        public const string PostsUnknownNoBack = PostsUnknown + " Back to pending isn't offered until it can: Take down removes it from /armor lookup and /armor list.";
+
+        // A move back to pending that MinerBot's record refused inside the review's transaction, because the armor had been
+        // posted by then
+        public const string WasPosted = "This armor has been posted, so moving it back to pending can't undo that, and nothing was done. Take down removes it from /armor lookup and /armor list; the posts stay in Discord.";
 
         // What the screenshot section says when it doesn't load the address, which depends on whether the bot fetches it
         public const string ScreenshotBlocksApproval = "and the armor can't be approved until the website has an upload's address for it.";

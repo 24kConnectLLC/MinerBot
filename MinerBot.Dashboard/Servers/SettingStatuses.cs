@@ -1,5 +1,7 @@
 using DataAccessLibrary.Discord.Models;
 using DataAccessLibrary.Guilds.Models;
+using DataAccessLibrary.Posting;
+using DataAccessLibrary.Posting.Models;
 
 namespace MinerBot.Dashboard.Servers
 {
@@ -20,6 +22,10 @@ namespace MinerBot.Dashboard.Servers
 
         // The row's channel ID is 0, which turns the kind off
         Off,
+
+        // A channel is set, but the kind is switched off on the dashboard, so the bot posts none of it there. Armor, maps and
+        // lobbies only: announcements have no switch.
+        SwitchedOff,
 
         // A channel of this server in the copy, where the bot has every permission the kind's post needs
         Ok,
@@ -59,6 +65,15 @@ namespace MinerBot.Dashboard.Servers
             _ => "Announcements"
         };
 
+        // The kind's word in the bot's posting tables, null for announcements, which the notification run never posts
+        public static string? SourceOf(SettingKind kind) => kind switch
+        {
+            SettingKind.Armor => PostSource.Armor,
+            SettingKind.Maps => PostSource.Maps,
+            SettingKind.Lobbies => PostSource.Lobbies,
+            _ => null
+        };
+
         public static ulong ChannelOf(Guild settings, SettingKind kind) => kind switch
         {
             SettingKind.Armor => settings.armor_channel_id,
@@ -68,13 +83,16 @@ namespace MinerBot.Dashboard.Servers
         };
 
         // From the bot's posting code: armor, maps and lobbies go out as embeds, so they need Embed Links too, and an
-        // announcement is plain text (GuildNotificationJob and DiscordService.SendAnnouncement)
+        // announcement is plain text (MessagePlan and DiscordService.SendAnnouncement)
         public static bool NeedsEmbed(SettingKind kind) => kind != SettingKind.Announcements;
 
-        public static IReadOnlyList<SettingStatus> Of(ulong guildId, bool botIsIn, Guild? settings, IReadOnlyDictionary<ulong, BotChannelRow> channels) =>
-            Kinds.Select(kind => Status(kind, guildId, botIsIn, settings, channels)).ToList();
+        // The server's switches are null when it has none, which means every kind is on
+        public static IReadOnlyList<SettingStatus> Of(ulong guildId, bool botIsIn, Guild? settings, IReadOnlyDictionary<ulong, BotChannelRow> channels,
+            GuildSwitches? switches = null) =>
+            Kinds.Select(kind => Status(kind, guildId, botIsIn, settings, channels, switches)).ToList();
 
-        public static SettingStatus Status(SettingKind kind, ulong guildId, bool botIsIn, Guild? settings, IReadOnlyDictionary<ulong, BotChannelRow> channels)
+        public static SettingStatus Status(SettingKind kind, ulong guildId, bool botIsIn, Guild? settings, IReadOnlyDictionary<ulong, BotChannelRow> channels,
+            GuildSwitches? switches = null)
         {
             var id = settings == null ? Guild.ChannelOff : ChannelOf(settings, kind);
 
@@ -87,6 +105,10 @@ namespace MinerBot.Dashboard.Servers
             if (id == Guild.ChannelOff)
                 return new SettingStatus(kind, id, SettingState.Off, null, []);
 
+            // With its channel when the copy has it, so the list still names the channel that's set
+            if (IsSwitchedOff(kind, switches))
+                return new SettingStatus(kind, id, SettingState.SwitchedOff, channels.GetValueOrDefault(id), []);
+
             if (!channels.TryGetValue(id, out var channel))
                 return new SettingStatus(kind, id, SettingState.CantCheck, null, []);
 
@@ -96,6 +118,12 @@ namespace MinerBot.Dashboard.Servers
             var missing = Missing(kind, channel);
             return new SettingStatus(kind, id, missing.Count == 0 ? SettingState.Ok : SettingState.CantPost, channel, missing);
         }
+
+        public static bool IsSwitchedOff(SettingKind kind, GuildSwitches? switches) => switches != null && SourceOf(kind) is { } source && !switches.IsOn(source);
+
+        // Whether the bot posts the kind there at all, failing or not: a channel is set, the kind isn't switched off, and the
+        // bot is in the server
+        public static bool IsOn(SettingState state) => state is not (SettingState.NotSetUp or SettingState.Off or SettingState.SwitchedOff or SettingState.NotIn);
 
         public static IReadOnlyList<string> Missing(SettingKind kind, BotChannelRow channel)
         {
@@ -121,6 +149,7 @@ namespace MinerBot.Dashboard.Servers
         {
             SettingState.NotSetUp => "Not set up",
             SettingState.Off => "Off",
+            SettingState.SwitchedOff => "Switched off",
             SettingState.Ok => "OK",
             SettingState.CantPost => "Can't post",
             SettingState.OtherServer => "Another server's channel",

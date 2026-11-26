@@ -114,6 +114,45 @@ namespace SteamWebAPIAccess.Tests
             await Assert.ThrowsAnyAsync<Exception>(() => LookUpAsync());
         }
 
+        // The notification job's maps that waited, in one call: only the ones Steam still lists publicly come back, each once,
+        // so a map hidden, removed, banned, unlisted or of another game is one to drop
+        [Fact]
+        public async Task PublicItemsAreTheShownMapsOfTheIdsAsked()
+        {
+            web.Answer(HttpStatusCode.OK, $$$"""
+                {"response":{"result":1,"resultcount":6,"publishedfiledetails":[
+                 {"publishedfileid":"11","result":1,"consumer_app_id":274900,"visibility":0,"banned":0},
+                 {"publishedfileid":"12","result":9},
+                 {"publishedfileid":"13","result":1,"consumer_app_id":274900,"visibility":0,"banned":1},
+                 {"publishedfileid":"14","result":1,"consumer_app_id":274900,"visibility":3,"banned":0},
+                 {"publishedfileid":"15","result":1,"consumer_app_id":4000,"visibility":0,"banned":0},
+                 {"publishedfileid":"11","result":1,"consumer_app_id":274900,"visibility":0,"banned":0}]}}
+                """);
+
+            var maps = await data.GetPublicWorkshopItems([11, 12, 13, 14, 15, 11]).WaitAsync(WaitLimit, TestContext.Current.CancellationToken);
+
+            Assert.Equal([11ul], maps.Select(map => map.PublishedFileId));
+            Assert.Contains("&itemcount=5&", Assert.Single(web.Bodies));
+        }
+
+        // Steam not answering says nothing about the maps, so it isn't an empty answer, which would drop them all
+        [Theory]
+        [InlineData(HttpStatusCode.InternalServerError, "")]
+        [InlineData(HttpStatusCode.OK, """{"response":{"result":16}}""")]
+        public async Task PublicItemsThrowWhenSteamDoesntAnswer(HttpStatusCode status, string reply)
+        {
+            web.Answer(status, reply);
+
+            await Assert.ThrowsAnyAsync<Exception>(() => data.GetPublicWorkshopItems([11]).WaitAsync(WaitLimit, TestContext.Current.CancellationToken));
+        }
+
+        [Fact]
+        public async Task NoIdsAskSteamNothing()
+        {
+            Assert.Empty(await data.GetPublicWorkshopItems([]));
+            Assert.Empty(web.Requests);
+        }
+
         // A POST is never sent twice
         [Fact]
         public async Task LookupHasAShortTimeLimit()

@@ -1,6 +1,7 @@
 using DataAccessLibrary.Discord;
 using DataAccessLibrary.Discord.Models;
 using DataAccessLibrary.Guilds;
+using DataAccessLibrary.Posting;
 using DataAccessLibrary.Status;
 using DataAccessLibrary.Status.Models;
 using Microsoft.AspNetCore.Mvc;
@@ -13,10 +14,10 @@ using MinerBot.Dashboard.Status;
 namespace MinerBot.Dashboard.Pages.Admin.Servers
 {
     // Every server MinerBot is in or has left, from its own copy of them, with the website's four settings of each read
-    // against that copy, and the settings of servers it isn't in apart. Read-only, so it works while the bot is down, and
-    // the copy's age says how current it is.
-    public sealed class ServerListModel(IBotGuildReads guilds, IGuildSettingsReads settings, IBotStatusReads status, TimeProvider time,
-        ILogger<ServerListModel> logger) : PageModel
+    // against that copy and its switches, the bot's last post of each kind there, and the settings of servers it isn't in
+    // apart. Read-only, so it works while the bot is down, and the copy's age says how current it is.
+    public sealed class ServerListModel(IBotGuildReads guilds, IGuildSettingsReads settings, IBotStatusReads status, IGuildSwitchData switches,
+        IDeliveryReads deliveries, TimeProvider time, ILogger<ServerListModel> logger) : PageModel
     {
         // The members' trend covers this many days, or the days since the first count
         public const int TrendDays = 30;
@@ -50,7 +51,11 @@ namespace MinerBot.Dashboard.Pages.Admin.Servers
             var trendFrom = Now.Date.AddDays(-TrendDays);
             var trends = await DatabaseCalls.Guard(() => guilds.MemberTrends(trendFrom), logger);
 
-            All = ServerRows.Rows(servers, settingsRows, channels, trends, trendFrom);
+            // Every server's switches in one read, and the record of the listed servers' posts in another
+            var switchRows = await DatabaseCalls.Guard(() => switches.ListSwitches(), logger);
+            var statuses = await DatabaseCalls.Guard(() => deliveries.ListStatuses(servers.Select(server => server.guild_id).ToList()), logger);
+
+            All = ServerRows.Rows(servers, settingsRows, channels, trends, trendFrom, switchRows, statuses);
             Rows = All.Where(filter.Shows).ToList();
             Elsewhere = ServerRows.SettingsElsewhere(servers, settingsRows);
             AtLimit = servers.Count >= BotGuildReads.GuildLimit;

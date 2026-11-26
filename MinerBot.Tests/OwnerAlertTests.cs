@@ -130,7 +130,7 @@ namespace MinerBot.Tests
             discord.FailStep = SendStep;
             await Assert.ThrowsAsync<HttpException>(() => alerts.SendAsync("Resume posts, asked for by `Jane`", "request 2: Resume posts, done"));
 
-            Assert.Equal("HttpException: request 2: Resume posts, done", Assert.Single(discord.Recorder.PeekEvents(100), row => row.kind == BotEvents.AlertFailed).detail);
+            Assert.Equal("HttpException, HTTP 403, Discord 50013: request 2: Resume posts, done", Assert.Single(discord.Recorder.PeekEvents(100), row => row.kind == BotEvents.AlertFailed).detail);
             Assert.DoesNotContain(discord.Recorder.PeekEvents(100), row => row.detail != null && row.detail.Contains("Jane"));
         }
 
@@ -147,7 +147,7 @@ namespace MinerBot.Tests
             Assert.Equal(Alert, Assert.Single(discord.Recorder.PeekEvents(100), row => row.kind == BotEvents.AlertSent).detail);
         }
 
-        // With the exception's type, never Discord's own text, and the start of the alert, an emoji kept whole
+        // With the exception's type and Discord's numbers, never Discord's own text, and the start of the alert, an emoji kept whole
         [Fact]
         public async Task FailedAlertIsRecordedWithItsReason()
         {
@@ -158,9 +158,29 @@ namespace MinerBot.Tests
             await Assert.ThrowsAsync<HttpException>(() => discord.SendOwnerAlertAsync(Alert));
             await Assert.ThrowsAsync<HttpException>(() => discord.SendOwnerAlertAsync(longAlert));
 
-            Assert.Equal([$"HttpException: {Alert}", "HttpException: " + new string('a', 199)],
+            Assert.Equal([$"HttpException, HTTP 403, Discord 50013: {Alert}", "HttpException, HTTP 403, Discord 50013: " + new string('a', 199)],
                 discord.Recorder.PeekEvents(100).Where(row => row.kind == BotEvents.AlertFailed).Select(row => row.detail));
             Assert.DoesNotContain(discord.Recorder.PeekEvents(100), row => row.kind == BotEvents.AlertSent);
+        }
+
+        // PR 9's live check found four failed alerts that were the owner's setting for direct messages, which Discord's code
+        // 50007 says, and the type alone didn't: the event says it by Discord's numbers, never its words. Discord's own trouble
+        // carries code 0, which says nothing more than its status.
+        [Fact]
+        public async Task FailedAlertRecordsDiscordsCode()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+            discord.ChannelFailures[FakeDiscord.DirectChannelId] = (403, 50007);
+
+            await Assert.ThrowsAsync<HttpException>(() => discord.SendOwnerAlertAsync(Alert));
+
+            discord.ChannelFailures[FakeDiscord.DirectChannelId] = (500, 0);
+
+            await Assert.ThrowsAsync<HttpException>(() => discord.SendOwnerAlertAsync(Alert));
+
+            Assert.Equal([$"HttpException, HTTP 403, Discord 50007: {Alert}", $"HttpException, HTTP 500: {Alert}"],
+                discord.Recorder.PeekEvents(100).Where(row => row.kind == BotEvents.AlertFailed).Select(row => row.detail));
+            Assert.DoesNotContain(discord.Recorder.PeekEvents(100), row => row.detail != null && row.detail.Contains(FakeDiscord.DiscordText));
         }
     }
 }

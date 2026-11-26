@@ -1,4 +1,7 @@
+using DataAccessLibrary.Audit;
 using DataAccessLibrary.Guilds;
+using DataAccessLibrary.Posting;
+using DataAccessLibrary.Posting.Models;
 using DataAccessLibrary.Requests;
 using DataAccessLibrary.Requests.Models;
 using DataAccessLibrary.Status;
@@ -168,6 +171,68 @@ namespace DataAccessLibrary.Tests
             await Assert.ThrowsAsync<InvalidOperationException>(() => requests.ListOpenIds(1, 1, restartOnly: true));
             await Assert.ThrowsAsync<InvalidOperationException>(() => requests.CountClaims(RequestKinds.All.Select(kind => kind.Word).ToList(), Day, 1));
             await Assert.ThrowsAsync<InvalidOperationException>(() => queue.GetRequestByKey("00112233445566778899aabbccddeeff"));
+            Assert.Equal(0, database.Created);
+        }
+
+        // The reads of the posts take a source the bot watches, servers and IDs within their limits, and a list of posts of
+        // 1 to 100
+        [Fact]
+        public async Task PostingReadsOutsideTheirLimitsAreRefused()
+        {
+            var deliveries = new DeliveryReads(database, NoDatabase.Names);
+            var store = new NotificationData(database, NoDatabase.Names);
+            var tooMany = Enumerable.Range(1, NotificationData.IdLimit + 1).Select(id => (ulong)id).ToList();
+
+            await RefusedAsync(() => deliveries.ListStatuses([.. Enumerable.Range(1, DeliveryReads.GuildLimit + 1).Select(id => (ulong)id)]));
+            await RefusedAsync(() => deliveries.ListFailing(0));
+            await RefusedAsync(() => deliveries.ListRecentPosts(1, 0));
+            await RefusedAsync(() => deliveries.ListRecentPosts(1, 101));
+            await RefusedAsync(() => deliveries.GetItemPosts("Armor", 1));
+            await RefusedAsync(() => deliveries.GetItemPosts("armour", 1));
+            await RefusedAsync(() => store.ListSeenAsync(PostSource.Maps, tooMany));
+            await RefusedAsync(() => store.ListSeenAsync("map", [1]));
+            await RefusedAsync(() => store.LoadAsync(new PostingLoad { ArmorIds = tooMany }));
+            await RefusedAsync(() => store.LoadAsync(new PostingLoad { LobbyIds = tooMany }));
+            await RefusedAsync(() => store.LoadAsync(null!));
+        }
+
+        // A person's limit reads their rows of one action, by words the audit log takes, within a page, from a UTC time
+        [Fact]
+        public async Task ActionTimesOutsideTheirLimitsAreRefused()
+        {
+            var audit = new AuditLogData(database, NoDatabase.Names);
+            string[] ok = [AuditOutcome.Ok];
+
+            await RefusedAsync(() => audit.ListActionTimes(1, "Switches.Change", ok, Day, 30));
+            await RefusedAsync(() => audit.ListActionTimes(1, "switches", ok, Day, 30));
+            await RefusedAsync(() => audit.ListActionTimes(1, null!, ok, Day, 30));
+            await RefusedAsync(() => audit.ListActionTimes(1, "switches.change", [], Day, 30));
+            await RefusedAsync(() => audit.ListActionTimes(1, "switches.change", ["done"], Day, 30));
+            await RefusedAsync(() => audit.ListActionTimes(1, "switches.change", null!, Day, 30));
+            await RefusedAsync(() => audit.ListActionTimes(1, "switches.change", ok, DateTime.Now, 30));
+            await RefusedAsync(() => audit.ListActionTimes(1, "switches.change", ok, Day, 0));
+            await RefusedAsync(() => audit.ListActionTimes(1, "switches.change", ok, Day, 101));
+
+            // At its limits it gets as far as the database's name, which this one doesn't have
+            var unnamed = new AuditLogData(database, new DatabaseNames(new Dictionary<DBConnectionName, string>()));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => unnamed.ListActionTimes(1, "switches.change", [AuditOutcome.Ok, AuditOutcome.Unknown], Day, 100));
+            Assert.Equal(0, database.Created);
+        }
+
+        [Fact]
+        public async Task PostingReadsAtTheirLimitsPass()
+        {
+            var names = new DatabaseNames(new Dictionary<DBConnectionName, string>());
+            var deliveries = new DeliveryReads(database, names);
+            var store = new NotificationData(database, names);
+            var most = Enumerable.Range(1, NotificationData.IdLimit).Select(id => (ulong)id).ToList();
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() => deliveries.ListStatuses([.. Enumerable.Range(1, DeliveryReads.GuildLimit).Select(id => (ulong)id)]));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => deliveries.ListFailing(1));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => deliveries.ListRecentPosts(1, 100));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => deliveries.GetItemPosts(PostSource.Submissions, ulong.MaxValue));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => store.ListSeenAsync(PostSource.Maps, most));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => store.LoadAsync(new PostingLoad { ArmorIds = most, LobbyIds = most }));
             Assert.Equal(0, database.Created);
         }
     }

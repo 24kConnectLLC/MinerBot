@@ -82,20 +82,20 @@ namespace MinerBot.Dashboard.Tests
         public void StructureNamesBehindChangedAndAhead()
         {
             var expected = DatabaseMigrations.Expected();
-            Assert.Equal(4, expected.Count);
+            Assert.Equal(5, expected.Count);
 
-            Assert.Equal((CheckResult.Ok, "Up to date: migrations 1 to 4."), Result(SelfChecks.OfStructure(expected, expected)));
+            Assert.Equal((CheckResult.Ok, "Up to date: migrations 1 to 5."), Result(SelfChecks.OfStructure(expected, expected)));
 
-            var behind = SelfChecks.OfStructure(expected, [.. expected.Take(3)]);
-            Assert.Equal((CheckResult.Problem, $"Migration {expected[3].Name} hasn't run. deploy.sh runs the migrations before it swaps the dashboard, so ./status.sh says "
+            var behind = SelfChecks.OfStructure(expected, [.. expected.Take(4)]);
+            Assert.Equal((CheckResult.Problem, $"Migration {expected[4].Name} hasn't run. deploy.sh runs the migrations before it swaps the dashboard, so ./status.sh says "
                 + "what's deployed."), Result(behind));
 
-            var changed = SelfChecks.OfStructure(expected, [.. expected.Take(3), expected[3] with { Checksum = new string('0', 64) }]);
-            Assert.Equal((CheckResult.Problem, $"Migration {expected[3].Name} in the database isn't this version's file, so the database may not match the code."),
+            var changed = SelfChecks.OfStructure(expected, [.. expected.Take(4), expected[4] with { Checksum = new string('0', 64) }]);
+            Assert.Equal((CheckResult.Problem, $"Migration {expected[4].Name} in the database isn't this version's file, so the database may not match the code."),
                 Result(changed));
 
-            var ahead = SelfChecks.OfStructure(expected, [.. expected, new MigrationInfo(5, "0005_later", new string('a', 64))]);
-            Assert.Equal((CheckResult.Note, "MinerBot's database has migration 5, which this version doesn't: a newer version ran it, as after ./rollback.sh dashboard. "
+            var ahead = SelfChecks.OfStructure(expected, [.. expected, new MigrationInfo(6, "0006_later", new string('a', 64))]);
+            Assert.Equal((CheckResult.Note, "MinerBot's database has migration 6, which this version doesn't: a newer version ran it, as after ./rollback.sh dashboard. "
                 + "Migrations only add, so this version still works."), Result(ahead));
 
             Assert.Equal((CheckResult.Problem, "The login can't read schema_version. ./setup-dashboard.sh --no-questions applies its rights again."),

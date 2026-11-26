@@ -1,12 +1,32 @@
-@model SettingStatus
+@model SettingMark
 @using MinerBot.Dashboard.Armor
 @using MinerBot.Dashboard.Servers
 @*
     One of a server's four settings in the servers list: its status in words, with what's missing named as Discord names
-    it, and the channel's name as Discord gave it, through RevealedText, when the copy has the channel
+    it, the channel's name as Discord gave it, through RevealedText, when the copy has the channel, and the bot's last post
+    of the kind there, linked to the message in Discord, or since when its posts fail, only while the kind is on
 *@
-<span class="marker @SettingStatuses.Marker(Model.State)">@SettingStatuses.Words(Model)</span>
-@if (Model.Channel is { } channel)
+@{
+    var setting = Model.Setting;
+    var delivery = DeliveryWords.Shown(Model.Delivery, setting.State);
+}
+<span class="marker @SettingStatuses.Marker(setting.State)">@SettingStatuses.Words(setting)</span>
+@if (setting.Channel is { } channel)
 {
     <p class="cell-line muted">@if (ChannelGroups.IsHidden(channel)) {<text>A channel hidden from MinerBot</text>} else {@RevealedText.Html(channel.name)}</p>
+}
+@if (DeliveryWords.Line(delivery, Model.Now) is { } line)
+{
+    @if (delivery is { failing_since: not null })
+    {
+        <p class="cell-line warn-text">@line</p>
+    }
+    else if (delivery != null && DeliveryWords.LastPostLink(delivery) is { } link)
+    {
+        <p class="cell-line"><a href="@link">@line</a></p>
+    }
+    else
+    {
+        <p class="cell-line muted">@line</p>
+    }
 }

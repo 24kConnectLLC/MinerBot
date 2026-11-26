@@ -289,6 +289,43 @@ namespace DataAccessLibrary.Tests
             Assert.Empty(await audit.LatestChanges("blacklist", ["5"]));
         }
 
+        // What a person's limit counts: the times of their own rows of one action with the outcomes given, in the window,
+        // newest first, at most the number asked for. Not another person's, another action's, another outcome's, nor one
+        // from before the window, and a refusal of theirs never takes a counted row's place.
+        [Fact]
+        public async Task ActionTimesAreOnePersonsRowsOfAnActionAndItsOutcomes()
+        {
+            var db = await StartAsync();
+            var audit = db.Audit();
+            const ulong Person = 1000000000000000001, Other = 1000000000000000002;
+
+            AuditEntry Row(DateTime at, string outcome = AuditOutcome.Ok, ulong person = Person, string action = "switches.change")
+            {
+                var entry = Entry(at, action, person, guild: 1000000000000000005, targetType: null, targetId: null);
+                entry.outcome = outcome;
+                return entry;
+            }
+
+            await audit.AddAudit(Row(Noon.AddMinutes(-70)));
+            await audit.AddAudit(Row(Noon.AddMinutes(-50)));
+            await audit.AddAudit(Row(Noon.AddMinutes(-40), AuditOutcome.Unknown));
+            await audit.AddAudit(Row(Noon.AddMinutes(-30), AuditOutcome.Refused));
+            await audit.AddAudit(Row(Noon.AddMinutes(-20), AuditOutcome.Failed));
+            await audit.AddAudit(Row(Noon.AddMinutes(-10), person: Other));
+            await audit.AddAudit(Row(Noon.AddMinutes(-5), action: "armor.approve"));
+
+            foreach (var at in Enumerable.Range(1, 3).Select(minute => Noon.AddMinutes(-minute).AddSeconds(-1)))
+                await audit.AddAudit(Row(at, AuditOutcome.Refused));
+
+            var times = await audit.ListActionTimes(Person, "switches.change", [AuditOutcome.Ok, AuditOutcome.Unknown], Noon.AddHours(-1), 30);
+
+            Assert.Equal([Noon.AddMinutes(-40), Noon.AddMinutes(-50)], times);
+            Assert.All(times, time => Assert.Equal(DateTimeKind.Utc, time.Kind));
+            Assert.Equal([Noon.AddMinutes(-40)], await audit.ListActionTimes(Person, "switches.change", [AuditOutcome.Ok, AuditOutcome.Unknown], Noon.AddHours(-1), 1));
+            Assert.Equal(4, (await audit.ListActionTimes(Person, "switches.change", [AuditOutcome.Refused], Noon.AddHours(-1), 30)).Count);
+            Assert.Empty(await audit.ListActionTimes(Person, "switches.change", [AuditOutcome.Ok], Noon.AddMinutes(-45), 30));
+        }
+
         // A page with no rows asks for nothing, so no connection is made
         [Fact]
         public async Task LatestChangesOfNoTargetsAsksNothing()

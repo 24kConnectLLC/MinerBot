@@ -1,11 +1,12 @@
 using DataAccessLibrary;
+using DataAccessLibrary.Posting;
 using Discord;
 using Discord.Interactions;
 using Discord.WebSocket;
 using MinerBot_2._0;
 using MinerBot_2._0.Feed;
 using MinerBot_2._0.Handlers;
-using MinerBot_2._0.Jobs;
+using MinerBot_2._0.Posting;
 using MinerBot_2._0.Requests;
 using MinerBot_2._0.Services;
 using MinerBot_2._0.Status;
@@ -44,6 +45,9 @@ builder.Services.AddHostedService<RequestWorker>();
 // The open lobbies and the latest maps, which the bot writes to the website's database for the website's pages.
 // Registered after the worker too, so it stops before Steam's pump ends.
 builder.Services.AddHostedService<WebsiteFeedWriter>();
+// The notification run's part in a stop: no message claimed from the stop's first sign, and up to 20 s for the one under
+// way. Registered after the feed, so it stops before every other service.
+builder.Services.AddHostedService<PostingDrain>();
 builder.Services.AddSingleton(new DiscordSocketConfig { GatewayIntents = GatewayIntents.Guilds });
 builder.Services.AddSingleton<DiscordSocketClient>();
 //builder.Services.AddSingleton<InteractionService>();
@@ -51,12 +55,15 @@ builder.Services.AddSingleton<InteractionService>(p => new InteractionService(p.
 builder.Services.AddSingleton<InteractionHandler>();
 builder.Services.AddSingleton<GuildEventHandler>();
 builder.Services.AddWebClient();
-builder.Services.AddSingleton<AnnounceService>();
 builder.Services.AddSingleton<OwnerAlertService>();
 builder.Services.AddSingleton<ArmorService>();
 builder.Services.AddSingleton<SteamAPIService>();
 builder.Services.AddSingleton<DiscordService>();
-builder.Services.AddSingleton<NotificationState>();
+// What the notification run keeps for the whole run of the bot, apart from its record: the look for an older bot, what
+// MinerBot's database didn't take of how a message ended, and the gate that stops its sends at a stop
+builder.Services.AddSingleton<PostingProcess>();
+builder.Services.AddSingleton<PendingSettlements>();
+builder.Services.AddSingleton<PostingGate>();
 // For the map cooldown of the notification job, tests give it another clock
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<JobHandler>();
@@ -70,9 +77,17 @@ builder.Services.AddDataAccessServices(builder.Configuration)
                 .AddGuildAccess()
                 .AddBotStatusAccess()
                 .AddRetentionAccess()
+                .AddPostingRetentionAccess()
                 .AddBotGuildAccess()
                 .AddBotRequestAccess()
                 .AddWebsiteFeedAccess();
+
+// The notification run's record of what it found and what each server is owed, in MinerBot's database, so a restart loses
+// no post. Without a usable BotConnection it's kept in memory for the run of the bot, and a restart loses it, as before.
+if (StatusWriter.BotConnectionProblem(builder.Configuration) == null)
+    builder.Services.AddNotificationAccess();
+else
+    builder.Services.AddSingleton<INotificationData, MemoryNotificationData>();
 
 // Steam API Access
 builder.Services.AddSteamAPIServices();
@@ -115,8 +130,6 @@ host.Services.GetRequiredService<GuildEventHandler>().Initialize();
 
 await client.LoginAsync(TokenType.Bot, Environment.GetEnvironmentVariable("BOTTOKEN"));
 await client.StartAsync();
-
-await host.Services.GetRequiredService<AnnounceService>().InitializeWebhookAsync();
 
 var steamApi = host.Services.GetService<ISteamAPIAccess>();
 steamApi.SetCredentials(Environment.GetEnvironmentVariable("STEAMWEB_PUB_KEY"), 

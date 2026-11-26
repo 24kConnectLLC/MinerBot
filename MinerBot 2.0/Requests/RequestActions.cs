@@ -1,4 +1,5 @@
 using DataAccessLibrary;
+using DataAccessLibrary.Posting;
 using DataAccessLibrary.Requests;
 using DataAccessLibrary.Requests.Models;
 using Discord;
@@ -8,6 +9,7 @@ using MinerBot.Shared.Requests;
 using MinerBot.Shared.Steam;
 using MinerBot_2._0.Builders;
 using MinerBot_2._0.Handlers;
+using MinerBot_2._0.Posting;
 using MinerBot_2._0.Services;
 using MinerBot_2._0.Status;
 using MySql.Data.MySqlClient;
@@ -32,7 +34,7 @@ namespace MinerBot_2._0.Requests
     // and so is done while it still runs. A reconnect whose Steam isn't back in time is done too: its disconnect happened.
     // A restart is the request worker's.
     public sealed class RequestActions(DiscordSocketClient client, GuildWatcher watcher, IBotRequestData data, PostsPause pause, PresenceKeeper presence,
-        JobHandler jobs, ISteamAPIAccess steam, IGetData getData, CacheReset caches, OwnerAlertService alerts, BotRecorder recorder, TimeProvider clock)
+        JobHandler jobs, ISteamAPIAccess steam, IGetData getData, CacheReset caches, OwnerAlertService alerts, BotRecorder recorder, INotificationData posts, TimeProvider clock)
     {
         // A restart only from this long after a start, so it can't land in a deploy's readiness check: deploy/common.sh's
         // ready_bot, which fails a deploy whose bot restarts
@@ -307,6 +309,7 @@ namespace MinerBot_2._0.Requests
             try
             {
                 var message = await sending.WaitAsync(LimitOf(kind), stop);
+                await EndWaitsAsync(row.guild_id!.Value, channel.Id);
                 return Done(RequestTexts.TestMessageSent, message.Id);
             }
             catch (HttpException e)
@@ -331,6 +334,9 @@ namespace MinerBot_2._0.Requests
             {
                 var outcome = await rewrite.WaitAsync(LimitOf(kind), stop);
 
+                if (outcome.State == RewriteState.Written)
+                    await EndWaitsAsync(row.guild_id!.Value, null);
+
                 return outcome.State switch
                 {
                     RewriteState.Written => Done(RequestTexts.Rewritten(outcome.At, outcome.Channels)),
@@ -341,6 +347,21 @@ namespace MinerBot_2._0.Requests
             catch (TimeoutException) when (!rewrite.IsCompleted)
             {
                 return Unknown(RequestTexts.CopyNotRewritten(kind));
+            }
+        }
+
+        // A test message that went to a channel, or the server's copy written again, ends the waits of its posts that failed
+        // there, or in any of its channels, so the next notification run tries them at once. MinerBot's database not taking it
+        // costs only the wait.
+        async Task EndWaitsAsync(ulong guildId, ulong? channelId)
+        {
+            try
+            {
+                await posts.EndWaitsAsync(guildId, channelId, Now());
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine(PostingTexts.WaitsNotEnded(guildId, FailureLog.Describe(e)));
             }
         }
 
@@ -415,11 +436,12 @@ namespace MinerBot_2._0.Requests
             }
             catch (Exception e) when (!Stopping(e, stop))
             {
-                return Failed(RequestTexts.SigninFailed(e.GetType().Name)) with { Dm = RequestDmStates.Failed };
+                return Failed(RequestTexts.SigninFailed(FailureLog.Describe(e))) with { Dm = RequestDmStates.Failed };
             }
         }
 
-        // Discord's own code, such as 50013 for missing permissions, or else the HTTP status
-        static int Code(HttpException e) => e.DiscordCode is { } code ? (int)code : (int)e.HttpCode;
+        // Discord's own code, such as 50013 for missing permissions, or else the HTTP status, as for Discord's own trouble,
+        // whose answer's code is 0
+        static int Code(HttpException e) => FailureLog.DiscordCode(e);
     }
 }

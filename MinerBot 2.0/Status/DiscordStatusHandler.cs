@@ -13,6 +13,11 @@ namespace MinerBot_2._0.Status
     {
         // What the uptime samples record as up on Discord: the bot gets and answers interactions then, Ready or not
         public bool Connected => State == DiscordState.Connected;
+
+        // When the handler saw the state begin, UTC: its last connection for a connected reading, and the first drop of the
+        // spell for one that isn't. Null before either; a reading taken a moment before the handler's event ran has the time
+        // from before it.
+        public DateTime? ChangedAt { get; init; }
     }
 
     public interface IDiscordStatus
@@ -37,7 +42,10 @@ namespace MinerBot_2._0.Status
         readonly HashSet<string> causes = new(StringComparer.Ordinal);
 
         bool readyFired, connected;
-        DateTime? downSince;
+
+        // When the last connection came, and when the spell offline began, by the handler's own clock, so the status row's
+        // since is the moment itself rather than the sampler's next tick
+        DateTime? connectedAt, downSince;
 
         public void Initialize()
         {
@@ -49,12 +57,16 @@ namespace MinerBot_2._0.Status
         public DiscordReading Read()
         {
             var state = client.ConnectionState;
+            DateTime? connectedTime, downTime;
+
+            lock (gate)
+                (connectedTime, downTime) = (connectedAt, downSince);
 
             // Discord.Net counts the gateway as connected only once READY or RESUMED came
             if (state == ConnectionState.Connected)
-                return new DiscordReading(DiscordState.Connected, Volatile.Read(ref readyFired), client.Latency, client.Guilds.Count);
+                return new DiscordReading(DiscordState.Connected, Volatile.Read(ref readyFired), client.Latency, client.Guilds.Count) { ChangedAt = connectedTime };
 
-            return new DiscordReading(state == ConnectionState.Connecting ? DiscordState.Connecting : DiscordState.Disconnected, false, null, null);
+            return new DiscordReading(state == ConnectionState.Connecting ? DiscordState.Connecting : DiscordState.Disconnected, false, null, null) { ChangedAt = downTime };
         }
 
         // These run on Discord.Net's own tasks, which wait for them, so they only record and return
@@ -74,6 +86,7 @@ namespace MinerBot_2._0.Status
                         : string.Create(CultureInfo.InvariantCulture, $"the first connection of this run, {Seconds(now - recorder.StartedAt)} s after the start");
 
                     connected = true;
+                    connectedAt = now;
                     downSince = null;
                     causes.Clear();
                 }

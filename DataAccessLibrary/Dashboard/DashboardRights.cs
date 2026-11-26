@@ -36,6 +36,7 @@ namespace DataAccessLibrary.Dashboard
             "table INSERT {{BOT_DB}} armor_reviews",
             "table INSERT {{BOT_DB}} audit_log",
             "table INSERT {{BOT_DB}} dashboard_sessions",
+            "table INSERT {{BOT_DB}} guild_settings",
             "table INSERT {{SITE_DB}} ihvph_blacklist",
             "table SELECT {{BOT_DB}} armor_reviews",
             "table SELECT {{BOT_DB}} audit_log",
@@ -46,17 +47,23 @@ namespace DataAccessLibrary.Dashboard
             "table SELECT {{BOT_DB}} dashboard_sessions",
             "table SELECT {{BOT_DB}} guild_channels",
             "table SELECT {{BOT_DB}} guild_daily",
+            "table SELECT {{BOT_DB}} guild_delivery_status",
             "table SELECT {{BOT_DB}} guild_events",
+            "table SELECT {{BOT_DB}} guild_settings",
             "table SELECT {{BOT_DB}} guilds",
             "table SELECT {{BOT_DB}} job_runs",
             "table SELECT {{BOT_DB}} job_status",
+            "table SELECT {{BOT_DB}} notification_deliveries",
+            "table SELECT {{BOT_DB}} notification_queue",
+            "table SELECT {{BOT_DB}} notification_seen",
             "table SELECT {{BOT_DB}} schema_version",
             "table SELECT {{BOT_DB}} uptime_daily",
             "table SELECT {{BOT_DB}} uptime_samples",
             "table SELECT {{SITE_DB}} ihvph_armor_styles",
             "table SELECT {{SITE_DB}} ihvph_blacklist",
             "table SELECT {{SITE_DB}} ihvph_discord_servers",
-            "table UPDATE {{BOT_DB}} dashboard_sessions"
+            "table UPDATE {{BOT_DB}} dashboard_sessions",
+            "table UPDATE {{BOT_DB}} guild_settings"
         ];
 
         // With the databases' names as MariaDB reports them, unquoted, sorted as deploy.sh sorts the lines it compares

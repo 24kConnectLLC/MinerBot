@@ -5,6 +5,7 @@ using DataAccessLibrary;
 using DataAccessLibrary.Armor;
 using DataAccessLibrary.Armor.Models;
 using DataAccessLibrary.Audit;
+using DataAccessLibrary.Posting;
 using DataAccessLibrary.Requests;
 using DataAccessLibrary.Status;
 using DataAccessLibrary.Status.Models;
@@ -22,9 +23,10 @@ using static MinerBot.Dashboard.Tests.Support.ArmorSteps;
 namespace MinerBot.Dashboard.Tests
 {
     // What follows an armor review on the bot's side: the cache clear after an approval, a take-down or a move back from
-    // Approved, sent once the review has committed and never able to fail it, and Announce now, offered for approved armor
-    // the bot may post until a notification run has started since the approval, unless the bot has stopped cleanly or
-    // started again since its last run
+    // Approved, sent once the review has committed and never able to fail it, and Announce now: with a bot that keeps the
+    // record of its posts, offered for approved armor until the bot has found it, restarts included; with an older one,
+    // offered for approved armor the bot may post until a notification run has started since the approval, unless the bot
+    // has stopped cleanly or started again since its last run, which most tests here pin with an older bot's status row
     [Collection("Database")]
     public partial class ArmorFollowUpTests(MariaDbFixture fixture)
     {
@@ -37,6 +39,15 @@ namespace MinerBot.Dashboard.Tests
 
         static async Task<List<DataAccessLibrary.Requests.Models.BotRequestRow>> ClearsAsync(MariaDbFixture db) =>
             (await db.SentAsync()).Where(row => row.kind == RequestKinds.CachesClear).ToList();
+
+        // The bot's status row as a bot from before PR 11 writes it, which keeps what it finds only in memory: its write names
+        // no posting_run_id, so the column keeps what a newer bot left there, here none. The rules for such a bot are today's
+        // Restarted and Stopped states, which these tests pin; a bot that keeps what it finds is NewBot's below.
+        static async Task OlderBotAsync(MariaDbFixture db, BotStatus status)
+        {
+            await db.Status().SaveStatus(status);
+            await db.RootExecuteAsync($"UPDATE {MariaDbFixture.StatusTable} SET posting_run_id = NULL");
+        }
 
         // The notification job's row as the bot writes it, with its last run started and ended at the times given
         static Task RunAsync(MariaDbFixture db, DateTime started, DateTime? ended) => db.Status().SaveJobStatus(
@@ -225,6 +236,114 @@ namespace MinerBot.Dashboard.Tests
             Assert.Equal(HttpStatusCode.ServiceUnavailable, unsure.StatusCode);
             Assert.Contains(ArmorWords.Unsure, Text(await unsure.Content.ReadAsStringAsync(Token)));
             Assert.Single(await db.SentAsync());
+        }
+
+        // With a bot that keeps the record of its posts, Announce now is offered for approved armor until the bot has found it,
+        // whatever its runs and starts since the approval: a run since then, or a start with no run since, which an older bot's
+        // rules take as seen or lost, leave it offered, and the record's row of the armor takes it away, the page then saying
+        // where it was posted. While posts are paused, a run is under way or the bot is stopped, its place says the armor waits,
+        // restarts included. Fails if the new bot gets an older bot's Restarted line, or Announce now goes with the first run.
+        [Fact]
+        public async Task NewBotOffersAnnounceNowUntilTheArmorIsFound()
+        {
+            var db = await fixture.ReadyBotAsync();
+            await db.AddAsync(Submission(110));
+            await using var factory = new DashboardFactory(db);
+            var admin = await ReviewerAsync(factory, "198.51.100.235");
+            var now = factory.Clock.GetUtcNow().UtcDateTime;
+            var bot = StatusSteps.Status(now);
+            await db.Status().SaveStatus(bot);
+            await RunAsync(db, now.AddMinutes(-1), now.AddMinutes(-1).AddSeconds(3));
+
+            var approval = await PostAsync(admin, 110, "Approve", await OpenAsync(admin, 110));
+            var done = Text(await admin.Client.GetStringAsync(SignInSteps.PathOf(approval.Headers.Location), Token));
+            Assert.Contains(ArmorWords.ApprovedKept, done);
+            Assert.Contains("?handler=Announce\"", (await OpenAsync(admin, 110)).Html);
+
+            // A run since the approval, then a start with no run since: still offered
+            factory.Clock.Advance(TimeSpan.FromSeconds(30));
+            await RunAsync(db, now.AddSeconds(10), now.AddSeconds(12));
+            Assert.Contains("?handler=Announce\"", (await OpenAsync(admin, 110)).Html);
+
+            bot.run_id = 7;
+            bot.started_at = now.AddSeconds(20);
+            bot.heartbeat_at = now.AddSeconds(25);
+            await db.Status().SaveStatus(bot);
+            var started = await OpenAsync(admin, 110);
+            Assert.Contains("?handler=Announce\"", started.Html);
+            Assert.DoesNotContain("no notification run since is recorded yet", started.Text);
+            Assert.Contains(ArmorWords.PostNoteKept, started.Text);
+
+            // Its place while paused, while a run is under way, and while the bot is stopped
+            await db.Requests().SavePause(true, "Testing the pause", now, TestUsers.Owner.Id, 1, now);
+            Assert.Contains(ArmorWords.AnnouncePausedKept, (await OpenAsync(admin, 110)).Text);
+            await db.ClearAsync(MariaDbFixture.SettingsTable);
+
+            await RunAsync(db, now.AddSeconds(28), null);
+            Assert.Contains(ArmorWords.AnnounceRunningKept(RequestWords.Clock(now.AddSeconds(28))), (await OpenAsync(admin, 110)).Text);
+            await RunAsync(db, now.AddSeconds(28), now.AddSeconds(29));
+
+            bot.stopped_at = bot.heartbeat_at;
+            await db.Status().SaveStatus(bot);
+            var stopped = await OpenAsync(admin, 110);
+            Assert.Contains(ArmorWords.AnnounceStoppedKept, stopped.Text);
+            Assert.DoesNotContain("handler=Announce", stopped.Html);
+
+            bot.run_id = 8;
+            bot.stopped_at = null;
+            await db.Status().SaveStatus(bot);
+            Assert.Contains("?handler=Announce\"", (await OpenAsync(admin, 110)).Html);
+
+            // Found by the bot: Announce now goes, and where it was posted shows
+            await PostSteps.QueueAsync(db, PostSource.Armor, 110, now.AddMinutes(1), RequestSteps.ServerId);
+            var found = await OpenAsync(admin, 110);
+            Assert.DoesNotContain("id=\"announce\"", found.Html);
+            Assert.Contains("<h2 id=\"posted\">Where it was posted</h2>", found.Html);
+            Assert.Contains(ArmorWords.PostMayNotComeNoteKept, found.Text);
+            PageTests.AssertAccessible("a review page of armor the bot has found", found.Html);
+        }
+
+        // With an older bot, which keeps what it finds only in memory, today's rules and words stand: Announce now goes once
+        // a run has started since the approval, a start with no run since replaces it with the Restarted line, a stop with
+        // the Stopped one, and the approval's words say the bot may not post it. No Where it was posted, which only a bot that
+        // keeps the record has.
+        [Fact]
+        public async Task OlderBotKeepsTheRestartedAndStoppedStates()
+        {
+            var db = await fixture.ReadyBotAsync();
+            await db.AddAsync(Submission(111));
+            await using var factory = new DashboardFactory(db);
+            var admin = await ReviewerAsync(factory, "198.51.100.236");
+            var now = factory.Clock.GetUtcNow().UtcDateTime;
+            var bot = StatusSteps.Status(now);
+            await OlderBotAsync(db, bot);
+            await RunAsync(db, now.AddMinutes(-1), now.AddMinutes(-1).AddSeconds(3));
+
+            var approval = await PostAsync(admin, 111, "Approve", await OpenAsync(admin, 111));
+            Assert.Contains(ArmorWords.Approved, Text(await admin.Client.GetStringAsync(SignInSteps.PathOf(approval.Headers.Location), Token)));
+            var offered = await OpenAsync(admin, 111);
+            Assert.Contains("?handler=Announce\"", offered.Html);
+            Assert.Contains(ArmorWords.PostNote, offered.Text);
+            Assert.DoesNotContain("id=\"posted\"", offered.Html);
+
+            bot.run_id = 7;
+            bot.started_at = now.AddSeconds(20);
+            bot.heartbeat_at = now.AddSeconds(25);
+            await OlderBotAsync(db, bot);
+            factory.Clock.Advance(TimeSpan.FromSeconds(30));
+            Assert.Contains(ArmorWords.AnnounceRestarted(TimeWords.Utc(bot.started_at)), (await OpenAsync(admin, 111)).Text);
+
+            bot.stopped_at = bot.heartbeat_at;
+            await OlderBotAsync(db, bot);
+            Assert.Contains(ArmorWords.AnnounceStopped, (await OpenAsync(admin, 111)).Text);
+
+            // A run since the approval takes Announce now away
+            bot.run_id = 8;
+            bot.stopped_at = null;
+            await OlderBotAsync(db, bot);
+            await RunAsync(db, now.AddSeconds(40), now.AddSeconds(42));
+            factory.Clock.Advance(TimeSpan.FromSeconds(30));
+            Assert.DoesNotContain("id=\"announce\"", (await OpenAsync(admin, 111)).Html);
         }
 
         // Announce now shows for approved armor until a notification run has started since the approval, which has seen it:
@@ -428,11 +547,11 @@ namespace MinerBot.Dashboard.Tests
 
             var bot = StatusSteps.Status(now.AddMinutes(2));
             bot.started_at = now.AddMinutes(1).AddSeconds(30);
-            await db.Status().SaveStatus(bot);
+            await OlderBotAsync(db, bot);
             await AssertNotOfferedAsync(ArmorWords.AnnounceRestarted(TimeWords.Utc(bot.started_at)), "an Announce now the database didn't confirm, once the bot has started again");
 
             bot.stopped_at = now.AddMinutes(2).AddSeconds(30);
-            await db.Status().SaveStatus(bot);
+            await OlderBotAsync(db, bot);
             await AssertNotOfferedAsync(ArmorWords.AnnounceStopped, "an Announce now the database didn't confirm, once the bot has stopped");
         }
 
@@ -496,7 +615,7 @@ namespace MinerBot.Dashboard.Tests
                 // armor as seen
                 var restarted = StatusSteps.Status(now);
                 restarted.started_at = now.AddSeconds(-10);
-                await db.Status().SaveStatus(restarted);
+                await OlderBotAsync(db, restarted);
                 var after = await OpenAsync(admin, 81);
                 Assert.Contains(ArmorWords.AnnounceRestarted(TimeWords.Utc(now.AddSeconds(-10))), after.Text);
                 Assert.DoesNotContain("handler=Announce", after.Html);
@@ -508,7 +627,7 @@ namespace MinerBot.Dashboard.Tests
                 await db.ClearAsync(MariaDbFixture.StatusTable);
                 var stopped = StatusSteps.Status(now.AddSeconds(-5));
                 stopped.stopped_at = now.AddSeconds(-5);
-                await db.Status().SaveStatus(stopped);
+                await OlderBotAsync(db, stopped);
                 var whileStopped = await OpenAsync(admin, 81);
                 Assert.Contains(ArmorWords.AnnounceStopped, whileStopped.Text);
                 Assert.DoesNotContain("handler=Announce", whileStopped.Html);
@@ -557,11 +676,11 @@ namespace MinerBot.Dashboard.Tests
                 }
             ]);
             var bot = StatusSteps.Status(now.AddSeconds(40));
-            await db.Status().SaveStatus(bot);
+            await OlderBotAsync(db, bot);
             Assert.DoesNotContain("id=\"announce\"", (await OpenAsync(admin, 87)).Html);
 
             bot.started_at = now.AddSeconds(60);
-            await db.Status().SaveStatus(bot);
+            await OlderBotAsync(db, bot);
             var restarted = await OpenAsync(admin, 87);
             Assert.Contains(ArmorWords.AnnounceRestarted(TimeWords.Utc(now.AddSeconds(60))), restarted.Text);
             Assert.DoesNotContain("handler=Announce", restarted.Html);
@@ -571,7 +690,7 @@ namespace MinerBot.Dashboard.Tests
             await db.ClearAsync(MariaDbFixture.StatusTable);
             var stopped = StatusSteps.Status(now.AddSeconds(50));
             stopped.stopped_at = now.AddSeconds(50);
-            await db.Status().SaveStatus(stopped);
+            await OlderBotAsync(db, stopped);
             var whileStopped = await OpenAsync(admin, 87);
             Assert.Contains(ArmorWords.AnnounceStopped, whileStopped.Text);
             Assert.DoesNotContain("handler=Announce", whileStopped.Html);
@@ -591,7 +710,7 @@ namespace MinerBot.Dashboard.Tests
             var admin = await ReviewerAsync(factory, "198.51.100.128");
             var now = factory.Clock.GetUtcNow().UtcDateTime;
             var bot = StatusSteps.Status(now);
-            await db.Status().SaveStatus(bot);
+            await OlderBotAsync(db, bot);
             await RunAsync(db, now.AddMinutes(-1), now.AddMinutes(-1).AddSeconds(3));
 
             Assert.Equal(HttpStatusCode.Redirect, (await PostAsync(admin, 89, "Approve", await OpenAsync(admin, 89))).StatusCode);
@@ -605,7 +724,7 @@ namespace MinerBot.Dashboard.Tests
             bot.run_id = 7;
             bot.started_at = start;
             bot.heartbeat_at = start.AddSeconds(20);
-            await db.Status().SaveStatus(bot);
+            await OlderBotAsync(db, bot);
             factory.Clock.Advance(TimeSpan.FromSeconds(25));
             var restarted = await OpenAsync(admin, 89);
             Assert.Contains(ArmorWords.AnnounceRestarted(TimeWords.Utc(start)), restarted.Text);
@@ -648,7 +767,7 @@ namespace MinerBot.Dashboard.Tests
             var bot = StatusSteps.Status(now);
             bot.started_at = now.AddMinutes(-2);
             bot.stopped_at = stopped ? now.AddMinutes(-1) : null;
-            await db.Status().SaveStatus(bot);
+            await OlderBotAsync(db, bot);
             await RunAsync(db, now.AddMinutes(-4), now.AddMinutes(-4).AddSeconds(2));
             const string Hedge = "if that's the bot's first check since it started, it won't post this one.";
 
@@ -696,7 +815,7 @@ namespace MinerBot.Dashboard.Tests
             ]);
             var bot = StatusSteps.Status(skipped.AddMinutes(1));
             bot.started_at = skipped.AddMinutes(1);
-            await db.Status().SaveStatus(bot);
+            await OlderBotAsync(db, bot);
             var restarted = await OpenAsync(admin, 92);
             Assert.Contains("if the bot hasn't posted this armor yet, it won't, unless the armor was approved during that run.", restarted.Text);
             Assert.Contains("and no notification run since is recorded yet.", restarted.Text);
@@ -705,7 +824,7 @@ namespace MinerBot.Dashboard.Tests
             await db.ClearAsync(MariaDbFixture.StatusTable);
             var stop = StatusSteps.Status(skipped.AddMinutes(1));
             stop.stopped_at = skipped.AddMinutes(1);
-            await db.Status().SaveStatus(stop);
+            await OlderBotAsync(db, stop);
             var stopped = await OpenAsync(admin, 92);
             Assert.Contains("if the bot hasn't posted this armor yet, it won't. Announce now isn't offered.", stopped.Text);
             Assert.DoesNotContain("so the bot won't post this armor", stopped.Text);
@@ -725,7 +844,7 @@ namespace MinerBot.Dashboard.Tests
             var admin = await ReviewerAsync(factory, stopped ? "198.51.100.144" : "198.51.100.145");
             var now = factory.Clock.GetUtcNow().UtcDateTime;
             var bot = StatusSteps.Status(now);
-            await db.Status().SaveStatus(bot);
+            await OlderBotAsync(db, bot);
             await RunAsync(db, now.AddMinutes(-1), now.AddMinutes(-1).AddSeconds(3));
             Assert.Equal(HttpStatusCode.Redirect, (await PostAsync(admin, 94, "Approve", await OpenAsync(admin, 94))).StatusCode);
             var drawn = await OpenAsync(admin, 94);
@@ -740,7 +859,7 @@ namespace MinerBot.Dashboard.Tests
             else
                 (bot.run_id, bot.started_at) = (7, changed);
 
-            await db.Status().SaveStatus(bot);
+            await OlderBotAsync(db, bot);
 
             var refused = await RequestSteps.AnsweredAsync(admin, await AnnounceAsync(admin, 94, drawn, key));
             var html = await refused.Content.ReadAsStringAsync(Token);
@@ -765,7 +884,7 @@ namespace MinerBot.Dashboard.Tests
             var admin = await ReviewerAsync(factory, "198.51.100.217");
             var now = factory.Clock.GetUtcNow().UtcDateTime;
             var bot = StatusSteps.Status(now);
-            await db.Status().SaveStatus(bot);
+            await OlderBotAsync(db, bot);
             await RunAsync(db, now.AddMinutes(-1), now.AddMinutes(-1).AddSeconds(3));
             Assert.Equal(HttpStatusCode.Redirect, (await PostAsync(admin, 98, "Approve", await OpenAsync(admin, 98))).StatusCode);
             var drawn = await OpenAsync(admin, 98);
@@ -773,7 +892,7 @@ namespace MinerBot.Dashboard.Tests
             factory.Clock.Advance(TimeSpan.FromSeconds(40));
             var started = factory.Clock.GetUtcNow().UtcDateTime;
             (bot.run_id, bot.started_at, bot.heartbeat_at) = (7, started, started);
-            await db.Status().SaveStatus(bot);
+            await OlderBotAsync(db, bot);
 
             var address = await RequestSteps.NoticeOfAsync(await AnnounceAsync(admin, 98, drawn, AnnounceKey(drawn.Html)));
             var refused = Text(await (await admin.Client.GetAsync(address, Token)).Content.ReadAsStringAsync(Token));

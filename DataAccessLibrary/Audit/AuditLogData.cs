@@ -122,6 +122,34 @@ namespace DataAccessLibrary.Audit
             });
         }
 
+        // When one person's rows of an action with one of these outcomes were written, since the time given, newest first, at
+        // most take: what a limit on how often each person may do something counts, by the index on the actor and the time,
+        // so a refusal of theirs never pushes a counted row out of the read
+        public async Task<IReadOnlyList<DateTime>> ListActionTimes(ulong actorId, string action, IReadOnlyCollection<string> outcomes, DateTime from, int take)
+        {
+            ArgumentNullException.ThrowIfNull(outcomes);
+
+            if (action == null || action.Length > ActionLimit || !Action.IsMatch(action))
+                throw new ArgumentException($"An audit row's action is words in small letters joined by dots, such as armor.approve, in at most {ActionLimit} characters", nameof(action));
+
+            if (outcomes.Count == 0 || outcomes.Any(outcome => !AuditOutcome.IsKnown(outcome)))
+                throw new ArgumentException($"Each outcome is one of: {string.Join(", ", AuditOutcome.All)}", nameof(outcomes));
+
+            if (take is < 1 or > MaxPageSize)
+                throw new ArgumentOutOfRangeException(nameof(take), take, $"From 1 to {MaxPageSize} rows");
+
+            RequireUtc(from, nameof(from));
+
+            string sql = $@"SELECT at
+                            FROM {_names.Bot}.audit_log
+                            WHERE actor_id = @actorId AND at >= @from AND action = @action AND outcome IN @outcomes
+                            ORDER BY at DESC, id DESC
+                            LIMIT @take";
+
+            var times = await LoadDataEnum<DateTime, object>(sql, new { actorId, from, action, outcomes, take }).ConfigureAwait(false);
+            return times.Select(time => UtcTimes.Mark(time)).ToList();
+        }
+
         // The latest change that went through for each of these targets, such as the entries on one page of the blacklist,
         // in one call. Refused, failed and unknown rows don't count, and neither the JSON nor the visitor's address is read.
         // Latest in ListAudit's order: the time, then the order the rows were written. A change's time is set before its

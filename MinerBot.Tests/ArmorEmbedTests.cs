@@ -249,24 +249,31 @@ namespace MinerBot.Tests
             Assert.Equal(BatchNames(), delivered.SelectMany(NamesIn));
         }
 
+        // Each server is owed its own armor: one whose second message was refused gets that message's armor at the next run,
+        // and the server that got both messages gets nothing more
         [Fact]
-        public async Task ArmorOfTheGuildThatGotTheMostIsRecorded()
+        public async Task ArmorEachServerMissedIsSentToItAlone()
         {
             await using var discord = await StartWithBatchAsync();
-            discord.Guilds.AllGuilds.Add(FakeGuildData.CreateGuild(FakeDiscord.ChannelId));
+            await Posts.AddSecondServerAsync(discord);
             discord.FailStep = SendStep;
             discord.FailStepAfter = 3;
 
-            // The first guild gets both messages, and the second one only the first
+            // The first server gets both messages, and the second one only the first
             await discord.RunNotificationJobAsync();
 
             var firstRun = discord.Steps.Count;
+            var secondServer = Sent(discord).Where(step => step.SentTo == FakeDiscord.JoinedChannelId && step.EmbedTitles.Any()).ToList();
             discord.FailStep = null;
             await discord.RunNotificationJobAsync();
 
-            Assert.DoesNotContain(discord.Steps.Skip(firstRun), step => step.Name == SendStep);
+            var resent = Assert.Single(discord.Steps.Skip(firstRun), step => step.Name == SendStep);
+            Assert.Equal(FakeDiscord.JoinedChannelId, resent.SentTo);
+            Assert.Equal(NamesIn(secondServer[1]), NamesIn(resent));
         }
 
+        // The armor of the message that keeps being refused waits a week, then is given up as too old to be news, and the
+        // armor of the message that went is recorded as posted
         [Fact]
         public async Task OnlyArmorThatNeverGotThroughIsGivenUpOn()
         {
@@ -274,13 +281,17 @@ namespace MinerBot.Tests
             discord.FailStep = SendStep;
             discord.FailStepAfter = 1;
 
-            for (int run = 0; run < NotificationState.MaxFailedRuns; run++)
-                await discord.RunNotificationJobAsync();
+            await discord.RunNotificationJobAsync();
+            discord.MoveClock(TimeSpan.FromDays(7));
+            await discord.RunNotificationJobAsync();
 
             var sentNames = NamesIn(Sent(discord)[0]).Count;
+            var rows = discord.Store.Queue.Where(row => row.source == DataAccessLibrary.Posting.PostSource.Armor).ToList();
 
             Assert.InRange(sentNames, 1, BatchSize - 1);
-            Assert.Contains($"Gave up on {BatchSize - sentNames} new armor styles", discord.ConsoleText);
+            Assert.Equal(sentNames, rows.Count(row => row.state == DataAccessLibrary.Posting.QueueState.Sent));
+            Assert.Equal(BatchSize - sentNames, rows.Count(row => row.reason == MinerBot.Shared.Delivery.DeliveryReasons.TooOld));
+            Assert.Equal(2, Sent(discord).Count);
         }
 
         [Fact]

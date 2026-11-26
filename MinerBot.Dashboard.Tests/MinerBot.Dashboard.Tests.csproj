@@ -49,9 +49,13 @@
     <None Include="..\SteamWebAPIAccess\SteamStatus.cs" Link="bot-source\SteamStatus.cs" CopyToOutputDirectory="PreserveNewest" Visible="false" />
     <!-- The bot's request actions, whose restart rule the controls page states: ControlsPageTests reads it -->
     <None Include="..\MinerBot 2.0\Requests\RequestActions.cs" Link="bot-source\RequestActions.cs" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    <!-- The bot's posting limits, whose give-up limits the pause's words and the paused banner state: ControlsPageTests reads it -->
+    <None Include="..\MinerBot 2.0\Posting\PostingLimits.cs" Link="bot-source\PostingLimits.cs" CopyToOutputDirectory="PreserveNewest" Visible="false" />
     <!-- The bot's words for the requests it refuses, whose two for a row the dashboard didn't sign banner 4 looks for:
          RequestBannerTests reads it -->
     <None Include="..\MinerBot 2.0\Requests\RequestTexts.cs" Link="bot-source\RequestTexts.cs" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    <!-- The bot's jobs, each of which the Bot page names and whose schedule it puts in words: StatusRulesTests reads them -->
+    <None Include="..\MinerBot 2.0\Jobs\*.cs" Link="bot-source\Jobs\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Visible="false" />
   </ItemGroup>
 
   <ItemGroup>

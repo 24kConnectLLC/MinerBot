@@ -196,6 +196,66 @@ namespace MinerBot.Tests
             Assert.DoesNotContain("SetGameAsync", source);
         }
 
+        // The notification run's record of what it found and what each server is owed: in MinerBot's database when the bot has
+        // a usable BotConnection, so a restart loses no post, and in memory for the run of the bot otherwise, as before. The
+        // run's own state of the process is a singleton, since JobHandler makes the job anew for each run.
+        [Fact]
+        public void ProgramKeepsThePostsRecordInMinerBotsDatabaseWhenItCan()
+        {
+            var source = BotSource("Program.cs");
+
+            Assert.Contains("if (StatusWriter.BotConnectionProblem(builder.Configuration) == null)\n    builder.Services.AddNotificationAccess();\n"
+                + "else\n    builder.Services.AddSingleton<INotificationData, MemoryNotificationData>();\n", source);
+            Assert.Contains("builder.Services.AddSingleton<PostingProcess>();", source);
+            Assert.DoesNotContain("NotificationState", source);
+        }
+
+        // The notification run's part in a stop: PostingDrain registered after the website feed, as the last hosted service, so
+        // it stops first, while the rest still run, and the backlog of settles and the gate kept for the whole run of the bot
+        [Fact]
+        public void ProgramStopsThePostsFirst()
+        {
+            var source = BotSource("Program.cs");
+            var feed = source.IndexOf("builder.Services.AddHostedService<WebsiteFeedWriter>();", StringComparison.Ordinal);
+            var drain = source.IndexOf("builder.Services.AddHostedService<PostingDrain>();", StringComparison.Ordinal);
+
+            Assert.True(feed > 0 && drain > feed, "PostingDrain isn't registered after the website feed, so it doesn't stop first");
+            Assert.Equal(drain, source.LastIndexOf("builder.Services.AddHostedService<", StringComparison.Ordinal));
+            Assert.Contains("builder.Services.AddSingleton<PendingSettlements>();", source);
+            Assert.Contains("builder.Services.AddSingleton<PostingGate>();", source);
+        }
+
+        // JobHandler makes each job with the bot's services, so a job whose service Program.cs doesn't register fails every
+        // run: the post records clean-up's repository, and the armor reads and the owner's messages the new-submission alerts
+        // use beside the posts' record
+        [Fact]
+        public void ProgramRegistersWhatThePostsJobsUse()
+        {
+            var source = BotSource("Program.cs");
+
+            Assert.Contains(".AddPostingRetentionAccess()", source);
+            Assert.Contains(".AddArmorAccess()", source);
+            Assert.Contains("builder.Services.AddSingleton<OwnerAlertService>();", source);
+            Assert.Contains("builder.Services.AddNotificationAccess();", source);
+        }
+
+        // The start made a webhook client nothing used, whose constructor asks Discord about WEBHOOKCHANNEL's webhook and
+        // throws for an unset, malformed, deleted or refused one, and for Discord's own trouble, which killed the start
+        // before the bot recorded anything. WEBHOOKCHANNEL stays in bot.env only for an older image a rollback puts back.
+        [Fact]
+        public void StartBuildsNoWebhookClient()
+        {
+            var source = BotSource("Program.cs");
+
+            Assert.DoesNotContain("AnnounceService", source);
+            Assert.DoesNotContain("Webhook", source);
+            Assert.DoesNotContain("WEBHOOKCHANNEL", source);
+            Assert.Null(typeof(MinerBot_2._0.Worker).Assembly.GetType("MinerBot_2._0.Services.AnnounceService"));
+            Assert.DoesNotContain(typeof(MinerBot_2._0.Worker).Assembly.GetTypes(), type => type.GetFields(System.Reflection.BindingFlags.Instance
+                | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)
+                .Any(field => field.FieldType == typeof(Discord.Webhook.DiscordWebhookClient)));
+        }
+
         // The image checks itself with the heartbeat, and carries the commit it was built from
         [Fact]
         public void ImageChecksItsHealthAndKnowsItsCommit()

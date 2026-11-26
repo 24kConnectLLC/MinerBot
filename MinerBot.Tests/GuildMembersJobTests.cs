@@ -70,9 +70,9 @@ namespace MinerBot.Tests
 
             var detail = await Job(discord).CountMembers();
 
-            Assert.Equal("counted the members of 1 of 2 servers, and 1 request failed (HttpException)", detail);
+            Assert.Equal("counted the members of 1 of 2 servers, and 1 request failed (HttpException, HTTP 403, Discord 50013)", detail);
             Assert.Equal([(FakeDiscord.GuildId, 57u, Today)], data.Counts);
-            Assert.True(logger.Logged(LogLevel.Warning, "Some of the daily member count's requests failed (HttpException), and their servers are left for the next day"));
+            Assert.True(logger.Logged(LogLevel.Warning, "Some of the daily member count's requests failed (HttpException, HTTP 403, Discord 50013), and their servers are left for the next day"));
             Assert.DoesNotContain(logger.Entries, entry => entry.Message.Contains("Missing Permissions"));
         }
 
@@ -90,6 +90,25 @@ namespace MinerBot.Tests
 
             Assert.Equal("counted the members of 1 of 2 servers, and 1 request failed (TimeoutException)", detail);
             Assert.Equal([(FakeDiscord.JoinedGuildId, 3u, Today)], data.Counts);
+        }
+
+        // Two failures of different kinds stay two in the detail and the log, though Discord's numbers come with a comma
+        [Fact]
+        public async Task DifferentFailuresAreToldApart()
+        {
+            await using var discord = await StartWithTwoServersAsync();
+            discord.UnansweredGuilds.Add(FakeDiscord.GuildId);
+            discord.FailStep = "get guild";
+            discord.FailStepAfter = 1;
+            var job = Job(discord);
+            job.RequestLimit = TimeSpan.FromMilliseconds(200);
+
+            var detail = await job.CountMembers().WaitAsync(TimeSpan.FromSeconds(15), TestContext.Current.CancellationToken);
+
+            Assert.Equal("counted the members of 0 of 2 servers, and 2 requests failed (TimeoutException; HttpException, HTTP 403, Discord 50013)", detail);
+            Assert.Empty(data.Counts);
+            Assert.True(logger.Logged(LogLevel.Warning,
+                "Some of the daily member count's requests failed (TimeoutException; HttpException, HTTP 403, Discord 50013), and their servers are left for the next day"));
         }
 
         // After its time budget no request starts, so the job always ends before JobHandler cuts it off
@@ -131,9 +150,11 @@ namespace MinerBot.Tests
             Assert.Empty(logger.Entries);
         }
 
-        // At a minute no other job runs at, with none due in the 4 minutes after it either, so a run that starts on time holds
-        // none up: JobHandler runs the jobs that are due one after another. It starts late when the 04:20 notification run
-        // takes over a minute.
+        // At a minute no other job runs at, so a run that starts on time shares its pass with none: JobHandler runs the jobs that
+        // are due one after another. In the 4 minutes after it the only job due is the new-submission alerts' run at 04:22,
+        // which a slow count holds up, and which loses nothing by it: it looks again 5 minutes later, and its message waits
+        // for its hour anyway. Every 5 minutes, 2 past the notification run's marks, it leaves no 4 minutes free of a job. It
+        // starts late when the 04:20 notification run takes over a minute.
         [Fact]
         public void RunsDailyAtAMinuteNoOtherJobUses()
         {
@@ -145,12 +166,19 @@ namespace MinerBot.Tests
                 .ToList();
 
             bool IsCount(MethodInfo method) => method.DeclaringType == typeof(GuildMembersJob) && method.Name == nameof(GuildMembersJob.CountMembers);
+            bool IsAlerts(MethodInfo method) => method.DeclaringType == typeof(SubmissionAlertJob);
 
-            var runs = CronExpression.Parse(jobs.Single(found => IsCount(found.Method)).Job!.Cron).GetOccurrences(from, from.AddDays(8)).ToList();
-            var others = jobs.Where(found => !IsCount(found.Method)).SelectMany(found => CronExpression.Parse(found.Job!.Cron).GetOccurrences(from, from.AddDays(8))).ToList();
+            List<DateTime> Runs(IEnumerable<(MethodInfo Method, JobAttribute? Job)> found) =>
+                found.SelectMany(job => CronExpression.Parse(job.Job!.Cron).GetOccurrences(from, from.AddDays(8))).ToList();
+
+            var runs = Runs(jobs.Where(found => IsCount(found.Method)));
+            var alerts = Runs(jobs.Where(found => IsAlerts(found.Method)));
+            var others = Runs(jobs.Where(found => !IsCount(found.Method) && !IsAlerts(found.Method)));
 
             Assert.Equal(8, runs.Count);
             Assert.DoesNotContain(runs, run => others.Any(other => other >= run && other < run.AddMinutes(4)));
+            Assert.DoesNotContain(runs, run => alerts.Contains(run));
+            Assert.All(runs, run => Assert.Single(alerts, alert => alert >= run && alert < run.AddMinutes(4)));
         }
 
         // The last request and its write, each at its limit, end within the 4 minutes, and well inside JobHandler's limit

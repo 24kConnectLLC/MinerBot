@@ -9,9 +9,9 @@
 # MariaDB runs in a throwaway container without a network, with latin1 as the server's default character set and root
 # reached through /root/.my.cnf, as on the server. It gets the website's three tables from
 # docs/schema/wordpress-tables.sql and MinerBot's migrations, DataAccessLibrary/Migrations/0001_core.sql,
-# 0002_bot_status.sql, 0003_guilds.sql and 0004_bot_requests.sql, with schema_version as the migration runner makes it,
-# under the test names website_db and minerbot_db, since the file gives rights on tables from each. The checks compare
-# the dashboard's login with a login they give the file's rights themselves, without common.sh.
+# 0002_bot_status.sql, 0003_guilds.sql, 0004_bot_requests.sql and 0005_posting.sql, with schema_version as the
+# migration runner makes it, under the test names website_db and minerbot_db, since the file gives rights on tables from
+# each. The checks compare the dashboard's login with a login they give the file's rights themselves, without common.sh.
 #
 # Run it from Git Bash or Linux: bash deploy/tests/rights-test.sh. It needs Docker. It prints one line per check, then
 # "N of M passed", and exits 1 if any check failed. Its container is named mbtest-rights-<its PID>, ends by itself after
@@ -209,15 +209,17 @@ extras_refused() {
 forbidden_refused() {
     local statement out
     # The login may read the audit log, the armor and its review history, the blacklist, the bot's status, history and
-    # servers, the servers' settings, and the bot's requests and settings, so these try what it may not: moving a ban to
-    # another account, changing an audit row, deleting history, changing an armor's name, deleting the bot's copy of a
-    # server's channels, changing a server's setting, writing how a request ended and pausing the bot's posts
+    # servers, the servers' settings, the bot's requests and settings and the record of its posts, and save the servers'
+    # switches, so these try what it may not: moving a ban to another account, changing an audit row, deleting history,
+    # changing an armor's name, deleting the bot's copy of a server's channels, changing a server's setting, writing how a
+    # request ended, pausing the bot's posts and deleting a server's switches, which only the bot does when it leaves
     for statement in "UPDATE $site.ihvph_blacklist SET steam_id = 1" "UPDATE $bot.audit_log SET outcome = 'x'" \
         "DELETE FROM $bot.armor_reviews" "UPDATE $site.ihvph_armor_styles SET ArmorName = 'x'" \
         "DELETE FROM $bot.guild_channels" \
         "UPDATE $site.ihvph_discord_servers SET armor_channel_id = 1" "CREATE TABLE $bot.rights_check (a INT)" \
         "SELECT * FROM mysql.user" "UPDATE $bot.bot_commands SET result = 'x'" \
-        "INSERT INTO $bot.bot_settings (id, posts_paused, updated_at) VALUES (1, 1, NOW(3))"; do
+        "INSERT INTO $bot.bot_settings (id, posts_paused, updated_at) VALUES (1, 1, NOW(3))" \
+        "DELETE FROM $bot.guild_settings"; do
         out=$(as_login "$bot" "$statement")
         case $out in
             *"ERROR 1142"* | *"ERROR 1143"* | *"ERROR 1044"*) ;;
@@ -421,7 +423,7 @@ moved_login() {
             problem "the bot's login on $host doesn't have exactly the migrations' rights in minerbot" "$got"
         fi
     done
-    for migration in 0001_core 0002_bot_status 0003_guilds 0004_bot_requests; do
+    for migration in 0001_core 0002_bot_status 0003_guilds 0004_bot_requests 0005_posting; do
         out=$(tr -d '\r' < "/work/$migration.sql" | timeout -k 5 60 mariadb --defaults-file=/tmp/bot.cnf minerbot 2>&1) \
             || problem "the migration $migration didn't run with the bot's login" "$out"
     done
@@ -478,7 +480,7 @@ inside_container() {
         || stop "Couldn't make the databases: $out"
     out=$(tr -d '\r' < /work/wordpress-tables.sql | timeout -k 5 60 mariadb "$site" 2>&1) \
         || stop "Couldn't make the website's tables: $out"
-    for migration in 0001_core 0002_bot_status 0003_guilds 0004_bot_requests; do
+    for migration in 0001_core 0002_bot_status 0003_guilds 0004_bot_requests 0005_posting; do
         out=$(tr -d '\r' < "/work/$migration.sql" | timeout -k 5 60 mariadb "$bot" 2>&1) \
             || stop "Couldn't run MinerBot's migration $migration: $out"
     done
@@ -521,7 +523,7 @@ inside_container() {
     audit_adds || true
     verdict "5. Audit rows can be added."
     forbidden_refused || true
-    verdict "6. Ten forbidden statements are refused."
+    verdict "6. Eleven forbidden statements are refused."
     statement_time || true
     verdict "7. @@max_statement_time is 20 in the login's sessions."
     proxy_caught || true
@@ -600,7 +602,7 @@ on_host() {
     echo "Checking apply_rights in deploy/common.sh, with the real rights files, against $image"
     for file in deploy/common.sh deploy/dashboard-rights.sql deploy/rights-list.sql docs/schema/wordpress-tables.sql \
         DataAccessLibrary/Migrations/0001_core.sql DataAccessLibrary/Migrations/0002_bot_status.sql DataAccessLibrary/Migrations/0003_guilds.sql \
-        DataAccessLibrary/Migrations/0004_bot_requests.sql; do
+        DataAccessLibrary/Migrations/0004_bot_requests.sql DataAccessLibrary/Migrations/0005_posting.sql; do
         [ -f "$repo/$file" ] || stop "There's no file at $repo/$file."
     done
     timeout -k 10 30 docker version > /dev/null 2>&1 || stop "Docker isn't running, or doesn't answer."
@@ -623,6 +625,7 @@ on_host() {
     copy_in "$repo/DataAccessLibrary/Migrations/0002_bot_status.sql" /work/0002_bot_status.sql
     copy_in "$repo/DataAccessLibrary/Migrations/0003_guilds.sql" /work/0003_guilds.sql
     copy_in "$repo/DataAccessLibrary/Migrations/0004_bot_requests.sql" /work/0004_bot_requests.sql
+    copy_in "$repo/DataAccessLibrary/Migrations/0005_posting.sql" /work/0005_posting.sql
     echo "The real common.sh and rights files are in /opt/minerbot in $name."
 
     # The checks print their own lines and count. This counts the ok lines as well, for when the limit stops them.

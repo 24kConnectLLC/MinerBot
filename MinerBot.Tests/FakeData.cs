@@ -7,6 +7,7 @@ using DataAccessLibrary.Feed;
 using DataAccessLibrary.Feed.Models;
 using DataAccessLibrary.Guilds;
 using DataAccessLibrary.Guilds.Models;
+using DataAccessLibrary.Posting;
 using DataAccessLibrary.Status;
 using DataAccessLibrary.Status.Models;
 using Steam.Models;
@@ -72,16 +73,43 @@ namespace MinerBot.Tests
         // How many maps and pages the last read asked for
         public (int Maps, int Pages)? LatestAsked { get; private set; }
 
+        // Steam's list of the latest maps failing, which GetData returns as an empty list, while a look-up of maps by ID still
+        // answers
+        public bool LatestFails { get; set; }
+
         public Task<List<PublishedFileDetailsModel>> GetLatestWorkshopItems(int numPerPage, int maxPages = GetData.MaxQueryPages)
         {
             LatestAsked = (numPerPage, maxPages);
-            return Call(LatestItems.Take(numPerPage).ToList());
+            return Call(LatestFails ? [] : LatestItems.Take(numPerPage).ToList());
         }
 
         public Task<PublishedFileDetailsModel?> GetWorkshopItem(ulong id)
         {
             RequestedId = id;
             return Call(WorkshopItem);
+        }
+
+        // Every map Steam has, as the latest list ranks them, which a look-up by ID reaches past the top of the list, and only
+        // a public map of Murder Miners comes back. ItemsFailure makes only the look-up fail.
+        public Exception? ItemsFailure { get; set; }
+
+        // The IDs of each look-up, in order
+        public List<ulong[]> ItemsAsked { get; } = new();
+
+        public Task<IReadOnlyList<PublishedFileDetailsModel>> GetPublicWorkshopItems(IReadOnlyCollection<ulong> ids)
+        {
+            ItemsAsked.Add([.. ids]);
+
+            if (ItemsFailure != null)
+            {
+                addStep(nameof(GetPublicWorkshopItems));
+                return Task.FromException<IReadOnlyList<PublishedFileDetailsModel>>(ItemsFailure);
+            }
+
+            return Call<IReadOnlyList<PublishedFileDetailsModel>>(LatestItems
+                .Where(map => ids.Contains(map.PublishedFileId) && WorkshopItems.Check(map, MurderMinersAppId, unlistedAllowed: false) == WorkshopItemCheck.Shown)
+                .DistinctBy(map => map.PublishedFileId)
+                .ToList());
         }
 
         public Task<PlayerSummaryModel?> GetPlayerSummaries(ulong steamid)
@@ -153,6 +181,14 @@ namespace MinerBot.Tests
         }
 
         public Task<ArmorStyle> GetArmorStyle(string name) => Call(Armor!);
+
+        // The armor waiting for a review, and the highest armor ID of any status, for the new-submission alerts
+        public List<PendingSubmission> Pending { get; set; } = [];
+        public long HighestId { get; set; }
+
+        public Task<IReadOnlyList<PendingSubmission>> GetPendingSubmissions() => Call<IReadOnlyList<PendingSubmission>>([.. Pending]);
+
+        public Task<long> GetHighestArmorId() => Call(HighestId);
 
         Task<T> Call<T>(T value, [CallerMemberName] string name = "")
         {
@@ -299,6 +335,7 @@ namespace MinerBot.Tests
         public readonly List<JobRun> JobRuns = new();
         public readonly List<JobStatus> Jobs = new();
         public readonly List<UptimeSample> Samples = new();
+        public readonly List<LobbySample> LobbySamples = new();
         public readonly List<string[]> KeptJobs = new();
 
         // The row the run before left, which the first write reads
@@ -307,6 +344,9 @@ namespace MinerBot.Tests
         public Exception? Failure { get; set; }
         public Task? Hold { get; set; }
         public bool RefuseEvents { get; set; }
+
+        // For the lobby samples' write only, after every other write of the tick went through
+        public Exception? LobbyFailure { get; set; }
 
         public int Calls => Volatile.Read(ref calls);
         public int Reads => Volatile.Read(ref reads);
@@ -330,6 +370,8 @@ namespace MinerBot.Tests
         public Task SaveJobRuns(IReadOnlyList<JobRun> runs) => Answer(() => JobRuns.AddRange(runs));
         public Task SaveJobStatus(IReadOnlyList<JobStatus> jobs) => Answer(() => Jobs.AddRange(jobs));
         public Task SaveSamples(IReadOnlyList<UptimeSample> samples) => Answer(() => Samples.AddRange(samples));
+        public Task SaveLobbySamples(IReadOnlyList<LobbySample> samples) =>
+            LobbyFailure is { } failure ? Task.FromException(failure) : Answer(() => LobbySamples.AddRange(samples));
 
         public Task<int> DeleteOtherJobs(IReadOnlyCollection<string> jobs) => Answer(() =>
         {
@@ -382,6 +424,42 @@ namespace MinerBot.Tests
             Totalled = (from, to);
 
             return Failures.TryGetValue(nameof(TotalUptimeDays), out var failure) ? Task.FromException<int>(failure) : Task.FromResult(Days);
+        }
+
+        Task<int> Take(string rule, DateTime before, int take, ref int left)
+        {
+            Calls.Add((rule, before, take));
+
+            if (Failures.TryGetValue(rule, out var failure))
+                return Task.FromException<int>(failure);
+
+            var taken = Math.Min(left, take);
+            left -= taken;
+
+            return Task.FromResult(taken);
+        }
+    }
+
+    // MinerBot's database for the post records clean-up: each rule has some rows older than its cutoff, which its chunks take,
+    // and a test can make a rule fail. Every call is kept, with the cutoff and the chunk it asked for.
+    internal sealed class FakePostingRetentionData : IPostingRetentionData
+    {
+        public int Deliveries, QueueRows, SeenLobbies, LobbySamples, Days;
+        public readonly Dictionary<string, Exception> Failures = new();
+        public readonly List<(string Rule, DateTime Cutoff, int Take)> Calls = new();
+        public (DateTime From, DateTime To)? Totalled;
+
+        public Task<int> DeleteDeliveries(DateTime before, int take) => Take(nameof(DeleteDeliveries), before, take, ref Deliveries);
+        public Task<int> DeleteSettledQueueRows(DateTime before, int take) => Take(nameof(DeleteSettledQueueRows), before, take, ref QueueRows);
+        public Task<int> DeleteSeenLobbies(DateTime before, int take) => Take(nameof(DeleteSeenLobbies), before, take, ref SeenLobbies);
+        public Task<int> DeleteLobbySamples(DateTime before, int take) => Take(nameof(DeleteLobbySamples), before, take, ref LobbySamples);
+
+        public Task<int> TotalDeliveryDays(DateTime from, DateTime to)
+        {
+            Calls.Add((nameof(TotalDeliveryDays), from, 0));
+            Totalled = (from, to);
+
+            return Failures.TryGetValue(nameof(TotalDeliveryDays), out var failure) ? Task.FromException<int>(failure) : Task.FromResult(Days);
         }
 
         Task<int> Take(string rule, DateTime before, int take, ref int left)

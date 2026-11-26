@@ -9,12 +9,15 @@ using DataAccessLibrary.Discord;
 using DataAccessLibrary.Guilds;
 using DataAccessLibrary.Guilds.Models;
 using DataAccessLibrary.Health;
+using DataAccessLibrary.Posting;
+using DataAccessLibrary.Posting.Models;
 using DataAccessLibrary.Requests;
 using DataAccessLibrary.Status;
 using DataAccessLibrary.Status.Models;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using MinerBot.Shared.Delivery;
 using MinerBot.Shared.Requests;
 using MySql.Data.MySqlClient;
 
@@ -75,7 +78,11 @@ namespace DataAccessLibrary.Tests
                 .AddGuildSettingsReads()
                 .AddBotRequestAccess()
                 .AddBotRequestQueue()
-                .AddDashboardChecks();
+                .AddDashboardChecks()
+                .AddNotificationAccess()
+                .AddPostingRetentionAccess()
+                .AddGuildSwitchAccess()
+                .AddDeliveryReads();
 
             if (factory != null)
                 services.AddSingleton(factory);
@@ -130,6 +137,10 @@ namespace DataAccessLibrary.Tests
             var queue = provider.GetRequiredService<IBotRequestQueue>();
             var reads = provider.GetRequiredService<IBotRequestReads>();
             var checks = provider.GetRequiredService<IDashboardChecks>();
+            var store = provider.GetRequiredService<INotificationData>();
+            var postingRetention = provider.GetRequiredService<IPostingRetentionData>();
+            var switches = provider.GetRequiredService<IGuildSwitchData>();
+            var deliveries = provider.GetRequiredService<IDeliveryReads>();
             provider.GetRequiredService<IGuildSettingsReads>();
             Assert.IsType<DatabaseHealthData>(provider.GetRequiredService<IDatabaseHealthData>());
 
@@ -179,6 +190,7 @@ namespace DataAccessLibrary.Tests
                 () => guildReads.MemberTrends(day.AddDays(-30)),
                 () => audit.ListAudit(new AuditQuery()),
                 () => audit.LatestChanges("blacklist", ["12345"]),
+                () => audit.ListActionTimes(1, "switches.change", [AuditOutcome.Ok], now, 30),
                 () => audit.AddAudit(new AuditEntry { at = DateTime.UtcNow, actor_role = AuditRole.Owner, action = "armor.approve", outcome = AuditOutcome.Ok }),
                 () => reviews.ListReviews(1),
                 () => reviews.AddReview(new ArmorReview { armor_id = 1, to_status = "Approved", reviewed_by = 1, reviewed_at = DateTime.UtcNow }),
@@ -218,7 +230,42 @@ namespace DataAccessLibrary.Tests
                 () => reads.LatestRefusedAlert(),
                 () => reads.CountAlertsSince(now.AddHours(-1)),
                 () => checks.ListOwnRights(),
-                () => checks.ListMigrations()
+                () => checks.ListMigrations(),
+                () => status.SaveLobbySamples([new LobbySample { minute = day }]),
+                // The posting store, its clean-up, and the dashboard's switches and reads of the posts
+                () => store.LoadAsync(new PostingLoad()),
+                () => store.ListOpenAsync(),
+                () => store.ListBaselinesAsync(),
+                () => store.ListSeenAsync(PostSource.Submissions, [1]),
+                () => store.ListHiddenAsync([1]),
+                () => store.CountOlderBotRunsAsync("GuildNotificationJob.NotifyAllGuilds", now),
+                () => store.SaveDetectionAsync(new Detection { At = now, ReopenArmor = [1] }),
+                () => store.DropAsync([1], DeliveryReasons.TooOld, now),
+                () => store.ClearFailingAsync(1, PostSource.Armor, now),
+                () => store.ClaimAsync(new DeliveryClaim { AttemptKey = 1, RunStartedAt = now, GuildId = 1, ChannelId = 1, Source = PostSource.Armor, Part = 1, AttemptedAt = now,
+                    QueueIds = [1] }),
+                () => store.SettleAsync(new Settlement { AttemptKey = 1, Outcome = DeliveryState.InDoubt, At = now }),
+                () => store.RecordRefusalAsync(new Refusal { AttemptKey = 1, RunStartedAt = now, GuildId = 1, ChannelId = 1, Source = PostSource.Armor, ItemCount = 1, At = now,
+                    Reason = DeliveryReasons.NoChannel }),
+                () => store.MarkCheckedAsync(1, 1),
+                () => store.EndWaitsAsync(1, null, now),
+                () => store.GetSwitchesAsync(1),
+                () => store.ListMessageIdsAsync(1, 1, now),
+                () => store.ListCarriedAsync(1),
+                () => postingRetention.TotalDeliveryDays(day.AddDays(-1), day),
+                () => postingRetention.DeleteDeliveries(now, 1),
+                () => postingRetention.DeleteSettledQueueRows(now, 1),
+                () => postingRetention.DeleteSeenLobbies(now, 1),
+                () => postingRetention.DeleteLobbySamples(now, 1),
+                () => switches.ListSwitches(),
+                () => switches.GetSwitches(1),
+                () => switches.RunInTransaction(_ => Task.FromResult(0)),
+                () => switches.SaveSwitches(new SwitchChange { GuildId = 1, ArmorOn = false, At = now, ChangedBy = 1, Role = "owner" }, NoTransaction()),
+                () => deliveries.ListStatuses([1]),
+                () => deliveries.ListFailing(3),
+                () => deliveries.ListRecentPosts(1, 25),
+                () => deliveries.ListLastPosts(1),
+                () => deliveries.GetItemPosts(PostSource.Armor, 1)
             };
 
             foreach (var call in calls)
@@ -325,7 +372,11 @@ namespace DataAccessLibrary.Tests
                 new GuildSettingsReads(factory),
                 new BotRequestData(factory, names),
                 new BotRequestQueue(factory, names),
-                new DashboardChecks(factory, names)
+                new DashboardChecks(factory, names),
+                new NotificationData(factory, names),
+                new PostingRetentionData(factory, names),
+                new GuildSwitchData(factory, names),
+                new DeliveryReads(factory, names)
             }, repository => Assert.Equal("utf8mb4", CharacterSet(repository, factory)));
 
             var configured = new MySqlConnectionStringBuilder(Site + setting).CharacterSet;

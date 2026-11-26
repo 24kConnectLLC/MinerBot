@@ -1,10 +1,13 @@
 ﻿using System.Net;
 using DataAccessLibrary.Discord;
 using DataAccessLibrary.Discord.Models;
+using DataAccessLibrary.Posting;
+using DataAccessLibrary.Posting.Models;
 using Discord;
 using Discord.Net;
 using Discord.WebSocket;
 using MinerBot_2._0.Builders;
+using MinerBot_2._0.Status;
 
 namespace MinerBot_2._0.Services
 {
@@ -28,12 +31,19 @@ namespace MinerBot_2._0.Services
             [ChannelPermission.EmbedLinks] = "Embed Links"
         };
 
+        // A kind the Owner switched off on MinerBot's dashboard, after its channel, and the line when MinerBot's database
+        // didn't give the switches
+        public const string SwitchedOff = ", switched off on MinerBot's dashboard, so nothing is posted there";
+        public const string SwitchesUnknown = "I couldn't check the dashboard's switches just now, so a kind may be switched off there.";
+
         private readonly IGuildData _guildData;
+        private readonly INotificationData _posting;
         private readonly IServiceProvider _services;
 
-        public DiscordService(IGuildData guildData, IServiceProvider services)
+        public DiscordService(IGuildData guildData, INotificationData posting, IServiceProvider services)
         {
             _guildData = guildData;
+            _posting = posting;
             _services = services;
         }
 
@@ -137,12 +147,40 @@ namespace MinerBot_2._0.Services
             return needed.Where(permission => !permissions.Has(permission)).Select(permission => PermissionNames[permission]).ToList();
         }
 
-        // Each kind of notification with its channel. A server that never set its channels has no row, so every kind shows as off.
-        public static string ChannelList(Guild? guild)
+        // The server's switches, which the Owner sets on MinerBot's dashboard, for /admin show_channels and set_channels'
+        // reply: none saved means every kind is on. Read says whether MinerBot's database gave them.
+        public async Task<(GuildSwitches? Switches, bool Read)> GetSwitches(ulong guildId)
         {
-            return $"- Armor styles: {Channel(guild?.armor_channel_id)}\n- Workshop maps: {Channel(guild?.map_channel_id)}\n- Lobbies: {Channel(guild?.lobby_channel_id)}\n- Announcements: {Channel(guild?.announcements_channel_id)}";
+            try
+            {
+                return (await _posting.GetSwitchesAsync(guildId), true);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"[Interaction/Warning] Couldn't read the switches of guild {guildId} ({FailureLog.Describe(e)})");
+                return (null, false);
+            }
+        }
 
-            static string Channel(ulong? id) => id is null || id == Guild.ChannelOff ? "off" : MentionUtils.MentionChannel(id.Value);
+        // Each kind of notification with its channel. A server that never set its channels has no row, so every kind shows as
+        // off. A kind with a channel that the Owner switched off on the dashboard says so, since nothing is posted there, and
+        // announcements have no switch. When the switches couldn't be read, a last line says a kind may be off.
+        public static string ChannelList(Guild? guild, GuildSwitches? switches = null, bool switchesRead = true)
+        {
+            var list = $"- Armor styles: {Channel(guild?.armor_channel_id, PostSource.Armor)}\n- Workshop maps: {Channel(guild?.map_channel_id, PostSource.Maps)}\n" +
+                $"- Lobbies: {Channel(guild?.lobby_channel_id, PostSource.Lobbies)}\n- Announcements: {Channel(guild?.announcements_channel_id, null)}";
+
+            return switchesRead ? list : $"{list}\n{SwitchesUnknown}";
+
+            string Channel(ulong? id, string? source)
+            {
+                if (id is null || id == Guild.ChannelOff)
+                    return "off";
+
+                var mention = MentionUtils.MentionChannel(id.Value);
+
+                return source != null && switches != null && !switches.IsOn(source) ? mention + SwitchedOff : mention;
+            }
         }
 
         public async Task<Embed> GetInfoEmbed()

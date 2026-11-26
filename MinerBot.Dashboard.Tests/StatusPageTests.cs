@@ -6,6 +6,7 @@ using DataAccessLibrary.Armor;
 using DataAccessLibrary.Armor.Models;
 using DataAccessLibrary.Discord;
 using DataAccessLibrary.Discord.Models;
+using DataAccessLibrary.Posting;
 using DataAccessLibrary.Status;
 using DataAccessLibrary.Status.Models;
 using DataAccessLibrary.Tests.Database;
@@ -17,6 +18,7 @@ using MinerBot.Dashboard.Security;
 using MinerBot.Dashboard.Status;
 using MinerBot.Dashboard.Tests.Support;
 using MinerBot.Shared.Armor;
+using MinerBot.Shared.Delivery;
 
 namespace MinerBot.Dashboard.Tests
 {
@@ -45,6 +47,78 @@ namespace MinerBot.Dashboard.Tests
 
         // The sections' text without its markup, so a sentence reads as one string
         static string Text(string html) => Regex.Replace(Regex.Replace(html, "<[^>]+>", " "), "\\s+", " ");
+
+        // Posts that keep failing raise a banner once a kind of a server the bot is in has failed 3 tries in a row, not 2, and
+        // only while that kind isn't switched off and the bot hasn't left the server; each server counts once, whichever
+        // kinds fail. It needs no website read, and a read of the record that fails costs only this banner.
+        [Fact]
+        public async Task PostsThatKeepFailingRaiseTheBanner()
+        {
+            const ulong In = 1000000000000000851, Twice = 1000000000000000852, Gone = 1000000000000000853, Off = 1000000000000000854;
+
+            var db = await fixture.ReadyBotAsync();
+            await using var factory = new DashboardFactory(db);
+            var now = factory.Clock.GetUtcNow().UtcDateTime;
+            await StatusSteps.StatusAsync(db, now);
+
+            foreach (var server in new[] { In, Twice, Gone, Off })
+                await db.BotGuilds().SaveGuild(StatusSteps.Server(server, "Server " + server), [StatusSteps.Channel(server % 1000, "general", 0)], now, StatusSteps.RunId, (uint)(server % 1000));
+
+            await db.BotGuilds().LeaveGuild(Gone, now, StatusSteps.RunId, 9, null);
+            await PostSteps.SwitchesAsync(db, Off, armor: false, maps: true, lobbies: true, now);
+
+            await PostSteps.RefusedAsync(db, In, PostSource.Armor, 851, now.AddHours(-1), DeliveryReasons.MissingPermissions, 2, 3, now.AddHours(1));
+            await PostSteps.RefusedAsync(db, In, PostSource.Maps, 851, now.AddHours(-1), DeliveryReasons.MissingPermissions, 2, 4, now.AddHours(1));
+            await PostSteps.RefusedAsync(db, Twice, PostSource.Armor, 852, now.AddHours(-1), DeliveryReasons.MissingPermissions, 2, 2, now.AddHours(1));
+            await PostSteps.RefusedAsync(db, Gone, PostSource.Armor, 853, now.AddHours(-1), DeliveryReasons.MissingPermissions, 2, 3, now.AddHours(1));
+            await PostSteps.RefusedAsync(db, Off, PostSource.Armor, 854, now.AddHours(-1), DeliveryReasons.MissingPermissions, 2, 3, now.AddHours(1));
+
+            var admin = factory.Visitor("203.0.113.180");
+            await SignInSteps.SignedInAsync(factory, admin, TestUsers.Admin);
+
+            var html = await PageAsync(admin, "/admin");
+            Assert.Contains("1 server's posts keep failing: MinerBot couldn't post there in 3 or more tries in a row. See them", Text(html));
+            Assert.Contains("<a href=\"/admin/servers?show=problems\">See them</a>", html);
+
+            await PostSteps.RefusedAsync(db, Twice, PostSource.Armor, 852, now, DeliveryReasons.MissingPermissions, 2, 1, now.AddHours(1));
+            Assert.Contains("2 servers' posts keep failing", Text(await PageAsync(admin, "/admin")));
+
+            // The record can't be read: the rest of the page stands, without that banner
+            await using var failing = new DashboardFactory(db, new DashboardFactoryOptions
+            {
+                Services = services => services.Replace(ServiceDescriptor.Transient<IDeliveryReads>(_ => new FailingDeliveries()))
+            });
+            var other = failing.Visitor("203.0.113.181");
+            await SignInSteps.SignedInAsync(failing, other, TestUsers.Admin);
+            var response = await other.Client.GetAsync("/admin", Token);
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.DoesNotContain("posts keep failing", Text(WebUtility.HtmlDecode(await response.Content.ReadAsStringAsync(Token))));
+        }
+
+        // The bot that runs is older than the dashboard, as after ./rollback.sh bot: its status write leaves posting_run_id as
+        // a newer bot left it, so the Overview says so, and says it no more once the current bot writes the row again
+        [Fact]
+        public async Task OlderBotShowsItsBanner()
+        {
+            var db = await fixture.ReadyBotAsync();
+            await using var factory = new DashboardFactory(db);
+            var now = factory.Clock.GetUtcNow().UtcDateTime;
+            await StatusSteps.StatusAsync(db, now);
+
+            var admin = factory.Visitor("203.0.113.182");
+            await SignInSteps.SignedInAsync(factory, admin, TestUsers.Admin);
+            Assert.DoesNotContain(Banners.OlderBot, await PageAsync(admin, "/admin"));
+
+            var older = StatusSteps.Status(now.AddSeconds(-5));
+            older.run_id = 99;
+            await db.Status().SaveStatus(older);
+            await db.RootExecuteAsync($"UPDATE {MariaDbFixture.StatusTable} SET posting_run_id = 7");
+            Assert.Contains(Banners.OlderBot + " The deploy notes", Text(await PageAsync(admin, "/admin")));
+
+            await db.Status().SaveStatus(StatusSteps.Status(now));
+            Assert.DoesNotContain(Banners.OlderBot, await PageAsync(admin, "/admin"));
+        }
 
         // Everything up: the status box says so, nothing needs anyone, the last notification run shows, and the latest
         // changes hold the visitors' addresses for the Owner only

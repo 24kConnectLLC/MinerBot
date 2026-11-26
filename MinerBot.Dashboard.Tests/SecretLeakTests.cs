@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.RegularExpressions;
+using DataAccessLibrary.Posting;
 using DataAccessLibrary.Tests.Database;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
@@ -7,6 +8,7 @@ using MinerBot.Dashboard.Auth;
 using MinerBot.Dashboard.Security;
 using MinerBot.Dashboard.Tests.Support;
 using MinerBot.Shared.Armor;
+using MinerBot.Shared.Delivery;
 using MinerBot.Shared.Requests;
 using MySql.Data.MySqlClient;
 
@@ -95,6 +97,14 @@ namespace MinerBot.Dashboard.Tests
             await StatusSteps.StatusAsync(db, now);
             await db.RootExecuteAsync($"INSERT INTO {MariaDbFixture.AuditTable} (at, actor_id, actor_name, actor_role, action, outcome, guild_id, target_type, ip) " +
                 $"VALUES (UTC_TIMESTAMP(3), 1000000000000000002, 'Test Admin', 'admin', 'auth.signin', 'ok', {StatusSteps.ServerId}, 'session', '192.0.2.52')");
+
+            // The server's switches, and the bot's record of its posts there: approved armor 2 posted, and lobbies whose post
+            // Discord refused, so the servers pages, the Overview and the review page draw them
+            var server = StatusSteps.Id(StatusSteps.ServerId);
+            await PostSteps.SwitchesAsync(db, server, armor: true, maps: false, lobbies: true, now.AddMinutes(-30));
+            await PostSteps.SentAsync(db, await PostSteps.QueueAsync(db, PostSource.Armor, 2, now.AddMinutes(-20), server), 3001, now.AddMinutes(-20), 5000000000000000002);
+            await PostSteps.FailedAsync(db, await PostSteps.QueueAsync(db, PostSource.Lobbies, 9, now.AddMinutes(-10), server), 3001, now.AddMinutes(-10),
+                DeliveryReasons.DiscordPermissions, 403, 50013, now.AddMinutes(20));
 
             // Requests to the bot with every part the controls page and the banners draw: a cache clear the bot did, a restart
             // whose message to the owner failed, posts paused with a reason, a status text, and a request the bot refused as

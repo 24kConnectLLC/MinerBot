@@ -375,7 +375,8 @@ namespace MinerBot.Tests
             await bot.TickAsync();
 
             Assert.Single(bot.Posts());
-            Assert.Equal((RequestStates.Done, (string?)"Sent a test message.", (ulong?)FakeDiscord.MessageId), (bot.Row(id).state, bot.Row(id).result, bot.Row(id).result_number));
+            Assert.Equal((RequestStates.Done, (string?)"Sent a test message.", (ulong?)Assert.Single(bot.Discord.MessagesIn(FakeDiscord.ChannelId))),
+                (bot.Row(id).state, bot.Row(id).result, bot.Row(id).result_number));
             Assert.Equal(3, bot.Data.Calls.Count(call => call == nameof(FakeRequestData.Finish)));
         }
 

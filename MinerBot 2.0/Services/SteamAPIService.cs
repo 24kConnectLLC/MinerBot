@@ -371,13 +371,16 @@ namespace MinerBot_2._0.Services
             return embed;
         }
 
+        // The lobby list's title, with the type the notification run puts first, by which it knows its own post in a channel
+        public static string LobbiesTitle(string type) => $"{type} Murder Miners Public Lobbies";
+
         public async Task<Embed> LobbyListEmbed(string lobbyDisplay = "", string type = "")
         {
             if (lobbyDisplay == "")
                 lobbyDisplay = await GetLobbiesDisplay();
 
             var embed = new EmbedBuilderTemplate()
-                .WithTitle($"{type} Murder Miners Public Lobbies")
+                .WithTitle(LobbiesTitle(type))
                 .WithDescription(lobbyDisplay)
                 .Build();
 

@@ -171,6 +171,9 @@ namespace MinerBot.Tests
             for (var i = 0; i < BotRecorder.SampleLimit + 7; i++)
                 recorder.Sample(Noon.UtcDateTime.AddMinutes(i), true, true);
 
+            for (var i = 0; i < BotRecorder.LobbySampleLimit + 4; i++)
+                recorder.SampleLobbies(new LobbySample { minute = Noon.UtcDateTime.AddMinutes(5 * i), steam_answered = false });
+
             data.Failure = null;
             clock.UtcNow = Noon.AddSeconds(30);
             await TickAsync();
@@ -178,11 +181,13 @@ namespace MinerBot.Tests
             Assert.Equal(1000, data.Events.Count);
             Assert.Equal(BotRecorder.JobRunLimit, data.JobRuns.Count);
             Assert.Equal(BotRecorder.SampleLimit, data.Samples.Count);
+            Assert.Equal(BotRecorder.LobbySampleLimit, data.LobbySamples.Count);
+            Assert.Equal(Noon.UtcDateTime.AddMinutes(20), data.LobbySamples[0].minute);
             Assert.Single(logger.Entries, entry => entry.Level == LogLevel.Information && entry.Message.Contains("takes the bot's status and history again"));
             Assert.Equal(
             [
                 (BotEvents.DatabaseUnreachable, (string?)"from 2026-11-14 12:00:00 to 2026-11-14 12:00:30 UTC"),
-                (BotEvents.RecordsDropped, "6 events, 5 job runs and 7 minutes, the oldest, because the bot couldn't keep more")
+                (BotEvents.RecordsDropped, "6 events, 5 job runs, 7 minutes and 4 lobby samples, the oldest, because the bot couldn't keep more")
             ], recorder.PeekEvents(100).Select(row => (row.kind, row.detail)));
 
             clock.UtcNow = Noon.AddSeconds(35);
@@ -351,7 +356,7 @@ namespace MinerBot.Tests
             Assert.Equal(
             [
                 (BotEvents.DatabaseUnreachable, (string?)"from 2026-11-14 12:00:00 to 2026-11-14 19:00:00 UTC"),
-                (BotEvents.RecordsDropped, "0 events, 0 job runs and 60 minutes, the oldest, because the bot couldn't keep more")
+                (BotEvents.RecordsDropped, "0 events, 0 job runs, 60 minutes and 0 lobby samples, the oldest, because the bot couldn't keep more")
             ], data.Events.Where(row => row.kind != BotEvents.BotStarted).Select(row => (row.kind, row.detail)));
             Assert.Equal(BotRecorder.SampleLimit, data.Samples.Count);
             Assert.Equal(Noon.AddHours(7).UtcDateTime, data.Statuses[^1].stopped_at);
@@ -379,9 +384,9 @@ namespace MinerBot.Tests
             Assert.Equal(
             [
                 (BotEvents.DatabaseUnreachable, (string?)"from 2026-11-14 12:00:00 to 2026-11-14 12:10:00 UTC"),
-                (BotEvents.RecordsDropped, "8 events, 0 job runs and 0 minutes, the oldest, because the bot couldn't keep more")
+                (BotEvents.RecordsDropped, "8 events, 0 job runs, 0 minutes and 0 lobby samples, the oldest, because the bot couldn't keep more")
             ], data.Events.TakeLast(2).Select(row => (row.kind, row.detail)));
-            Assert.Equal((0, 0, 0), recorder.TakeDropped());
+            Assert.Equal((0, 0, 0, 0), recorder.TakeDropped());
         }
 
         // As the host stops it: the loop ends, and the last write follows

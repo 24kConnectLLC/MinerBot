@@ -8,11 +8,14 @@ using DataAccessLibrary.Dashboard;
 using DataAccessLibrary.Dashboard.Models;
 using DataAccessLibrary.Guilds;
 using DataAccessLibrary.Guilds.Models;
+using DataAccessLibrary.Posting;
+using DataAccessLibrary.Posting.Models;
 using DataAccessLibrary.Requests;
 using DataAccessLibrary.Status;
 using DataAccessLibrary.Status.Models;
 using DataAccessLibrary.Tests.Database;
 using MinerBot.Shared.Armor;
+using MinerBot.Shared.Delivery;
 using MinerBot.Shared.Requests;
 using MySql.Data.MySqlClient;
 
@@ -195,9 +198,9 @@ namespace DataAccessLibrary.Tests
 
             // Every table the end checks, because the other classes leave their rows behind, and the order the classes run
             // in changes with the folder the tests run from
-            await db.ClearAsync(MariaDbFixture.SessionTable, MariaDbFixture.StatusTable, MariaDbFixture.EventTable, MariaDbFixture.JobRunTable,
+            await db.ClearAsync([MariaDbFixture.SessionTable, MariaDbFixture.StatusTable, MariaDbFixture.EventTable, MariaDbFixture.JobRunTable,
                 MariaDbFixture.JobStatusTable, MariaDbFixture.SampleTable, MariaDbFixture.DailyTable, MariaDbFixture.BotGuildTable, MariaDbFixture.BotChannelTable,
-                MariaDbFixture.GuildEventTable, MariaDbFixture.GuildDailyTable, MariaDbFixture.RequestTable, MariaDbFixture.SettingsTable);
+                MariaDbFixture.GuildEventTable, MariaDbFixture.GuildDailyTable, MariaDbFixture.RequestTable, MariaDbFixture.SettingsTable, .. MariaDbFixture.PostingTables]);
             const string alternative = "minerbot-alt`db";
             const string quoted = "`minerbot-alt``db`";
 
@@ -232,6 +235,7 @@ namespace DataAccessLibrary.Tests
             Assert.Equal(1, await CountAsync($"{quoted}.dashboard_sessions"));
 
             Assert.Equal(2, (await audit.ListAudit(new AuditQuery())).Total);
+            Assert.Equal(2, (await audit.ListActionTimes(Audit().actor_id!.Value, Audit().action, [AuditOutcome.Ok], Audit().at.AddHours(-1), 30)).Count);
             Assert.Single(await reviews.ListReviews(ArmorId));
             Assert.NotNull(await sessions.GetSession(SessionKey, Noon));
             Assert.Equal(1, await sessions.DeleteOtherSessions(Session().user_id, new string('o', 43)));
@@ -335,14 +339,87 @@ namespace DataAccessLibrary.Tests
             Assert.Equal("Testing", (await queue.GetSettings())?.status_text);
             Assert.Equal(1, await retention.DeleteRequests(Noon.AddSeconds(1), 10));
 
-            foreach (var table in new[] { "bot_status", "job_status", "uptime_daily", "guilds", "guild_daily", "bot_settings" })
+            // The bot's posts: a server's switches saved with their audit row, and the dashboard's reads of them, then what the
+            // bot found and owes, a message claimed and settled, a refusal, the lobby samples and the clean-up
+            var switches = new GuildSwitchData(factory, names);
+            var store = new NotificationData(factory, names);
+            var deliveries = new DeliveryReads(factory, names);
+            var postingRetention = new PostingRetentionData(factory, names);
+
+            var saved = await switches.RunInTransaction(async transaction =>
+            {
+                var save = await switches.SaveSwitches(new SwitchChange { GuildId = 1, ArmorOn = false, MapsOn = true, LobbiesOn = true, At = Noon, ChangedBy = 1,
+                    Role = AuditRole.Owner }, transaction);
+                await audit.AddAudit(Audit(), transaction);
+                return save;
+            });
+
+            Assert.Equal(SwitchSaveOutcome.Saved, saved.Outcome);
+            Assert.Single(await switches.ListSwitches());
+            Assert.NotNull(await switches.GetSwitches(1));
+            Assert.NotNull(await store.GetSwitchesAsync(1));
+
+            await store.SaveDetectionAsync(new Detection
+            {
+                At = Noon,
+                Baselines = [new BaselineRow { source = PostSource.Armor, taken_at = Noon, taken_by_run = 1, reason = BaselineReason.First, item_count = 1, checked_at = Noon,
+                    checked_by_run = 1 }],
+                Seen = [new SeenRow { source = PostSource.Armor, item_id = 11, state = SeenState.Queued, first_seen_at = Noon, last_seen_at = Noon }],
+                Queue = [new QueueItem { guild_id = 1, source = PostSource.Armor, item_id = 11, queued_at = Noon }, new QueueItem { guild_id = 1, source = PostSource.Lobbies,
+                    item_id = 12, queued_at = Noon }],
+                ReopenArmor = [12]
+            });
+
+            var loaded = await store.LoadAsync(new PostingLoad { ArmorIds = [11, 12] });
+            Assert.Single(loaded.Baselines);
+            Assert.Single(loaded.Switches);
+            Assert.Single(loaded.Seen);
+            Assert.Equal(2, loaded.Open.Count);
+            Assert.Single(await store.ListBaselinesAsync());
+            Assert.Single(await store.ListSeenAsync(PostSource.Armor, [11]));
+            Assert.Equal(0, await store.CountOlderBotRunsAsync("GuildNotificationJob.NotifyAllGuilds", Noon));
+
+            var open = await store.ListOpenAsync();
+            var claimed = await store.ClaimAsync(new DeliveryClaim { AttemptKey = 1, RunId = 1, RunStartedAt = Noon, GuildId = 1, ChannelId = 2, Source = PostSource.Armor, Part = 1,
+                AttemptedAt = Noon, QueueIds = [open[0].id] });
+            Assert.Equal([11UL], await store.ListCarriedAsync(claimed));
+            Assert.True(await store.MarkCheckedAsync(1, 1));
+            Assert.True(await store.SettleAsync(new Settlement { AttemptKey = 1, Outcome = DeliveryState.Sent, At = Noon, MessageId = 3 }));
+            Assert.Equal([3UL], await store.ListMessageIdsAsync(1, 2, Noon));
+            Assert.True(await store.RecordRefusalAsync(new Refusal { AttemptKey = 2, RunId = 1, RunStartedAt = Noon, GuildId = 1, ChannelId = 2, Source = PostSource.Maps,
+                ItemCount = 1, At = Noon, Reason = DeliveryReasons.NoChannel, NextTryAt = Noon.AddMinutes(5) }));
+            Assert.Equal(1, await store.EndWaitsAsync(1, null, Noon));
+            Assert.Equal(1, await store.ClearFailingAsync(1, PostSource.Maps, Noon));
+            Assert.Equal(1, await store.DropAsync([open[1].id], DeliveryReasons.TooOld, Noon));
+
+            Assert.Equal(2, (await deliveries.ListStatuses([1])).Count);
+            Assert.Empty(await deliveries.ListFailing(1));
+            Assert.Equal(2, (await deliveries.ListRecentPosts(1, 25)).Count);
+            Assert.Single((await deliveries.GetItemPosts(PostSource.Armor, 11)).Servers);
+            Assert.Single((await switches.RunInTransaction(transaction => deliveries.GetItemPosts(PostSource.Armor, 11, transaction))).Servers);
+
+            await status.SaveLobbySamples([new LobbySample { minute = day.AddDays(-1), steam_answered = false }]);
+            Assert.Equal(1, await postingRetention.TotalDeliveryDays(day, day.AddDays(1)));
+            Assert.Equal(2, await postingRetention.DeleteDeliveries(Noon.AddSeconds(1), 10));
+            // The lobby's row; the armor's stays, as where it went
+            Assert.Equal(1, await postingRetention.DeleteSettledQueueRows(Noon.AddSeconds(1), 10));
+            Assert.Equal(0, await postingRetention.DeleteSeenLobbies(Noon.AddSeconds(1), 10));
+            Assert.Equal(1, await postingRetention.DeleteLobbySamples(day, 10));
+
+            foreach (var table in new[] { "bot_status", "job_status", "uptime_daily", "guilds", "guild_daily", "bot_settings", "guild_settings", "notification_baseline",
+                "notification_seen" })
                 Assert.Equal(1, await CountAsync($"{quoted}.{table}"));
 
+            Assert.Equal(2, await CountAsync($"{quoted}.guild_delivery_status"));
+            Assert.Equal(3, await CountAsync($"{quoted}.delivery_daily"));
+
             // Nothing reached the real database's tables
-            foreach (var table in new[] { MariaDbFixture.AuditTable, MariaDbFixture.ReviewTable, MariaDbFixture.SessionTable, MariaDbFixture.StatusTable,
+            string[] realTables = [MariaDbFixture.AuditTable, MariaDbFixture.ReviewTable, MariaDbFixture.SessionTable, MariaDbFixture.StatusTable,
                 MariaDbFixture.EventTable, MariaDbFixture.JobRunTable, MariaDbFixture.JobStatusTable, MariaDbFixture.SampleTable, MariaDbFixture.DailyTable,
                 MariaDbFixture.BotGuildTable, MariaDbFixture.BotChannelTable, MariaDbFixture.GuildEventTable, MariaDbFixture.GuildDailyTable,
-                MariaDbFixture.RequestTable, MariaDbFixture.SettingsTable })
+                MariaDbFixture.RequestTable, MariaDbFixture.SettingsTable, .. MariaDbFixture.PostingTables];
+
+            foreach (var table in realTables)
                 Assert.Equal(0, await CountAsync(table));
         }
 
