@@ -6,6 +6,7 @@ using MinerBot.Dashboard.Health;
 using MinerBot.Dashboard.Hosting;
 using MinerBot.Dashboard.Requests;
 using MinerBot.Dashboard.Security;
+using MinerBot.Dashboard.Servers;
 using MinerBot.Dashboard.Settings;
 using MinerBot.Dashboard.Status;
 
@@ -47,10 +48,13 @@ builder.Services.AddDataAccessServices(builder.Configuration)
                 .AddBotGuildReads()
                 .AddGuildSettingsReads()
                 .AddBotRequestQueue()
-                .AddDashboardChecks();
+                .AddDashboardChecks()
+                .AddGuildSwitchAccess()
+                .AddDeliveryReads();
 
 builder.Services.AddDashboardSignIn();
 builder.Services.AddArmorReview();
+builder.Services.AddSwitchChanges();
 builder.Services.AddBlacklistChanges();
 builder.Services.AddStatusPages();
 builder.Services.AddBotRequests();

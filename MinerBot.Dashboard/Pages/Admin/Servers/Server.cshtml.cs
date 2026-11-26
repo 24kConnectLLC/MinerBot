@@ -5,6 +5,8 @@ using DataAccessLibrary.Discord;
 using DataAccessLibrary.Discord.Models;
 using DataAccessLibrary.Guilds;
 using DataAccessLibrary.Guilds.Models;
+using DataAccessLibrary.Posting;
+using DataAccessLibrary.Posting.Models;
 using DataAccessLibrary.Requests;
 using DataAccessLibrary.Status;
 using Microsoft.AspNetCore.Mvc;
@@ -22,16 +24,19 @@ using MinerBot.Shared.Requests;
 
 namespace MinerBot.Dashboard.Pages.Admin.Servers
 {
-    // One server: what MinerBot's copy has of it, its four settings read against its channels, its channels in Discord's
-    // order with what the bot can do in each, its joins and leaves, its members over 90 days, and the changes made to it on
-    // the dashboard. A server the copy doesn't have but the website has settings for gets a page saying MinerBot isn't in
-    // it, and an ID that's neither is a 404. For a server the bot is in and Discord has, while requests are on, it asks
-    // MinerBot for a test message to one of the server's chosen channels or a refresh of the copy, each sent through
-    // RequestSender with the page's checks made again at the POST, and links the Owner to the page that asks it to leave.
-    // Sent redirects here with ?request=; anything else is kept as a form's notice and redirects here with ?notice=, whose
-    // GET draws why, never this page drawn on the POST, which a reload would send again.
+    // One server: what MinerBot's copy has of it, its four settings read against its channels and its switches, with the
+    // bot's last post of each kind, its channels in Discord's order with what the bot can do in each, its recent posts, its
+    // joins and leaves, its members over 90 days, and the changes made to it on the dashboard. A server the copy doesn't
+    // have but the website has settings for gets a page saying MinerBot isn't in it, and an ID that's neither is a 404. For
+    // a server the bot is in and Discord has, while requests are on, it asks MinerBot for a test message to one of the
+    // server's chosen channels or a refresh of the copy, each sent through RequestSender with the page's checks made again
+    // at the POST, and links the Owner to the page that asks it to leave. The Owner saves the server's switches here, while
+    // MinerBot is in it, through SwitchChanges; an Admin sees them read-only, and a gate before any handler records an
+    // Admin's POST to them and sends it to /denied. Sent redirects here with ?request=, and a save with ?done=; anything
+    // else is kept as a form's notice and redirects here with ?notice=, whose GET draws why, never this page drawn on the
+    // POST, which a reload would send again.
     public sealed class ServerPageModel(IBotGuildReads guilds, IGuildSettingsReads settings, IBotStatusReads status, IAuditLogData audit,
-        IBotRequestReads reads, TimeProvider time, ILogger<ServerPageModel> logger) : PageModel
+        IBotRequestReads reads, IGuildSwitchData switches, IDeliveryReads deliveries, TimeProvider time, ILogger<ServerPageModel> logger) : PageModel
     {
         public const int EventsShown = 50;
         public const int ChangesShown = 25;
@@ -54,7 +59,39 @@ namespace MinerBot.Dashboard.Pages.Admin.Servers
         public bool ShowsAddresses { get; private set; }
         public DateTime Now { get; private set; }
 
+        // The server's switches, null when it has none, which means every kind is on; the bot's record of its posts of each
+        // kind here, and its latest messages
+        public GuildSwitches? Switches { get; private set; }
+        public IReadOnlyList<DeliveryStatusRow> Deliveries { get; private set; } = [];
+        public IReadOnlyList<DeliveryRow> RecentPosts { get; private set; } = [];
+
+        // Who saved the switches last, by the name their row in the server's changes has, or their role
+        public string? SwitchesChangedBy { get; private set; }
+
+        // What ?done= says after a save, while the switches are still the ones it saved, and a switch form's notice, which
+        // says whether it's a problem
+        public string? SwitchesDone { get; private set; }
+        public string? SwitchNotice { get; private set; }
+        public bool SwitchNoticeIsProblem { get; private set; }
+
         public bool IsIn => Server is { left_at: null };
+
+        // The Owner's form, only while MinerBot is in the server: a server it left has its switches deleted, and one it was
+        // never in has none to read
+        public bool CanChangeSwitches => IsOwner && IsIn;
+
+        public DeliveryStatusRow? Delivery(SettingKind kind) =>
+            SettingStatuses.SourceOf(kind) is { } source ? Deliveries.FirstOrDefault(row => row.source == source) : null;
+
+        // The kind's latest message that went, for a kind whose status holds no last post: a leave deletes a server's statuses
+        // while the record of its messages stays for 90 days, so the page never says no post is recorded while one is, for a
+        // server MinerBot left or is back in, one older than the recent posts it lists included
+        public DeliveryRow? LastMessage(SettingKind kind) =>
+            SettingStatuses.SourceOf(kind) is { } source ? lastPosts.FirstOrDefault(post => post.source == source && post.state == DeliveryState.Sent) : null;
+
+        // A recent post's channel, from the copy, when it has it
+        public BotChannelRow? ChannelOf(ulong channelId) => channels.GetValueOrDefault(channelId) is { } channel && channel.guild_id == Id ? channel : null;
+
         public string? IconUrl => Server == null ? null : ServerRows.IconUrl(Server.guild_id, Server.icon_hash);
         public string ChangesLink => "/admin/audit?server=" + IdText;
 
@@ -78,19 +115,32 @@ namespace MinerBot.Dashboard.Pages.Admin.Servers
         const string ChannelBox = "channel";
 
         IReadOnlyDictionary<string, RequestView> latest = new Dictionary<string, RequestView>();
+        IReadOnlyList<DeliveryRow> lastPosts = [];
         LimitReads limits = new([], [], []);
+        Dictionary<ulong, BotChannelRow> channels = [];
 
-        public async Task<IActionResult> OnGetAsync(long id, [FromQuery] string? request, [FromQuery] string? notice)
+        public async Task<IActionResult> OnGetAsync(long id, [FromQuery] string? request, [FromQuery] string? notice, [FromQuery] string? done, [FromQuery] string? saved)
         {
             // Every Discord ID is a positive long, which the route takes
             if (id <= 0 || !await LoadAsync((ulong)id))
                 return NotFound();
 
+            // A save's word, only while the switches are still the version it saved, so a later save, or a link someone made,
+            // can't say this one happened
+            if (done == SwitchWords.DoneWord && SwitchChanges.TryVersion(saved, out var version) && version > 0 && Switches?.version == version)
+                SwitchesDone = SwitchWords.Saved;
+
             // A form's notice, which draws why nothing was sent, with the channel it named still chosen, and the form's key
             // after a save the database didn't confirm
-            var found = HttpContext.RequestServices.GetRequiredService<FormNotices>().Find(this, notice, [ServerActions.TestMessage, ServerActions.Refresh]);
+            var found = HttpContext.RequestServices.GetRequiredService<FormNotices>().Find(this, notice, [ServerActions.TestMessage, ServerActions.Refresh, SwitchWords.Form]);
 
-            if (found != null)
+            // The switches' own, in fixed words: a problem, or nothing to save
+            if (found is { Form: SwitchWords.Form })
+            {
+                SwitchNotice = found.Words;
+                SwitchNoticeIsProblem = found.Status >= StatusCodes.Status400BadRequest;
+            }
+            else if (found != null)
             {
                 Posted = found.Form;
                 Outcome = found.Key is { } key ? new SendOutcome.Unsure(key) : null;
@@ -141,6 +191,38 @@ namespace MinerBot.Dashboard.Pages.Admin.Servers
 
             return await SendAsync(ServerActions.TestMessage, new SendOrder(RequestKinds.GuildTestMessage, formkey, Id, channelId), channelId);
         }
+
+        // The Owner's save of the switches, which the gate lets no one else reach. Every field is checked before the database:
+        // the version the page was drawn with, in digits, and each box ticked or not, as a browser sends it.
+        public async Task<IActionResult> OnPostSwitchesAsync(long id, string? version, string? armor, string? maps, string? lobbies)
+        {
+            if (id <= 0 || !SwitchChanges.TryVersion(version, out var seen) || !SwitchChanges.TryTick(armor, out var armorOn)
+                || !SwitchChanges.TryTick(maps, out var mapsOn) || !SwitchChanges.TryTick(lobbies, out var lobbiesOn))
+                return BadRequest();
+
+            if (!await LoadAsync((ulong)id))
+                return NotFound();
+
+            // Not a 400: MinerBot may be invited back, after which the same form would be saved
+            if (!IsIn)
+                return KeepSwitches(StatusCodes.Status409Conflict, SwitchWords.NotInNow);
+
+            var result = await HttpContext.RequestServices.GetRequiredService<SwitchChanges>()
+                .SaveAsync(new SwitchRequest(Id, seen, armorOn, mapsOn, lobbiesOn), HttpContext);
+
+            return result.Outcome switch
+            {
+                // This page with the save's word, so reloading shows it rather than saving again
+                SwitchOutcome.Saved => RedirectToPage(null, null, new { id = (long)Id, done = SwitchWords.DoneWord, saved = result.Version }, SwitchWords.Anchor),
+                SwitchOutcome.Unchanged => KeepSwitches(StatusCodes.Status200OK, SwitchWords.Unchanged),
+                SwitchOutcome.Already => KeepSwitches(StatusCodes.Status200OK, SwitchWords.Already),
+                SwitchOutcome.Stale => KeepSwitches(StatusCodes.Status409Conflict, SwitchWords.Stale),
+                SwitchOutcome.Limit => Keep(new FormNotice { Form = SwitchWords.Form, Status = StatusCodes.Status429TooManyRequests, Words = SwitchWords.Limit(result.After!.Value), After = result.After }),
+                _ => Keep(new FormNotice { Form = SwitchWords.Form, Status = StatusCodes.Status503ServiceUnavailable, Words = SwitchWords.Unsure, Unsure = true })
+            };
+        }
+
+        IActionResult KeepSwitches(int status, string words) => Keep(new FormNotice { Form = SwitchWords.Form, Status = status, Words = words });
 
         // The bot rewrites its copy of this server from what it holds now
         public async Task<IActionResult> OnPostRefreshAsync(long id, string? formkey)
@@ -231,7 +313,8 @@ namespace MinerBot.Dashboard.Pages.Admin.Servers
                 return false;
 
             Now = time.GetUtcNow().UtcDateTime;
-            var channels = new Dictionary<ulong, BotChannelRow>();
+            channels = [];
+            Switches = await DatabaseCalls.Guard(() => switches.GetSwitches(Id), logger);
 
             if (Server != null)
             {
@@ -257,13 +340,22 @@ namespace MinerBot.Dashboard.Pages.Admin.Servers
                 MemberDays = await DatabaseCalls.Guard(() => guilds.ListMemberDays(Id, today.AddDays(1 - TrendDays), today.AddDays(1)), logger);
                 Trend = ServerRows.Trend(MemberDays, today.AddDays(1 - TrendDays));
                 Freshness = CopyFreshnesses.ForServer(await ServerFreshness.LoadAsync(status, Now, logger), IsIn && !Server.available);
+
+                // The bot posts only where it is, so a server only the website knows has no record
+                Deliveries = await DatabaseCalls.Guard(() => deliveries.ListStatuses([Id]), logger);
+                RecentPosts = await DatabaseCalls.Guard(() => deliveries.ListRecentPosts(Id, DeliveryWords.RecentShown), logger);
+                lastPosts = await DatabaseCalls.Guard(() => deliveries.ListLastPosts(Id), logger);
             }
 
-            Statuses = SettingStatuses.Of(Id, IsIn, Settings, channels);
+            Statuses = SettingStatuses.Of(Id, IsIn, Settings, channels, Switches);
 
             var changes = await DatabaseCalls.Guard(() => audit.ListAudit(new AuditQuery { GuildId = Id, PageSize = ChangesShown, IncludeIp = ShowsAddresses }), logger);
             ChangeTotal = changes.Total;
             Changes = AuditRows.Table(changes.Rows, ShowsAddresses);
+
+            if (Switches is { } saved)
+                SwitchesChangedBy = changes.Rows.FirstOrDefault(row => row.action == AuditWords.SwitchesChange && row.outcome == AuditOutcome.Ok && row.actor_id == saved.changed_by
+                    && row.at == saved.changed_at)?.actor_name ?? SwitchWords.RoleName(saved.changed_by_role);
 
             // The actions, and what they need, only where they're offered
             var requestsOn = RequestSigning.ParseKey(HttpContext.RequestServices.GetRequiredService<IOptions<DashboardOptions>>().Value.RequestSigningKey) != null;
@@ -283,11 +375,33 @@ namespace MinerBot.Dashboard.Pages.Admin.Servers
             return true;
         }
 
-        // A request no handler takes would otherwise get the page as if it were a GET
-        public override void OnPageHandlerExecuting(PageHandlerExecutingContext context)
+        // The gate, before any handler. The antiforgery check and the origin check have run already, so a forged POST can't
+        // write its audit row.
+        public override async Task OnPageHandlerExecutionAsync(PageHandlerExecutingContext context, PageHandlerExecutionDelegate next)
         {
-            if (context.HandlerMethod == null)
+            ArgumentNullException.ThrowIfNull(context);
+            ArgumentNullException.ThrowIfNull(next);
+
+            // 1. A request no handler takes would otherwise get the page as if it were a GET
+            if (context.HandlerMethod is not { } handler)
+            {
                 context.Result = BadRequest();
+                return;
+            }
+
+            // 2. The switches are the Owner's: anyone else's POST to them is one refused audit row, under the server it names,
+            // and /denied. The handler never runs, so nothing is read or saved.
+            if (handler.Name == SwitchWords.Handler && !string.Equals(handler.HttpMethod, HttpMethods.Get, StringComparison.OrdinalIgnoreCase)
+                && RoleClaims.RoleOf(User) != DashboardRole.Owner)
+            {
+                ulong? server = context.HandlerArguments.TryGetValue("id", out var value) && value is long id && id > 0 ? (ulong)id : null;
+                await DatabaseCalls.Guard(() => audit.AddAudit(SwitchChanges.Refusal(HttpContext, server, SwitchWords.OnlyOwnerDetail, time.GetUtcNow().UtcDateTime)), logger);
+                context.Result = Forbid();
+                return;
+            }
+
+            // 3. The handler
+            await next();
         }
     }
 }

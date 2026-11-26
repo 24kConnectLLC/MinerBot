@@ -5,6 +5,7 @@ using DataAccessLibrary.Armor;
 using DataAccessLibrary.Armor.Models;
 using DataAccessLibrary.Audit;
 using DataAccessLibrary.Audit.Models;
+using DataAccessLibrary.Posting;
 using MinerBot.Dashboard.Audit;
 using MinerBot.Dashboard.Auth;
 using MinerBot.Dashboard.Security;
@@ -28,6 +29,9 @@ namespace MinerBot.Dashboard.Armor
         // A warning wasn't ticked
         Unticked,
 
+        // A move back to pending from Approved, of armor MinerBot's record shows posted, or counted as posted, by then
+        Posted,
+
         // The database stopped answering once the work was done, while the change was being committed, so it may or may
         // not have landed
         Unsure
@@ -38,12 +42,15 @@ namespace MinerBot.Dashboard.Armor
     internal sealed record ArmorReviewRequest(long Id, ArmorAction Action, string? Expected, string Version, string? Reason, IReadOnlySet<string> Ticks);
 
     // Each review action is one transaction on the website's connection: the status changes only while the armor is as
-    // the reviewer saw it, and its armor_reviews row and its audit row commit with it, or nothing does. A refusal commits
-    // only its audit row. A change the database didn't confirm gets an audit row of its own saying so.
-    internal sealed class ArmorReviews(IArmorSubmissionData submissions, IArmorReviewData reviews, IAuditLogData audit, TimeProvider time,
+    // the reviewer saw it, and its armor_reviews row and its audit row commit with it, or nothing does. A move back to
+    // pending from Approved also reads MinerBot's record of the armor's posts in that transaction, by its tables' names, and
+    // is refused once it shows a post: the page offering it proves nothing. A refusal commits only its audit row. A change
+    // the database didn't confirm gets an audit row of its own saying so.
+    internal sealed class ArmorReviews(IArmorSubmissionData submissions, IArmorReviewData reviews, IAuditLogData audit, IDeliveryReads deliveries, TimeProvider time,
         ILogger<ArmorReviews> logger)
     {
         const string ChangedDetail = "The armor had changed since the page showed it";
+        const string PostedDetail = "The armor had been posted, so moving it back to pending was refused";
 
         public async Task<ArmorReviewOutcome> ApplyAsync(ArmorReviewRequest request, HttpContext httpContext)
         {
@@ -170,6 +177,15 @@ namespace MinerBot.Dashboard.Armor
                 {
                     await audit.AddAudit(Entry(AuditOutcome.Refused, detail, armor.Status, null, []), transaction);
                     return decision;
+                }
+
+                // Back to pending undoes an approval only before the post: the bot's record, as it is now, with the armor's row
+                // locked. A post the bot makes in the seconds after this can't be stopped, and the page then shows it.
+                if (action == ArmorAction.BackToPending && request.Expected == ArmorStatus.Approved
+                    && ArmorPosts.Posted(await deliveries.GetItemPosts(PostSource.Armor, (ulong)request.Id, transaction)))
+                {
+                    await audit.AddAudit(Entry(AuditOutcome.Refused, PostedDetail, armor.Status, null, []), transaction);
+                    return ArmorReviewOutcome.Posted;
                 }
 
                 // The row is locked with the status checked above, and this compares through the same collation, so it

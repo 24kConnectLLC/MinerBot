@@ -339,8 +339,9 @@ namespace MinerBot.Dashboard.Tests
             {
                 var html = await owner.Client.GetStringAsync(Page(server), Token);
 
+                // An action's form: the switches' is no request, and is the Owner's while MinerBot is in the server
                 Assert.Contains(line, Text(html));
-                Assert.DoesNotMatch("<form[^>]*\\?handler=", html);
+                Assert.DoesNotMatch("<form[^>]*\\?handler=(?!Switches\")", html);
                 Assert.DoesNotContain("/leave", html);
                 PageTests.AssertAccessible($"server {server}'s page", html);
             }
@@ -363,7 +364,7 @@ namespace MinerBot.Dashboard.Tests
             var offHtml = await offOwner.Client.GetStringAsync(Page(A), Token);
 
             Assert.Contains(ServerActions.RequestsOff, Text(offHtml));
-            Assert.DoesNotMatch("<form[^>]*\\?handler=", offHtml);
+            Assert.DoesNotMatch("<form[^>]*\\?handler=(?!Switches\")", offHtml);
             Assert.Equal(HttpStatusCode.Conflict, (await RequestSteps.AnsweredAsync(offOwner, await PostAsync(offOwner, Page(A), Page(A) + "?handler=Refresh"))).StatusCode);
             Assert.Empty(await db.SentAsync());
         }

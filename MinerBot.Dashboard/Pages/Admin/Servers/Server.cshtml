@@ -10,12 +10,14 @@
     Server, category and channel names are Discord's, which anyone in a server can set, so each goes through RevealedText,
     inside a bdi, and the title never holds one; a test message's options hold text alone, so a channel's name there has
     its hidden characters written as their codes. IDs are text. Channels hidden from MinerBot are counted, not listed, since
-    Discord sends each one with the same made-up name. Apart from the dashboard's changes, a table here holds no link, or
-    only a setting's link to another server, so each one's wrapper takes the keyboard's focus itself, as a group named by
-    its heading, and a keyboard can scroll one too wide for a phone: Safari, unlike Chrome and Firefox, doesn't make a
-    scrolling box focusable on its own. The actions' forms post to this page through asp-page-handler, never an action
-    attribute, so the form tag helper adds their token, each with a key of its own; the box of the request a form sent
-    refreshes itself through refresh.js until it's final, and the page works without it.
+    Discord sends each one with the same made-up name. A table here holds at most a setting's link to another server and
+    links to the bot's messages in Discord, which a table may not have, so each one's wrapper takes the keyboard's focus
+    itself, as a group named by its heading, and a keyboard can scroll one too wide for a phone: Safari, unlike Chrome and
+    Firefox, doesn't make a scrolling box focusable on its own. A message's link is built from three numbers, never from
+    text. The actions' forms and the switches' post to this page through asp-page-handler, never an action attribute, so
+    the form tag helper adds their token, each action's with a key of its own; the box of the request a form sent
+    refreshes itself through refresh.js until it's final, and the page works without it. A save of the switches redirects
+    to their heading, so its word is drawn under it, where the page opens, and not with the notices at the top.
 *@
 @{
     ViewData["Title"] = "Server " + Model.IdText;
@@ -36,6 +38,13 @@
 {
     <div class="notice notice-problem" role="alert">
         <p>@Model.Problem @if (Model.ProblemRequest is { } named) {<a href="@("/admin/requests/" + named.ToString(CultureInfo.InvariantCulture))">That request</a>}</p>
+    </div>
+}
+
+@if (Model.SwitchNotice != null)
+{
+    <div class="notice @(Model.SwitchNoticeIsProblem ? "notice-problem" : "notice-done")" role="@(Model.SwitchNoticeIsProblem ? "alert" : "status")">
+        <p>@Model.SwitchNotice</p>
     </div>
 }
 
@@ -224,12 +233,14 @@ else
                     <th scope="col">Posts</th>
                     <th scope="col">Channel</th>
                     <th scope="col">Status</th>
+                    <th scope="col">Last post</th>
                 </tr>
             </thead>
             <tbody>
                 @foreach (var setting in Model.Statuses)
                 {
                     var channelId = setting.ChannelId.ToString(CultureInfo.InvariantCulture);
+                    var delivery = DeliveryWords.Shown(Model.Delivery(setting.Kind), setting.State);
                     <tr>
                         <th scope="row">@SettingStatuses.KindLabel(setting.Kind)</th>
                         <td>
@@ -254,6 +265,9 @@ else
                                 case SettingState.Off:
                                     <p class="cell-line muted">The server turned this kind of post off.</p>
                                     break;
+                                case SettingState.SwitchedOff:
+                                    <p class="cell-line muted">@SwitchWords.SwitchedOffLine</p>
+                                    break;
                                 case SettingState.CantPost:
                                     <p class="cell-line muted">Give MinerBot @string.Join(", ", setting.Missing) in this channel, or choose another.</p>
                                     break;
@@ -266,12 +280,150 @@ else
                                     break;
                             }
                         </td>
+                        <td>
+                            @if (SettingStatuses.SourceOf(setting.Kind) == null)
+                            {
+                                <text>@DeliveryWords.NotRecorded</text>
+                            }
+                            else if (delivery is { failing_since: not null } failing)
+                            {
+                                <p class="cell-line">@DeliveryWords.CouldntPost(failing)</p>
+                                @if (DeliveryWords.NextTry(failing, now) is { } next)
+                                {
+                                    <p class="cell-line muted">@next</p>
+                                }
+                            }
+                            else if (delivery is { last_sent_at: { } sent } posted)
+                            {
+                                <p class="cell-line">@DeliveryWords.Posted(sent)</p>
+                                @if (DeliveryWords.LastPostLink(posted) is { } link)
+                                {
+                                    <p class="cell-line"><a href="@link">@DeliveryWords.OpenIt</a></p>
+                                }
+                            }
+                            else if (Model.LastMessage(setting.Kind) is { } message)
+                            {
+                                <p class="cell-line">@DeliveryWords.Posted(message.attempted_at)</p>
+                                @if (DeliveryWords.Link(message) is { } messageLink)
+                                {
+                                    <p class="cell-line"><a href="@messageLink">@DeliveryWords.OpenIt</a></p>
+                                }
+                            }
+                            else
+                            {
+                                <text>@DeliveryWords.NoPostYet</text>
+                            }
+                        </td>
                     </tr>
                 }
             </tbody>
         </table>
     </div>
+
+    @if (server != null)
+    {
+        <h3 id="@SwitchWords.Anchor">@SwitchWords.Heading</h3>
+        @if (Model.SwitchesDone != null)
+        {
+            <div class="notice notice-done" role="status">
+                <p>@Model.SwitchesDone</p>
+            </div>
+        }
+        <p>@SwitchWords.Help</p>
+        @if (Model.Switches is { } saved)
+        {
+            <p>@SwitchWords.LastChanged(saved.changed_at) @RevealedText.Html(Model.SwitchesChangedBy ?? "")<text>.</text></p>
+        }
+        else
+        {
+            <p>@SwitchWords.NoneSaved</p>
+        }
+        @if (Model.CanChangeSwitches)
+        {
+            <form method="post" asp-page-handler="@SwitchWords.Handler" asp-route-id="@Model.IdText">
+                <input type="hidden" name="version" value="@((Model.Switches?.version ?? 0).ToString(CultureInfo.InvariantCulture))" />
+                <div role="group" aria-labelledby="@SwitchWords.Anchor">
+                    <div class="field-check">
+                        <input type="checkbox" id="switch-armor" name="armor" value="on" checked="@SwitchWords.ArmorOn(Model.Switches)" />
+                        <label for="switch-armor">@SwitchWords.ArmorLabel</label>
+                    </div>
+                    <div class="field-check">
+                        <input type="checkbox" id="switch-maps" name="maps" value="on" checked="@SwitchWords.MapsOn(Model.Switches)" />
+                        <label for="switch-maps">@SwitchWords.MapsLabel</label>
+                    </div>
+                    <div class="field-check">
+                        <input type="checkbox" id="switch-lobbies" name="lobbies" value="on" checked="@SwitchWords.LobbiesOn(Model.Switches)" />
+                        <label for="switch-lobbies">@SwitchWords.LobbiesLabel</label>
+                    </div>
+                </div>
+                <button type="submit" class="button">@SwitchWords.Button</button>
+            </form>
+        }
+        else
+        {
+            <ul>
+                <li>@SwitchWords.ArmorLabel: @SwitchWords.OnOff(SwitchWords.ArmorOn(Model.Switches))</li>
+                <li>@SwitchWords.MapsLabel: @SwitchWords.OnOff(SwitchWords.MapsOn(Model.Switches))</li>
+                <li>@SwitchWords.LobbiesLabel: @SwitchWords.OnOff(SwitchWords.LobbiesOn(Model.Switches))</li>
+            </ul>
+            <p>@(Model.IsIn ? SwitchWords.OnlyOwner : SwitchWords.NotIn)</p>
+        }
+    }
 </section>
+
+@if (server != null)
+{
+    <section aria-labelledby="recent-posts">
+        <h2 id="recent-posts">Its recent posts</h2>
+        @if (Model.RecentPosts.Count == 0)
+        {
+            <p>@DeliveryWords.RecentNone</p>
+        }
+        else
+        {
+            <p>@DeliveryWords.RecentIntro</p>
+            <div class="table-wrap" tabindex="0" role="group" aria-labelledby="recent-posts">
+                <table>
+                    <thead>
+                        <tr>
+                            <th scope="col">When</th>
+                            <th scope="col">Posts</th>
+                            <th scope="col">Channel</th>
+                            <th scope="col">What happened</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var post in Model.RecentPosts)
+                        {
+                            <tr>
+                                <td class="audit-when">@TimeWords.Utc(post.attempted_at)</td>
+                                <td>@DeliveryWords.Items(post.source, post.item_count)</td>
+                                <td>
+                                    @if (Model.ChannelOf(post.channel_id) is { } postChannel && !ChannelGroups.IsHidden(postChannel))
+                                    {
+                                        <p class="cell-line"><text>#</text>@RevealedText.Html(postChannel.name)</p>
+                                        <p class="cell-line muted address">@post.channel_id.ToString(CultureInfo.InvariantCulture)</p>
+                                    }
+                                    else
+                                    {
+                                        <p class="cell-line address">@post.channel_id.ToString(CultureInfo.InvariantCulture)</p>
+                                    }
+                                </td>
+                                <td>
+                                    <p class="cell-line">@DeliveryWords.Outcome(post)</p>
+                                    @if (DeliveryWords.Link(post) is { } postLink)
+                                    {
+                                        <p class="cell-line"><a href="@postLink">@DeliveryWords.OpenIt</a></p>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </section>
+}
 
 @if (server != null)
 {

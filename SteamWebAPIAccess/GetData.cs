@@ -284,6 +284,21 @@ namespace SteamWebAPIAccess
             return (await GetWorkshopDetails([id])).FirstOrDefault(item => item.PublishedFileId == id);
         }
 
+        // For the notification job's maps that waited and left Steam's latest list: one details call for all of them, by the
+        // latest maps' rules, so only a map Steam still lists publicly comes back. GetPublishedFileDetails refuses an empty list.
+        public async Task<IReadOnlyList<PublishedFileDetailsModel>> GetPublicWorkshopItems(IReadOnlyCollection<ulong> ids)
+        {
+            var asked = ids.Where(id => id != 0).Distinct().ToList();
+
+            if (asked.Count == 0)
+                return [];
+
+            return (await GetWorkshopDetails(asked))
+                .Where(item => asked.Contains(item.PublishedFileId) && WorkshopItems.Check(item, _steamAPI.appID, unlistedAllowed: false) == WorkshopItemCheck.Shown)
+                .DistinctBy(item => item.PublishedFileId)
+                .ToList();
+        }
+
         // SteamWebAPI2 catches a failed request and gives no response at all, which says nothing about the maps, so it's
         // an error here like a timeout, and a lookup can't tell a user that a map doesn't exist while Steam is down.
         // Steam's list has an entry for every ID it's asked about, so a reply without a list (an empty body, or a failed

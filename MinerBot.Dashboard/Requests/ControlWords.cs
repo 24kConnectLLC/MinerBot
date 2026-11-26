@@ -35,13 +35,19 @@ namespace MinerBot.Dashboard.Requests
         public const string RenewToken = "RenewToken";
         public const string Restart = "Restart";
 
+        // How long what a pause holds may wait before the bot gives it up as too old to be news, by the bot's PostingLimits,
+        // which ControlsPageTests reads so the two can't drift. The pause's help and the paused banner both name them: a pause
+        // of more than half an hour already loses the lobbies found at its start.
+        public const string PauseLimits = "armor is given up after 7 days, a map after 2 and a lobby after 30 minutes.";
+
         // Every control, in the page's order
         public static readonly IReadOnlyList<ControlText> Controls =
         [
             new(Pause, "Pause posts",
-                "Holds the bot's armor, map and lobby posts. What it finds meanwhile waits and goes out when posts are resumed, unless the bot restarts first, "
-                + "which loses it. /admin announce, the welcome message, test messages and direct messages aren't held."),
-            new(Resume, "Resume posts", "Lets posts go again. The next notification run, within 5 minutes, posts what waited."),
+                "Holds the bot's armor, map and lobby posts. What it finds meanwhile waits, even across a restart, and goes out when posts are resumed, "
+                + $"unless it waited too long to be news: {PauseLimits} /admin announce, the welcome message, test messages and direct messages aren't held."),
+            new(Resume, "Resume posts",
+                "Lets posts go again. The next notification run, within 5 minutes, posts what waited, unless it waited too long to be news."),
             new(SetStatus, "Set the status text", "Every server shows it under MinerBot's name."),
             new(DefaultStatus, "Back to the default status", "Discord shows Playing Murder Miners on my PC again."),
             new(RunNotifications, "Run the notification job now",
@@ -56,9 +62,8 @@ namespace MinerBot.Dashboard.Requests
             new(RenewToken, "Renew the Steam token",
                 "Asks Steam for a new sign-in token now, as the bot does every day. Steam may keep the one it has."),
             new(Restart, "Restart the bot",
-                "MinerBot stops and Docker starts it again. It's usually back on Discord within a minute, and this page says when. A restart loses the armor, "
-                + "maps and lobbies the bot hasn't posted yet, those that came since its last notification run and those a pause holds included, so if any wait, "
-                + "resume posts if they're paused and run the notification job first. A restart also renews the Steam token once.")
+                "MinerBot stops and Docker starts it again. It's usually back on Discord within a minute, and this page says when. What it hasn't posted yet "
+                + "waits and goes out at its first run after the start. A restart also renews the Steam token once.")
         ];
 
         public static ControlText Of(string handler) => Controls.Single(control => control.Handler == handler);

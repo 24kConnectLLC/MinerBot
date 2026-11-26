@@ -3,14 +3,16 @@
 @using System.Globalization
 @using DataAccessLibrary.Armor
 @using MinerBot.Dashboard.Armor
+@using MinerBot.Dashboard.Servers
 @using MinerBot.Shared.Armor
 @*
     Everything the submitter wrote goes through RevealedText, inside a bdi, and the title never holds it. The previews show
     it raw, as Discord would, but isolated the same way. The rules and the forms come last, after the previews and the
     history, so a reviewer reaches the buttons having passed everything, and the warnings' ticks stay next to Approve. What
     follows on the bot's side comes first, under the notice: the box of the request the redirect names, which refreshes
-    itself through refresh.js until it's final, and Announce now for approved armor the bot hasn't seen yet, or what stands
-    in its place, such as why the bot won't post it once it has started again since its last notification run.
+    itself through refresh.js until it's final, Announce now for approved armor the bot hasn't found yet, or what stands
+    in its place, and where the bot posted it, from its record, each server's name through RevealedText and each message's
+    link built from three numbers, never from text.
 *@
 @{
     var id = Model.Id.ToString(CultureInfo.InvariantCulture);
@@ -82,7 +84,7 @@ else
             }
             else if (announce.State == AnnounceState.Paused)
             {
-                <p>@ArmorWords.AnnouncePaused</p>
+                <p>@(announce.Kept ? ArmorWords.AnnouncePausedKept : ArmorWords.AnnouncePaused)</p>
             }
             else if (announce.State == AnnounceState.Off)
             {
@@ -94,11 +96,36 @@ else
             }
             else if (announce.State == AnnounceState.Stopped)
             {
-                <p>@ArmorWords.AnnounceStopped</p>
+                <p>@(announce.Kept ? ArmorWords.AnnounceStoppedKept : ArmorWords.AnnounceStopped)</p>
             }
             else
             {
-                <p>@ArmorWords.AnnounceRunning(MinerBot.Dashboard.Requests.RequestWords.When(announce.RunningSince))</p>
+                var since = MinerBot.Dashboard.Requests.RequestWords.When(announce.RunningSince);
+                <p>@(announce.Kept ? ArmorWords.AnnounceRunningKept(since) : ArmorWords.AnnounceRunning(since))</p>
+            }
+        </section>
+    }
+
+    @if (Model.ShowsPosts)
+    {
+        <section aria-labelledby="posted">
+            <h2 id="posted">Where it was posted</h2>
+            <p>@Model.PostsLine</p>
+            @if (Model.Record is { Seen: { state: not DataAccessLibrary.Posting.SeenState.Baseline } } && Model.PostLines.Count > 0)
+            {
+                <ul>
+                    @foreach (var line in Model.PostLines)
+                    {
+                        var server = line.GuildId.ToString(CultureInfo.InvariantCulture);
+                        <li>
+                            @if (line.Name is { } name) {@RevealedText.Html(name)} else {<text>Server </text><span class="address">@server</span>}<text>: @line.Words</text>
+                            @if (line.Link is { } link)
+                            {
+                                <a href="@link">@DeliveryWords.OpenIt</a>
+                            }
+                        </li>
+                    }
+                </ul>
             }
         </section>
     }
@@ -214,7 +241,7 @@ else
     <section aria-labelledby="previews">
         <h2 id="previews">How the bot will show it</h2>
         <h3>The new-armor post</h3>
-        <p class="muted">@(Model.MayNotPost ? ArmorWords.PostMayNotComeNote : ArmorWords.PostNote)</p>
+        <p class="muted">@(Model.KeepsPosts ? (Model.MayNotPost ? ArmorWords.PostMayNotComeNoteKept : ArmorWords.PostNoteKept) : (Model.MayNotPost ? ArmorWords.PostMayNotComeNote : ArmorWords.PostNote))</p>
         <partial name="_Embed" model="Model.Post" />
         <h3>/armor lookup</h3>
         <p class="muted">The picture is the screenshot, which the bot attaches when it can fetch it.</p>
@@ -336,7 +363,7 @@ else
                     <input type="hidden" name="expected" value="@(armor.KnownStatus ?? "")" />
                     <input type="hidden" name="version" value="@Model.Version" />
                     <button type="submit" class="button" aria-describedby="approve-help">Approve</button>
-                    <p id="approve-help" class="muted">@(Model.MayNotPost ? ArmorWords.ApproveAgainHelp : ArmorWords.ApproveHelp)</p>
+                    <p id="approve-help" class="muted">@(Model.KeepsPosts ? (Model.MayNotPost ? ArmorWords.ApproveAgainHelpKept : ArmorWords.ApproveHelpKept) : (Model.MayNotPost ? ArmorWords.ApproveAgainHelp : ArmorWords.ApproveHelp))</p>
                 </form>
             }
             @if (Model.Actions.Contains(ArmorAction.Reject))
@@ -357,17 +384,21 @@ else
                     <input type="hidden" name="expected" value="@(armor.KnownStatus ?? "")" />
                     <input type="hidden" name="version" value="@Model.Version" />
                     <button type="submit" class="button button-quiet" aria-describedby="takedown-help">Take down</button>
-                    <p id="takedown-help" class="muted">@ArmorWords.TakeDownHelp</p>
+                    <p id="takedown-help" class="muted">@(Model.KeepsPosts ? ArmorWords.TakeDownHelpKept : ArmorWords.TakeDownHelp)</p>
                 </form>
             }
-            @if (Model.Actions.Contains(ArmorAction.BackToPending))
+            @if (Model.BackToPendingOffered)
             {
                 <form method="post" asp-page-handler="BackToPending" asp-route-id="@id" asp-route-list="@Model.FromTab?.Word" asp-route-q="@Model.FromSearch" class="action">
                     <input type="hidden" name="expected" value="@(armor.KnownStatus ?? "")" />
                     <input type="hidden" name="version" value="@Model.Version" />
                     <button type="submit" class="button button-quiet" aria-describedby="pending-help">Back to pending</button>
-                    <p id="pending-help" class="muted">@(approved ? ArmorWords.BackToPendingFromApprovedHelp : ArmorWords.BackToPendingHelp)</p>
+                    <p id="pending-help" class="muted">@(approved ? (Model.KeepsPosts ? ArmorWords.BackToPendingFromApprovedHelpKept : ArmorWords.BackToPendingFromApprovedHelp) : ArmorWords.BackToPendingHelp)</p>
                 </form>
+            }
+            else if (Model.BackToPendingInstead != null)
+            {
+                <p>@Model.BackToPendingInstead</p>
             }
         }
     </section>

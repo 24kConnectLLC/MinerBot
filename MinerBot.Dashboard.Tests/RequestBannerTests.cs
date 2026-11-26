@@ -74,7 +74,8 @@ namespace MinerBot.Dashboard.Tests
             Assert.Equal(
             [
                 new Banner("MinerBot's armor, map and lobby posts are paused, since 2026-11-21 10:00:00 UTC, 2 hours ago, by Test[U+202E]Owner (request 11), because: "
-                    + "Testing[U+200B] the pause. What the bot finds waits and goes out when posts are resumed, unless the bot restarts first, which loses it.",
+                    + "Testing[U+200B] the pause. What the bot finds waits, even across a restart, and goes out when posts are resumed, unless it waited too long "
+                    + "to be news: armor is given up after 7 days, a map after 2 and a lobby after 30 minutes.",
                     "Resume them on the controls page", "/admin/bot/controls#posts"),
                 new Banner("Requests to the bot are off: the dashboard has no request-signing key, so its controls, Announce now, test messages, refreshes, custom-link "
                     + "lookups and sign-in messages don't work. On the server, ./setup-dashboard.sh --no-questions makes one.", "The deploy notes", Banners.DeployNotes),

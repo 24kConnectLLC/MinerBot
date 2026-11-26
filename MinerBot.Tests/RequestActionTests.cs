@@ -61,11 +61,14 @@ namespace MinerBot.Tests
 
             await bot.TickAsync();
 
+            // Its first run, which takes the baselines, and says so, as every run says what it did
+            const string Baseline = "took the first baseline of armor, maps and lobbies (2, 5 and 0 items) and posted nothing";
+
             Assert.Equal(RequestStates.Done, bot.Row(id).state);
-            Assert.Matches(@"^The notification job ran in \d+ s\.$", bot.Row(id).result);
+            Assert.Matches(@"^The notification job ran in \d+ s: " + System.Text.RegularExpressions.Regex.Escape(Baseline) + @"\.$", bot.Row(id).result);
 
             var run = Assert.Single(bot.Discord.Recorder.PeekJobRuns(10));
-            Assert.Equal(("GuildNotificationJob.NotifyAllGuilds", (string?)"asked for on request 1"), (run.job, run.detail));
+            Assert.Equal(("GuildNotificationJob.NotifyAllGuilds", (string?)$"asked for on request 1: {Baseline}"), (run.job, run.detail));
         }
 
         [Fact]
@@ -273,7 +276,8 @@ namespace MinerBot.Tests
             Assert.Equal(FakeDiscord.ChannelId, sent.SentTo);
             Assert.True(sent.AllowsNoMentions);
             Assert.True(((MessageFlags)sent.Message.GetProperty("flags").GetInt32()).HasFlag(MessageFlags.SuppressNotification));
-            Assert.Equal((RequestStates.Done, "Sent a test message.", (ulong?)FakeDiscord.MessageId), (bot.Row(id).state, bot.Row(id).result, bot.Row(id).result_number));
+            Assert.Equal((RequestStates.Done, "Sent a test message.", (ulong?)Assert.Single(bot.Discord.MessagesIn(FakeDiscord.ChannelId))),
+                (bot.Row(id).state, bot.Row(id).result, bot.Row(id).result_number));
         }
 
         // Nothing of the request reaches the channel: a fixed embed and no text, whoever asked
@@ -331,6 +335,19 @@ namespace MinerBot.Tests
             await bot.TickAsync();
 
             Assert.Equal((RequestStates.Failed, (string?)"Discord refused the test message (error 50013)."), Outcome(bot, id));
+        }
+
+        // Discord's own trouble answers with code 0, its "general error", so the result names the HTTP status, never "error 0"
+        [Fact]
+        public async Task TestMessageRefusedByDiscordsServerSaysItsHttpStatus()
+        {
+            await using var bot = await StartAsync();
+            bot.Discord.ChannelFailures[FakeDiscord.ChannelId] = (500, 0);
+            var id = bot.Add(RequestKinds.GuildTestMessage, guildId: FakeDiscord.GuildId, channelId: FakeDiscord.ChannelId);
+
+            await bot.TickAsync();
+
+            Assert.Equal((RequestStates.Failed, (string?)"Discord refused the test message (error 500)."), Outcome(bot, id));
         }
 
         // Discord.Net lists a voice channel among the text channels, and the notification job keeps doing so, but a test shows

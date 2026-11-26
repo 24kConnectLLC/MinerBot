@@ -19,6 +19,8 @@ namespace MinerBot.Dashboard.Status
             Notifications => "Notifications",
             "HousekeepingJob.ApplyRetention" => "Clean-up",
             "SteamTokenJob.RenewSteamToken" => "Steam token renewal",
+            "SubmissionAlertJob.AlertOwner" => "New-submission alerts",
+            "PostingRetentionJob.ApplyRetention" => "Post records clean-up",
             _ => job
         };
 
@@ -45,8 +47,8 @@ namespace MinerBot.Dashboard.Status
         // next run's first write, and no job runs while the bot is stopped
         public static bool StoppedSince(DateTime started, BotStatusRow status) => status.stopped_at is { } stopped && started <= stopped;
 
-        // The forms the bot's jobs use, in words: every minute, every N minutes, every hour at a minute, and every day at a
-        // time. Null for any other form, which the page shows as the cron alone.
+        // The forms the bot's jobs use, in words: every minute, every N minutes, every N minutes from a minute past the hour,
+        // every hour at a minute, and every day at a time. Null for any other form, which the page shows as the cron alone.
         public static string? Schedule(string cron)
         {
             var fields = cron.Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -60,7 +62,12 @@ namespace MinerBot.Dashboard.Status
                     return "every minute";
 
                 if (minute.StartsWith("*/", StringComparison.Ordinal) && Number(minute[2..], 1, 59) is { } every)
-                    return every == 1 ? "every minute" : $"every {every} minutes";
+                    return Every(every);
+
+                // N-59/M, as the new-submission alerts' 2-59/5: every M minutes, from N minutes past the hour
+                if (minute.Split('/') is [var range, var step] && range.Split('-') is [var first, "59"]
+                    && Number(first, 0, 59) is { } from && Number(step, 1, 59) is { } each)
+                    return from == 0 ? Every(each) : string.Create(CultureInfo.InvariantCulture, $"{Every(each)}, from {from} {(from == 1 ? "minute" : "minutes")} past the hour");
 
                 if (Number(minute, 0, 59) is { } past)
                     return past == 0 ? "every hour, on the hour" : string.Create(CultureInfo.InvariantCulture, $"every hour at {past} minutes past");
@@ -73,6 +80,8 @@ namespace MinerBot.Dashboard.Status
 
             return null;
         }
+
+        static string Every(int minutes) => minutes == 1 ? "every minute" : string.Create(CultureInfo.InvariantCulture, $"every {minutes} minutes");
 
         // Digits only, in the range
         static int? Number(string text, int min, int max) =>

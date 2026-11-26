@@ -13,10 +13,12 @@ namespace MinerBot_2._0.Status
     // has stopped, such as Discord's last disconnect while the bot shuts down, is kept and never written.
     public sealed class BotRecorder
     {
-        // Samples are one a minute, so 360 is 6 hours of them
+        // Samples are one a minute, so 360 is 6 hours of them, and lobby samples one a notification run, every 5 minutes, so
+        // 72 is 6 hours of those
         public const int EventLimit = 1000;
         public const int JobRunLimit = 500;
         public const int SampleLimit = 360;
+        public const int LobbySampleLimit = 72;
 
         readonly object gate = new();
         readonly TimeProvider _clock;
@@ -24,11 +26,12 @@ namespace MinerBot_2._0.Status
         readonly Queue<BotEvent> events = new();
         readonly Queue<JobRun> jobRuns = new();
         readonly Queue<UptimeSample> samples = new();
+        readonly Queue<LobbySample> lobbySamples = new();
         readonly Dictionary<string, JobEntry> jobs = new(StringComparer.Ordinal);
         List<string>? jobNames;
 
         uint eventSeq, jobRunSeq;
-        int droppedEvents, droppedJobRuns, droppedSamples;
+        int droppedEvents, droppedJobRuns, droppedSamples, droppedLobbySamples;
 
         // The status row as the sampler last saw it. The version grows with each change of a state, which the writer
         // writes at its next tick rather than waiting for the next 30 seconds.
@@ -176,7 +179,27 @@ namespace MinerBot_2._0.Status
             }
         }
 
-        // What the sampler read of Discord and Steam. Discord's since is when a reading first showed its state.
+        // The open lobbies at a notification run's read, counts only, for the analytics: StatusWriter writes them beside the
+        // uptime samples, so a database that's down never holds up the run
+        public void SampleLobbies(LobbySample sample)
+        {
+            try
+            {
+                if (sample == null)
+                    return;
+
+                lock (gate)
+                    Add(lobbySamples, sample, LobbySampleLimit, ref droppedLobbySamples);
+            }
+            catch (Exception)
+            {
+            }
+        }
+
+        // What the sampler read of Discord and Steam. Discord's since is when the state began, by the status handler's own
+        // time of the connection or the drop, which the reading carries: so "Back on Discord" is the moment itself, not the
+        // sampler's next tick, up to 5 seconds later. A reading can show the connection a moment before the handler's event
+        // runs, and connecting has no event, so a time that isn't newer than the since before it, or none, is the reading's own.
         public void UpdateStatus(DiscordReading discord, SteamStatus steam)
         {
             try
@@ -194,7 +217,9 @@ namespace MinerBot_2._0.Status
                         statusVersion++;
 
                     if (status.discord_state != discord.State)
-                        status.discord_since = Now();
+                        status.discord_since = discord.State != DiscordState.Connecting && discord.ChangedAt is { } changed && changed > status.discord_since
+                            ? changed
+                            : Now();
 
                     status.discord_state = discord.State;
                     status.discord_latency_ms = discord.LatencyMs;
@@ -238,10 +263,12 @@ namespace MinerBot_2._0.Status
         internal List<BotEvent> PeekEvents(int count) => Peek(events, count);
         internal List<JobRun> PeekJobRuns(int count) => Peek(jobRuns, count);
         internal List<UptimeSample> PeekSamples(int count) => Peek(samples, count);
+        internal List<LobbySample> PeekLobbySamples(int count) => Peek(lobbySamples, count);
 
         internal void EventsWritten(IReadOnlyCollection<BotEvent> written) => Remove(events, written);
         internal void JobRunsWritten(IReadOnlyCollection<JobRun> written) => Remove(jobRuns, written);
         internal void SamplesWritten(IReadOnlyCollection<UptimeSample> written) => Remove(samples, written);
+        internal void LobbySamplesWritten(IReadOnlyCollection<LobbySample> written) => Remove(lobbySamples, written);
 
         // Copies of the jobs whose status changed since it was last written, with the version each copy has
         internal List<(JobStatus Row, long Version)> PeekJobStatus(int count)
@@ -280,12 +307,12 @@ namespace MinerBot_2._0.Status
         }
 
         // How many items each limit dropped since the last time this was asked
-        internal (int Events, int JobRuns, int Minutes) TakeDropped()
+        internal (int Events, int JobRuns, int Minutes, int LobbySamples) TakeDropped()
         {
             lock (gate)
             {
-                var dropped = (droppedEvents, droppedJobRuns, droppedSamples);
-                droppedEvents = droppedJobRuns = droppedSamples = 0;
+                var dropped = (droppedEvents, droppedJobRuns, droppedSamples, droppedLobbySamples);
+                droppedEvents = droppedJobRuns = droppedSamples = droppedLobbySamples = 0;
                 return dropped;
             }
         }
@@ -299,7 +326,7 @@ namespace MinerBot_2._0.Status
             {
                 lock (gate)
                 {
-                    if (droppedEvents + droppedJobRuns + droppedSamples == 0)
+                    if (droppedEvents + droppedJobRuns + droppedSamples + droppedLobbySamples == 0)
                         return;
 
                     while (events.Count >= EventLimit)
@@ -308,10 +335,10 @@ namespace MinerBot_2._0.Status
                         droppedEvents++;
                     }
 
-                    var (lostEvents, lostJobRuns, lostMinutes) = TakeDropped();
+                    var (lostEvents, lostJobRuns, lostMinutes, lostLobbySamples) = TakeDropped();
 
                     Record(BotEvents.RecordsDropped, string.Create(CultureInfo.InvariantCulture,
-                        $"{lostEvents} events, {lostJobRuns} job runs and {lostMinutes} minutes, the oldest, because the bot couldn't keep more"));
+                        $"{lostEvents} events, {lostJobRuns} job runs, {lostMinutes} minutes and {lostLobbySamples} lobby samples, the oldest, because the bot couldn't keep more"));
                 }
             }
             catch (Exception)

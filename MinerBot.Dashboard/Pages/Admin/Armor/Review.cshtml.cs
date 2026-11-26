@@ -1,8 +1,12 @@
 using System.Globalization;
 using DataAccessLibrary.Armor;
 using DataAccessLibrary.Armor.Models;
+using DataAccessLibrary.Guilds;
+using DataAccessLibrary.Posting;
+using DataAccessLibrary.Posting.Models;
 using DataAccessLibrary.Requests;
 using DataAccessLibrary.Status;
+using DataAccessLibrary.Status.Models;
 using Microsoft.AspNetCore.Http.Extensions;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
@@ -13,6 +17,7 @@ using MinerBot.Dashboard.Hosting;
 using MinerBot.Dashboard.Requests;
 using MinerBot.Dashboard.Security;
 using MinerBot.Dashboard.Settings;
+using MinerBot.Dashboard.Status;
 using MinerBot.Shared.Armor;
 using MinerBot.Shared.Requests;
 
@@ -22,12 +27,17 @@ namespace MinerBot.Dashboard.Pages.Admin.Armor
     // screenshot when it's an upload on the website, its colours, how the bot will show it, its history, and the rules.
     // Its forms approve, reject, take down or move it back to pending, each through ArmorReviews, and an approval, a
     // take-down or a move back from Approved then asks the bot to clear its name cache, once the review has committed.
-    // Approved armor the bot hasn't seen yet can be announced now, through the same sender as every request to the bot,
-    // unless the bot has stopped cleanly or started again since its last notification run. A form that wasn't done or sent
-    // is kept as a form's notice and redirects here with ?notice=, whose GET draws why with the armor as it is then, never
-    // this page drawn on the POST, which a reload would send again, and which would act once the refusal's cause had gone.
+    // Approved armor the bot hasn't found yet can be announced now, through the same sender as every request to the bot. A
+    // bot that keeps what it finds in MinerBot's database (PostingRules) has a record of where it posted the armor, which
+    // this page lists, and from which Back to pending from Approved is offered only before a post; that record is read on
+    // its own, so a read of it that fails costs only its part, and Back to pending from Approved, never the other actions.
+    // With an older bot, Announce now isn't offered once the bot has stopped cleanly or started again since its last
+    // notification run, and the words are the ones for a bot that keeps what it finds only in memory. A form that wasn't
+    // done or sent is kept as a form's notice and redirects here with ?notice=, whose GET draws why with the armor as it is
+    // then, never this page drawn on the POST, which a reload would send again, and which would act once the refusal's cause
+    // had gone.
     public sealed class ArmorReviewModel(IArmorSubmissionData submissions, IArmorReviewData reviews, IBotRequestQueue queue, IBotRequestReads requests,
-        IBotStatusReads status, TimeProvider time, ILogger<ArmorReviewModel> logger) : PageModel
+        IBotStatusReads status, IDeliveryReads deliveries, IBotGuildReads guilds, TimeProvider time, ILogger<ArmorReviewModel> logger) : PageModel
     {
         // The requests whose box this page shows when ?request= names one: the cache clear after a review, and Announce now
         static readonly IReadOnlyList<string> Kinds = [RequestKinds.CachesClear, RequestKinds.JobNotifications];
@@ -36,7 +46,7 @@ namespace MinerBot.Dashboard.Pages.Admin.Armor
         // and that an announce's words are for the top of the page alone, as for armor that isn't approved now.
         const string AnnounceForm = "announce";
         static readonly IReadOnlyList<string> Forms = [AnnounceForm, .. Enum.GetValues<ArmorAction>().Select(action => action.DoneWord())];
-        const string ChangedState = "changed", BlockedState = "blocked", UntickedState = "unticked", PageState = "page";
+        const string ChangedState = "changed", BlockedState = "blocked", UntickedState = "unticked", PostedState = "posted", PageState = "page";
 
         public long Id { get; private set; }
         public ArmorSubmission? Armor { get; private set; }
@@ -55,6 +65,22 @@ namespace MinerBot.Dashboard.Pages.Admin.Armor
 
         // Whether an approval may bring no post, because the bot may have seen this armor approved already
         public bool MayNotPost { get; private set; }
+
+        // Whether the bot that runs keeps what it finds in MinerBot's database, which the words and Announce now follow
+        public bool KeepsPosts { get; private set; }
+
+        // MinerBot's record of the armor, null when it couldn't be read, with each server's line and the line above them
+        public ItemPosts? Record { get; private set; }
+        public bool RecordUnknown { get; private set; }
+        public IReadOnlyList<ArmorPostLine> PostLines { get; private set; } = [];
+        public string? PostsLine { get; private set; }
+
+        // Where it was posted, drawn for a bot that keeps a record, for approved armor or armor it has found
+        public bool ShowsPosts { get; private set; }
+
+        // Back to pending, which from Approved needs the record to show no post yet, and the words in its place when it doesn't
+        public bool BackToPendingOffered { get; private set; }
+        public string? BackToPendingInstead { get; private set; }
 
         // A message for the top of the page, from ArmorWords' fixed set, and whether it says why nothing was done
         public string? Notice { get; private set; }
@@ -167,7 +193,7 @@ namespace MinerBot.Dashboard.Pages.Admin.Armor
 
             // What became of the cache clear, beside the notice of an action that sends one, which shows only while the armor
             // still has the status that action gave it
-            if (Notice is ArmorWords.Approved or ArmorWords.ApprovedAgain or ArmorWords.TakenDown or ArmorWords.MovedBackFromApproved)
+            if (ArmorWords.ClearsCache(Notice))
                 FollowUp = Result?.View.Kind == RequestKinds.CachesClear ? ArmorWords.CacheClearing : ArmorWords.CacheNotCleared(unsent);
 
             if (found == null)
@@ -192,6 +218,7 @@ namespace MinerBot.Dashboard.Pages.Admin.Armor
                         ChangedState => ArmorWords.Changed,
                         BlockedState when Check is { Blocking.Count: > 0 } => ArmorWords.Blocked,
                         BlockedState => ArmorWords.WasBlocked,
+                        PostedState => ArmorWords.WasPosted,
                         _ => ArmorWords.Unticked
                     };
 
@@ -324,6 +351,7 @@ namespace MinerBot.Dashboard.Pages.Admin.Armor
                 {
                     ArmorReviewOutcome.Changed => ChangedState,
                     ArmorReviewOutcome.Blocked => BlockedState,
+                    ArmorReviewOutcome.Posted => PostedState,
                     _ => UntickedState
                 }
             });
@@ -353,17 +381,70 @@ namespace MinerBot.Dashboard.Pages.Admin.Armor
             StatusUnknown = !ArmorActions.TryStatusOf(armor, out var status);
             Actions = StatusUnknown ? [] : ArmorActions.From(status);
             History = history;
-            MayNotPost = MayNotBePosted(status, history);
             Post = BotMessages.NewArmorPost(armor);
             Card = BotMessages.LookupCard(armor);
-            await LoadAnnounceAsync();
+
+            var bot = await ReadBotAsync();
+            KeepsPosts = PostingRules.KeepsPosts(bot);
+            await LoadRecordAsync(id, status);
+
+            // A bot that keeps a record may post armor it has found again only where its post still waited when it was
+            // withdrawn, and one whose record can't be read may have found it. An older bot's, from the history.
+            MayNotPost = KeepsPosts ? RecordUnknown || Record?.Seen != null : MayNotBePosted(status, history);
+
+            BackToPendingOffered = Actions.Contains(ArmorAction.BackToPending) && (status != ArmorStatus.Approved || Record is { } record && !ArmorPosts.Posted(record));
+
+            if (Actions.Contains(ArmorAction.BackToPending) && !BackToPendingOffered)
+                BackToPendingInstead = Record is not { } posted ? ArmorWords.PostsUnknownNoBack
+                    : posted.Seen is { state: SeenState.Baseline } && ArmorPosts.PostedServers(posted) == 0 ? ArmorWords.CountedAsPosted
+                    : ArmorWords.PostedIn(ArmorPosts.PostedServers(posted));
+
+            await LoadAnnounceAsync(bot);
             return true;
+        }
+
+        // The bot's status row, for which bot runs, and for Announce now
+        Task<BotStatusRow?> ReadBotAsync() => DatabaseCalls.Guard(() => status.GetStatus(), logger);
+
+        // MinerBot's record of where the armor went, with the servers' names from the bot's copy, on its own: a read that
+        // fails leaves the rest of the page, and Back to pending from Approved isn't offered then
+        async Task LoadRecordAsync(long id, string? armorStatus)
+        {
+            try
+            {
+                var record = await DatabaseCalls.Guard(() => deliveries.GetItemPosts(PostSource.Armor, (ulong)id), logger);
+                var names = record.Servers.Count == 0 ? new Dictionary<ulong, string>()
+                    : (await DatabaseCalls.Guard(() => guilds.ListGuilds(), logger)).ToDictionary(guild => guild.guild_id, guild => guild.name);
+
+                Record = record;
+                PostLines = ArmorPosts.Lines(record, names, time.GetUtcNow().UtcDateTime);
+            }
+            catch (DashboardUnavailableException)
+            {
+                RecordUnknown = true;
+            }
+
+            if (!KeepsPosts)
+                return;
+
+            // Armor it has found, or approved armor it will find; a record that can't be read is said to be so
+            PostsLine = Record switch
+            {
+                null => ArmorWords.PostsUnknown,
+                { Seen: { state: SeenState.Baseline } seen } => ArmorWords.Baseline(seen.first_seen_at),
+                { Seen: { } seen, Servers.Count: 0 } => ArmorWords.NoServerOwed(seen.first_seen_at),
+                { Seen: not null } => ArmorWords.PostsIntro,
+                _ when armorStatus == ArmorStatus.Approved => ArmorWords.NotPostedYet,
+                _ => null
+            };
+
+            ShowsPosts = PostsLine != null;
         }
 
         // Announce now, read only for approved armor the bot may post whose latest review approved it: the bot's settings,
         // the notification job's last run, the bot's status row for when its run started, and, for the button, what the
         // sender's limits would say
-        async Task LoadAnnounceAsync()
+        async Task LoadAnnounceAsync(BotStatusRow? bot)
         {
             if (ArmorFollowUps.Approval(Armor?.KnownStatus, History, MayNotPost) is not { } approval)
                 return;
@@ -371,7 +452,6 @@ namespace MinerBot.Dashboard.Pages.Admin.Armor
             var job = RequestKinds.Find(RequestKinds.JobNotifications)!;
             var stored = await DatabaseCalls.Guard(() => queue.GetSettings(), logger);
             var jobs = await DatabaseCalls.Guard(() => status.ListJobs(), logger);
-            var bot = await DatabaseCalls.Guard(() => status.GetStatus(), logger);
             var requestsOn = RequestSigning.ParseKey(HttpContext.RequestServices.GetRequiredService<IOptions<DashboardOptions>>().Value.RequestSigningKey) != null;
 
             Announce = ArmorFollowUps.Announce(approval, requestsOn, stored, jobs.FirstOrDefault(row => row.job == job.Job), bot);
@@ -418,9 +498,11 @@ namespace MinerBot.Dashboard.Pages.Admin.Armor
 
             return action switch
             {
+                ArmorAction.Approve when KeepsPosts => MayNotPost ? ArmorWords.ApprovedAgainKept : ArmorWords.ApprovedKept,
                 ArmorAction.Approve => MayNotPost ? ArmorWords.ApprovedAgain : ArmorWords.Approved,
                 ArmorAction.Reject => latest?.reason != null ? ArmorWords.RejectedWithReason : ArmorWords.Rejected,
                 ArmorAction.TakeDown => ArmorWords.TakenDown,
+                _ when KeepsPosts => latest?.from_status == ArmorStatus.Approved ? ArmorWords.MovedBackFromApprovedKept : ArmorWords.MovedBackToPendingKept,
                 _ => latest?.from_status == ArmorStatus.Approved ? ArmorWords.MovedBackFromApproved : ArmorWords.MovedBackToPending
             };
         }

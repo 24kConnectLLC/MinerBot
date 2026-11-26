@@ -86,10 +86,10 @@ namespace MinerBot.Dashboard.Servers
         public const string LeaveOff = "Requests to the bot are off, so a leave isn't offered.";
 
         public const string WhatALeaveDoes = "What a leave does: the bot leaves the server, Discord tells it so, and it then deletes this server's channel "
-            + "settings, its armor, maps, lobbies and announcements channels on the website, and its copy of the server's channels, as when a server removes "
-            + "MinerBot. The server's record and history stay here, marked as left. Only a new invite from someone in the server brings MinerBot back, and "
-            + "they then choose their channels again with /admin set_channels. The bot takes at most 5 leaves an hour, and sends you a direct message about "
-            + "each.";
+            + "settings, its armor, maps, lobbies and announcements channels on the website, its copy of the server's channels, and its switches and delivery "
+            + "status, and drops the posts that wait for it, as when a server removes MinerBot. The server's record and history stay here, marked as left. Only "
+            + "a new invite from someone in the server brings MinerBot back, and they then choose their channels again with /admin set_channels. The bot takes "
+            + "at most 5 leaves an hour, and sends you a direct message about each.";
 
         public static string TypeTheServer(string id) => $"Type the server's name as it shows above, or its ID {id}, to confirm";
 

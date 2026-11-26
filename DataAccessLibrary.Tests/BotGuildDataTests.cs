@@ -1,4 +1,5 @@
 using System.Globalization;
+using Dapper;
 using DataAccessLibrary.Guilds;
 using DataAccessLibrary.Guilds.Models;
 using DataAccessLibrary.Tests.Database;
@@ -19,10 +20,12 @@ namespace DataAccessLibrary.Tests
         // View Channel, Send Messages and Embed Links
         const ulong Permissions = 1024 | 2048 | 16384;
 
+        // With the switches, the delivery statuses and the queue, which a leave changes
         async Task<MariaDbFixture> StartAsync()
         {
             var db = fixture.Require();
-            await db.ClearAsync(MariaDbFixture.BotGuildTable, MariaDbFixture.BotChannelTable, MariaDbFixture.GuildEventTable, MariaDbFixture.GuildDailyTable);
+            await db.ClearAsync(MariaDbFixture.BotGuildTable, MariaDbFixture.BotChannelTable, MariaDbFixture.GuildEventTable, MariaDbFixture.GuildDailyTable,
+                MariaDbFixture.SwitchTable, MariaDbFixture.DeliveryStatusTable, MariaDbFixture.QueueTable);
             return db;
         }
 
@@ -288,6 +291,133 @@ namespace DataAccessLibrary.Tests
             Assert.Equal((RunId, 3u, GuildId, left, GuildEventKind.Left, (string?)null), (await EventsAsync())[^1]);
             Assert.Equal(3, (await EventsAsync()).Count);
             Assert.Equal([OtherGuildId], await data.ListGuildsIn());
+        }
+
+        // A server's switches, its delivery statuses and what still waited for it, as the dashboard and the bot write them
+        async Task PostingRowsAsync(ulong guildId)
+        {
+            await fixture.RootExecuteAsync(
+                $@"INSERT INTO {MariaDbFixture.SwitchTable} (guild_id, armor_on, maps_on, lobbies_on, version, changed_at, changed_by, changed_by_role)
+                   VALUES (@guildId, 0, 1, 1, 1, @at, 1000000000000000009, 'owner')", new { guildId, at = Noon });
+            await fixture.RootExecuteAsync(
+                $@"INSERT INTO {MariaDbFixture.DeliveryStatusTable} (guild_id, source, last_failed_at, failing_since, failures, next_try_at, updated_at)
+                   VALUES (@guildId, 'armor', @at, @at, 3, @next, @at), (@guildId, 'maps', NULL, NULL, 0, NULL, @at)", new { guildId, at = Noon, next = Noon.AddHours(1) });
+
+            foreach (var (item, state) in new[] { (1, "pending"), (2, "pending"), (3, "sending"), (4, "sent"), (5, "dropped") })
+            {
+                await fixture.RootExecuteAsync(
+                    $@"INSERT INTO {MariaDbFixture.QueueTable} (guild_id, source, item_id, revision, is_new, queued_at, state, reason, settled_at)
+                       VALUES (@guildId, 'lobbies', @item, 0, 1, @at, @state, @reason, @settled)",
+                    new { guildId, item, at = Noon, state, reason = state == "dropped" ? "closed" : null, settled = state is "sent" or "dropped" ? Noon : (DateTime?)null });
+            }
+        }
+
+        Task<List<(ulong GuildId, ulong Item, string State, string? Reason, DateTime? Settled)>> QueueAsync() =>
+            fixture.RootQueryAsync<(ulong, ulong, string, string?, DateTime?)>($"SELECT guild_id, item_id, state, reason, settled_at FROM {MariaDbFixture.QueueTable} ORDER BY guild_id, item_id");
+
+        // The leave's own transaction deletes the server's switches and delivery statuses and drops what waited for it, as
+        // left: a server that adds MinerBot again starts with every kind on. What's being sent, was sent or was dropped already
+        // stays, and so does another server's. Fails if the leave keeps the switches.
+        [Fact]
+        public async Task LeaveDeletesTheSwitchesTheStatusAndPendingRows()
+        {
+            var db = await StartAsync();
+            var data = db.BotGuilds();
+            var left = Noon.AddHours(2);
+
+            await data.SaveGuild(Server(), [General], Noon, RunId, 1);
+            await data.SaveGuild(Server(OtherGuildId), [], Noon, RunId, 2);
+            await PostingRowsAsync(GuildId);
+            await PostingRowsAsync(OtherGuildId);
+
+            Assert.True(await data.LeaveGuild(GuildId, left, RunId, 3, null));
+
+            Assert.Equal([OtherGuildId], await fixture.RootQueryAsync<ulong>($"SELECT guild_id FROM {MariaDbFixture.SwitchTable}"));
+            Assert.Equal([OtherGuildId, OtherGuildId], await fixture.RootQueryAsync<ulong>($"SELECT guild_id FROM {MariaDbFixture.DeliveryStatusTable}"));
+            Assert.Equal(
+            [
+                (GuildId, 1UL, "dropped", (string?)"left", (DateTime?)left),
+                (GuildId, 2UL, "dropped", "left", left),
+                (GuildId, 3UL, "sending", null, null),
+                (GuildId, 4UL, "sent", null, Noon),
+                (GuildId, 5UL, "dropped", "closed", Noon),
+                (OtherGuildId, 1UL, "pending", null, null),
+                (OtherGuildId, 2UL, "pending", null, null),
+                (OtherGuildId, 3UL, "sending", null, null),
+                (OtherGuildId, 4UL, "sent", null, Noon),
+                (OtherGuildId, 5UL, "dropped", "closed", Noon)
+            ], await QueueAsync());
+        }
+
+        // A leave that meets a settle of a message to that server, as when Discord removes the bot while its post there is
+        // refused: the settle takes the message's queue rows and then the server's status, and the leave takes them in the same
+        // order, so it waits for the settle rather than deadlocking with it. Once the settle commits, the leave drops the rows
+        // the settle gave back and deletes the status it wrote.
+        [Fact]
+        public async Task LeaveWaitsForASettleRatherThanDeadlocking()
+        {
+            var db = await StartAsync();
+            var data = db.BotGuilds();
+            var left = Noon.AddHours(2);
+
+            await data.SaveGuild(Server(), [], Noon, RunId, 1);
+            await PostingRowsAsync(GuildId);
+            var sending = (await fixture.RootQueryAsync<ulong>($"SELECT id FROM {MariaDbFixture.QueueTable} WHERE state = 'sending'")).Single();
+            var deadlocks = await DeadlocksAsync();
+
+            // The settle of item 3's message as refused, in a settle's order: its queue row back to pending, held open
+            await using var settle = new MySqlConnection(db.BotConnection);
+            await settle.OpenAsync(TestContext.Current.CancellationToken);
+            await using var transaction = await settle.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, TestContext.Current.CancellationToken);
+            await settle.ExecuteAsync($"UPDATE {MariaDbFixture.QueueTable} SET state = 'pending' WHERE id = @sending AND state = 'sending'", new { sending }, transaction);
+
+            var leave = Task.Run(() => data.LeaveGuild(GuildId, left, RunId, 2, null));
+            Assert.Equal(1, await db.LockWaitsAsync("notification_queue", 1, TimeSpan.FromSeconds(10)));
+
+            // Then the server's status, as the refusal counts there
+            await settle.ExecuteAsync(
+                $@"INSERT INTO {MariaDbFixture.DeliveryStatusTable} (guild_id, source, last_failed_at, last_reason, failing_since, failures, updated_at)
+                   VALUES (@guildId, 'lobbies', @at, 'missing_access', @at, 1, @at)
+                   ON DUPLICATE KEY UPDATE last_failed_at = VALUES(last_failed_at), failures = failures + 1, updated_at = VALUES(updated_at)",
+                new { guildId = GuildId, at = Noon.AddHours(1) }, transaction).WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+            await transaction.CommitAsync(TestContext.Current.CancellationToken);
+
+            Assert.True(await leave.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
+            Assert.Equal(deadlocks, await DeadlocksAsync());
+            Assert.Equal(0, await CountAsync(MariaDbFixture.DeliveryStatusTable));
+            Assert.Equal(
+            [
+                (GuildId, 1UL, "dropped", (string?)"left", (DateTime?)left),
+                (GuildId, 2UL, "dropped", "left", left),
+                (GuildId, 3UL, "dropped", "left", left),
+                (GuildId, 4UL, "sent", null, Noon),
+                (GuildId, 5UL, "dropped", "closed", Noon)
+            ], await QueueAsync());
+        }
+
+        async Task<long> DeadlocksAsync() =>
+            (await fixture.RootQueryAsync<(string, long)>("SHOW GLOBAL STATUS LIKE 'Innodb_deadlocks'")).Single().Item2;
+
+        // A leave that's written again, or one of a server already left, records nothing and deletes nothing more: only the
+        // leave the server's row records clears what's posted there
+        [Fact]
+        public async Task RepeatedLeaveDeletesNothingNew()
+        {
+            var db = await StartAsync();
+            var data = db.BotGuilds();
+
+            await data.SaveGuild(Server(), [], Noon, RunId, 1);
+            Assert.True(await data.LeaveGuild(GuildId, Noon.AddHours(1), RunId, 2, null));
+
+            await PostingRowsAsync(GuildId);
+            var queue = await QueueAsync();
+
+            Assert.False(await data.LeaveGuild(GuildId, Noon.AddHours(2), RunId, 3, null));
+            Assert.False(await data.LeaveGuild(OtherGuildId, Noon.AddHours(2), RunId, 4, null));
+
+            Assert.Equal(1, await CountAsync(MariaDbFixture.SwitchTable));
+            Assert.Equal(2, await CountAsync(MariaDbFixture.DeliveryStatusTable));
+            Assert.Equal(queue, await QueueAsync());
         }
 
         // A leave keeps its detail, the only word on a server the bot found gone when it connected, cut to the column's 300

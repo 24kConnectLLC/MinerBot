@@ -1,6 +1,7 @@
 ﻿using DataAccessLibrary.Armor.Models;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Primitives;
+using MinerBot.Shared.Armor;
 
 namespace DataAccessLibrary.Armor
 {
@@ -74,6 +75,31 @@ namespace DataAccessLibrary.Armor
                             WHERE Status = 'Approved' AND ArmorName = @name";
 
             return LoadFirstData<ArmorStyle, dynamic>(sql, new { name });
+        }
+
+        // The most pending armor one read takes, which is more than have ever waited at once
+        public const int PendingLimit = 1000;
+
+        // The armor waiting for a review, oldest first: only the ID and when it was sent, so no name, author or description a
+        // submitter wrote reaches the bot
+        public async Task<IReadOnlyList<PendingSubmission>> GetPendingSubmissions()
+        {
+            string sql = @"SELECT ID, CreatedAt
+                            FROM ihvph_armor_styles
+                            WHERE Status = @pending
+                            ORDER BY ID
+                            LIMIT @take";
+
+            return (await LoadDataEnum<PendingSubmission, object>(sql, new { pending = ArmorStatus.Pending, take = PendingLimit }).ConfigureAwait(false)).ToList();
+        }
+
+        // The highest armor ID of any status, or 0 for an empty table: the new-submission alerts' floor at their first look
+        public Task<long> GetHighestArmorId()
+        {
+            string sql = @"SELECT COALESCE(MAX(ID), 0)
+                            FROM ihvph_armor_styles";
+
+            return LoadFirstData<long, object?>(sql, null);
         }
 
         public Task UpdateColorArray(int ID, string colorArray)

@@ -98,7 +98,7 @@ what happened, what state it left and what to do.
 | `./setup-dashboard.sh --no-questions [--yes]` | Keeps every value. Installs a changed nginx file once the dashboard of its commit runs, applies again the rights the last apply used, starts the dashboard when its container is stopped, recreates it when it runs on older settings than `dashboard.env` holds (after a recreate that failed), recreates the bot when it runs on another request-signing key than `bot.env` holds, and repairs whatever differs. It asks "Go ahead?" unless `--yes`; without a terminal and without `--yes` it changes nothing. | `minerbot-setup` | 30 min |
 | `--rotate-proxy-key`, `--rotate-db-password`, `--rotate-request-key` | Makes a new proxy key, database password or request-signing key; each goes with either form above. | | |
 | `./setup-dashboard.sh --remove-nginx [--yes]` | The emergency path when `nginx -t` fails and names MinerBot's file: undoes a cut-off change first, takes the file out of nginx, keeping a copy, tests and reloads. Works while `nginx -t` fails. Nothing else: `/etc/nginx/minerbot`, with `pipelog.conf`, and cPanel's hook stay. | `minerbot-setup` | 30 min |
-| `./fill-secrets.sh` | Asks for `BOTTOKEN`, `WEBHOOKCHANNEL`, `STEAMWEB_PUB_KEY` and `STEAMUSER_NAME`, hidden, Enter keeps; writes them into `bot.env` and prints the recreate command. Holds the lock while it runs. | terminal | 10 min a question |
+| `./fill-secrets.sh` | Asks for `BOTTOKEN`, `WEBHOOKCHANNEL`, `STEAMWEB_PUB_KEY` and `STEAMUSER_NAME`, hidden, Enter keeps; writes them into `bot.env` and prints the recreate command. Holds the lock while it runs. The current bot doesn't use `WEBHOOKCHANNEL`, but `./rollback.sh bot` can put back an image from before PR 11 that does, and that one doesn't start without a valid webhook, so keep it valid. | terminal | 10 min a question |
 | `./backup.sh nightly\|pre-deploy\|pre-move\|manual` | Dumps MinerBot's database into `/srv/backups/minerbot` and keeps 14 days, the newest 3 always. Prints nothing when it works and one line when it fails. | cron, deploy | its own limits, 2,400 s at most |
 | `bash src/deploy/move-database.sh [--drop-old]` | Once: moves MinerBot's database out of cPanel, and later deletes the old one through cPanel ("MinerBot's database out of cPanel"). | unit `minerbot-move-database` | 900 s |
 | `./request.sh <kind> [--guild <server ID>] [--channel <channel ID>] [--text <text>]` | Sends the bot one of the dashboard's requests, through the dashboard's own code in its image, and prints the bot's answer; after a restart, waits until the bot is back on Discord. `./request.sh --list` lists the kinds. Holds the lock until the bot has answered ("The bot's requests"). | terminal | 900 s |
@@ -235,13 +235,39 @@ server's page against its channels in Discord, in Discord's order, with each set
 there. A setting that names a voice channel shows "Can't check", since the copy keeps only text and announcement
 channels, and that isn't a problem: the bot's posts reach a voice channel's chat. A forum or a deleted channel shows
 "Can't check" too, and the bot's posts reach neither: for armor, maps and lobbies its log says
-"that channel isn't in that server" whenever it has one to post there, so look in Discord at what each "Can't check"
-setting names. A status box left open refreshes every 30 seconds; during a swap nginx answers 503 for a moment, so the
-box stops and says "Not updating: reload the page".
+"that channel isn't in that server" whenever it tries to post there, which its waits after a refusal make a few times a
+day at most, and its record of posts has a `no_channel` refusal, so look in Discord at what each "Can't check" setting
+names. A status box left open refreshes every 30 seconds; during a swap nginx answers 503 for a moment, so the box stops
+and says "Not updating: reload the page".
 
 ```bash
 mariadb <BOT_DB from server.conf> -e "SELECT day, sampled_minutes, discord_minutes, steam_minutes FROM uptime_daily ORDER BY day DESC LIMIT 7"
 mariadb <BOT_DB from server.conf> -e "SELECT job, schedule, last_started_at, last_result, last_detail, next_run_at FROM job_status"
+```
+
+and, since PR 11, the record of its posts (the root README, "Posts"): each source's baseline and last good read, what
+it found, its messages, each server's delivery of each kind, and the lobby samples, one every 5 minutes. Every
+notification run's detail says what it did. A message that stays `sending` or `in_doubt` is looked for in its channel's
+messages at the next run once it's a minute old, or 5 minutes for one of the bot's own run that wasn't settled, and
+settled from what's found. One the bot can't look for, as in a channel where it lacks Read Message History, stays
+`in_doubt` for up to three runs, or up to an hour while Discord doesn't answer the read, and longer when more channels
+don't, since past the hour each run's look ends at its second read with no answer (longer still while Discord has
+answered none of the bot's posts and reads since the post was tried, up to the kind's time limit: in an outage, or in a
+channel that alone doesn't answer when its post was the bot's last for a while), and then ends `unconfirmed`, never sent
+again, with a `posts.unconfirmed` event, which is the one to look for. Watch too for a `missing_permissions`
+refusal in a server that got posts before: the bot posts nothing where its copy of the server says a permission is
+missing, where it used to try and let Discord refuse, and its copy works the permissions out as Discord does, apart from
+a timeout of the bot's member.
+
+```bash
+mariadb <BOT_DB from server.conf> -e "SELECT source, reason, item_count, taken_at, checked_at FROM notification_baseline"
+mariadb <BOT_DB from server.conf> -e "SELECT source, state, COUNT(*) FROM notification_seen GROUP BY source, state"
+mariadb <BOT_DB from server.conf> -e "SELECT state, COUNT(*) FROM notification_deliveries GROUP BY state"
+mariadb <BOT_DB from server.conf> -e "SELECT guild_id, source, state, reason, message_id, http_status, discord_code FROM notification_deliveries ORDER BY id DESC LIMIT 20"
+mariadb <BOT_DB from server.conf> -e "SELECT guild_id, source, state, attempted_at, checks, TIMESTAMPDIFF(MINUTE, attempted_at, UTC_TIMESTAMP(3)) AS minutes_old FROM notification_deliveries WHERE state IN ('sending', 'in_doubt')"
+mariadb <BOT_DB from server.conf> -e "SELECT guild_id, source, last_sent_at, failures, failing_since, last_reason, next_try_at FROM guild_delivery_status"
+mariadb <BOT_DB from server.conf> -e "SELECT minute, steam_answered, lobbies, players FROM lobby_samples ORDER BY minute DESC LIMIT 6"
+mariadb <BOT_DB from server.conf> -e "SELECT at, detail FROM bot_events WHERE kind = 'posts.unconfirmed' ORDER BY id DESC LIMIT 5"
 ```
 
 `rollback.sh` puts its tags back when Compose never replaced the container: "Compose didn't recreate the <service> on
@@ -638,7 +664,7 @@ what shows in Discord: the direct messages, the status text and the silent test 
 | 11 | `./request.sh status.set --text "Live check of PR 9"` | the bot's profile shows it; a direct message |
 | 12 | `./request.sh bot.restart` | a direct message; back on Discord within 2 minutes, or up to 6 when a notification run had just started, which the restart lets end; the settings still paused; the profile still shows the text; a "Posts paused" event on the Bot page, "still paused since ...", at the start |
 | 13 | `./request.sh bot.restart` again, at once | refused by the limit: "The bot takes this at most once every 10 minutes, and last took one at ...". The limit comes before the 5 minutes since a start, whose refusal the tests prove |
-| 14 | `./request.sh posts.resume` | done; a direct message; the next notification run posts what waited since step 12's restart, which lost what the paused runs found before it |
+| 14 | `./request.sh posts.resume` | done; a direct message; the next notification run posts what waited since step 12's restart, which lost what the paused runs found before it. Since PR 11 a restart loses nothing a paused run found: the next run posts all of it |
 | 15 | `./request.sh status.set` | back to "Playing Murder Miners on my PC"; a direct message |
 | 16 | `./request.sh guild.leave --guild <a throwaway server>` | the bot leaves; the servers page shows "left on dashboard request N"; a direct message |
 | 17 | `./status.sh --check`, and the Bot page | the new events show by their labels, such as "Posts paused" and "Posts resumed"; "Message sent to the owner" rows show request numbers and no names |
@@ -684,7 +710,7 @@ when it's older. What a press's answer is since PR 10b, and what still needs car
 | 10 | Optional: set a status text, then Back to the default status at once | Discord shows each. A status text shows in every server and outlasts restarts and rollbacks, and Back to the default needs no fresh sign-in: the check isn't over until Controls says "Discord shows the default status, ..." |
 | 11 | Optional: sign in from a second browser or a phone, then on the first, Sessions, End it | in the second browser, a link or a reload goes on to Discord's Authorize screen, where not authorizing is fine, a button that changes something or asks the bot, such as Clear the caches, lands on "Your session ended", Sign out goes to the home page, and a search or a filter seems to do nothing ("What to know"); Changes to sessions shows "Ended a session" |
 | 12 | Audit log | each request reads "Sent to the bot", with a "Bot request N" link to its page and the bot's answer there |
-| 13 | Optional, only if a pending armor that was never approved should be approved, and only once the Bot page shows a notification run that started after step 7's Started event, not one the restart let end, since the bot's first run after a start only notes the approved armor it finds, and armor approved before that run is never posted: Approve it | the page says the bot was asked to clear its armor-name cache, and its box says done; Announce now posts the armor within seconds |
+| 13 | Optional, only if a pending armor that was never approved should be approved, and only once the Bot page shows a notification run that started after step 7's Started event, not one the restart let end, since the bot's first run after a start only notes the approved armor it finds, and armor approved before that run is never posted (so with a bot from before PR 11; since PR 11 the first run after a start posts armor approved while the bot was down): Approve it | the page says the bot was asked to clear its armor-name cache, and its box says done; Announce now posts the armor within seconds |
 | 14 | Leave | skipped unless there's a throwaway server, as in PR 9's |
 | 15 | `./status.sh --check`, Controls, and the logs since the new run's start | clean, though it reads neither the pause nor the status text, so it proves neither undo: Controls says "Posts aren't paused." and "Discord shows the default status, ...", or `mariadb <BOT_DB from server.conf> -e "SELECT posts_paused, status_text IS NULL FROM bot_settings WHERE id = 1"` gives 0 and 1; and each of the counts below is 0 |
 
@@ -702,25 +728,28 @@ before that start. They aren't faults, and `--since` leaves them out.
 
 ### A restart from the dashboard
 
-A restart costs posts, so the dashboard's Restart the bot is pressed only like this, which is how PR 10's live check
-restarted the bot. The bot's jobs, cron and nginx's log go by the server's Eastern time; the dashboard's and the
-database's times are UTC, as `date -u` gives the server's.
+A restart cost posts before PR 11, and still does with an older bot that `./rollback.sh bot` put back, so the dashboard's
+Restart the bot is pressed only like this, which is how PR 10's live check restarted the bot. The bot's jobs, cron and
+nginx's log go by the server's Eastern time; the dashboard's and the database's times are UTC, as `date -u` gives the
+server's.
 
 1. **The owner's yes, on these costs:**
-   - New and updated maps, approved armor and new lobbies that come between the notification job's last read and the
-     new run's first run are never announced: the bot's first run after a start only notes what it finds.
-   - An update of a map posted since the bot's last start, still in its 24-hour cooldown, is lost, and the cooldown
-     forgotten.
-   - Everyone else who approves armor holds off too: the admins, and approvals on the website.
+   - Since PR 11 a restart loses no post: what the bot found and hasn't posted waits in MinerBot's database, and the new
+     run's first run posts it, with armor approved meanwhile and maps updated meanwhile, and the maps' cooldown is kept.
+     A lobby that opened and closed during the restart isn't posted. With an older bot, as after `./rollback.sh bot`,
+     new and updated maps, approved armor and new lobbies that come between the notification job's last read and the
+     new run's first run are never announced, as its first run after a start only notes what it finds; an update of a
+     map in its 24-hour cooldown is lost, and the cooldown forgotten; a lobby can be announced again; and everyone else
+     who approves armor holds off too: the admins, and approvals on the website.
    - The bot is off Discord about 2 seconds, and commands used then get no answer.
    - A start renews the Steam token once.
-   - A lobby can be announced again.
-   - Rarely the bot doesn't come back (a deleted webhook, or Discord's API failing at the start), and it stays down
-     until the owner approves a fix, so the owner stays reachable.
+   - Rarely the bot doesn't come back (Discord's API failing at the start), and it stays down until the owner approves a
+     fix, so the owner stays reachable. The current bot no longer makes the webhook call that a deleted webhook failed,
+     but `./rollback.sh bot` puts back an image that does.
 2. **Not at these times, Eastern:** 02:28 to 02:36, when cPanel's nightly update restarts MariaDB and Docker at about
-   02:31; 04:20 to 04:31, the members count and the clean-up; 05:45 to 05:58, the nightly `./status.sh --check`; and
-   11:58 to 12:02, the Steam token's renewal. In UTC that's 07:28 to 07:36, 09:20 to 09:31, 10:45 to 10:58 and 16:58 to
-   17:02 in winter, and an hour earlier in summer.
+   02:31; 04:20 to 04:36, the members count and the two clean-ups; 05:45 to 05:58, the nightly `./status.sh --check`;
+   and 11:58 to 12:02, the Steam token's renewal. In UTC that's 07:28 to 07:36, 09:20 to 09:36, 10:45 to 10:58 and 16:58
+   to 17:02 in winter, and an hour earlier in summer.
 3. **Before:** `./status.sh` shows the bot healthy, and its restart count is noted; nothing is waiting, and posts aren't
    paused; no deploy or rollback runs; and no restart was claimed in the last 10 minutes.
 4. **Sign in fresh at A,** the time of the audit log's sign-in row. M is the first five-minute mark with M - 110 s at or
@@ -728,7 +757,8 @@ database's times are UTC, as `date -u` gives the server's.
    with this one claimed at A + 5:00 or later, no later press in that session can restart the bot again. In a live
    check, if A + 14:30 leaves no room for its step 8, sign in again before pressing anything.
 5. **Between M - 150 s and M - 110 s, press Run the notification job now.** Go on only with its box Done, "The
-   notification job ran in N s." (not still running), Steam logged on, and no new failure line in the bot's log.
+   notification job ran in N s." (not still running), Steam logged on, and no new failure line in the bot's log since
+   the press, counted for an older bot as step 9 says.
 6. **Press Restart the bot once,** typing `restart` without Enter, by M - 45 s and never before A + 5:00. If that moment
    has passed, press nothing: let M's run end, and start again at 5.
 7. **Back** means all of these: the restart's row in `bot_commands` is done, with `claimed_at` set; `bot_status` is on
@@ -739,18 +769,27 @@ database's times are UTC, as `date -u` gives the server's.
    - Refused, failed, expired, "Not sure it happened", the dashboard's own "can't tell whether it was sent", "Not sure
      it was saved" or "Too many requests", nginx's own "restarting or stopped" page, or no request at all: the cycle
      ends there, whatever the page says about sending it again. The bot's refusal while a notification run is under
-     way says to try again in a minute, and so does nginx's page, whose reload sends the press again, but a press a
-     minute later lands just after the mark's run, and the new run's first run only notes what it finds, which loses
-     about 4 more minutes of posts. If nothing restarted, tell the owner approvals can resume; to try again, start a
-     new cycle at 4, before a later mark.
+     way says to try again in a minute, which since PR 11 loses nothing, and so does nginx's page, whose reload sends
+     the press again. If nothing restarted, tell the owner approvals can resume where they were held; to try again,
+     start a new cycle at 4, before a later mark.
    - Still queued at M: press nothing, and keep approvals held until it expires or the new run's first run.
    - Two or more restarts, or not back within 6 minutes: press nothing. Read `docker inspect -f` and the counts, and ask
      the owner for one named command: `docker start` if it exited, `docker restart` if it hangs, `docker stop` to
-     contain a loop. For a deleted webhook, `./fill-secrets.sh` and the recreate it prints.
-   - Never `./rollback.sh bot` or a deploy: the previous image makes the same webhook call.
+     contain a loop. A deleted webhook stops only an older image's start: the current bot no longer makes this call,
+     but `./rollback.sh bot` puts back an image that does, which then needs `./fill-secrets.sh` and the recreate it
+     prints.
+   - Never `./rollback.sh bot` or a deploy: the current bot no longer makes the webhook call, but `./rollback.sh bot`
+     puts back an image that does, and a deploy changes far more than a restart.
    - Discord back but Steam not logged on 2 minutes after the start: tell the owner, and don't restart again.
-9. **Approvals resume** once the new run's first notification run is ok, with a NULL detail and no failure line: its
-   row in `job_runs` has the new `run_id` and started after the Started event.
+9. **Approvals resume**, where they were held, once the new run's first notification run is ok, with no failure line: its
+   row in `job_runs` has the new `run_id`, started after the Started event, and a detail that says what it did, such as
+   `nothing new to post`, as every run's has since PR 11; an older bot's is NULL. An older bot writes its notification
+   job's failures with no log level, which a count of levels, as PR 10's step 15 makes, misses, so for one, no failure
+   line means item 3's count in "PR 11's bot deploy", from that run's mark once it's over, gives 0:
+   `docker logs --since <its mark in UTC> minerbot-bot 2>&1 | grep -c "^Couldn't"`. When it doesn't, that run may not
+   have read the armor, and an older bot takes its baseline of armor, with what's approved by then as posted, at its
+   first run that does. Approvals then stay held until a run of it that read the armor is over: from that run's mark,
+   `docker logs --since <its mark in UTC> minerbot-bot 2>&1 | grep -c "^Couldn't read the armor list"` gives 0.
 10. **The words:** Queued, then "Done at ...: The bot is restarting. It's usually back within a minute.", then "Back on
     Discord at T, N s after the request: its new run started at R." once the bot has written its record of the new
     run's connection, or until then "Back on Discord by T: its new run started at R.", and "The owner was sent a direct
@@ -796,11 +835,147 @@ the requests it sends are its cache clears and the usual message about each sign
 | 3 | Sign out in a second tab, then press Clear the caches in the first | "Your session ended"; nginx logs a POST 303, then a GET 200. Its link, Sign in again with Discord, signs in, with one sign-in message, and returns to `/admin/bot/controls`. The audit log, read then, has nothing for the press: after the sign-out's "Signed out" come only that sign-in's "Signed in" and "Asked the bot to tell the owner about a sign-in", the request for its message |
 | 4 | Nothing to press | the restart's new words need no restart here: the tests cover them. The next real restart's box should say "Back on Discord at ..." with the time of the bot's `discord.connected` event for its new run |
 
+### PR 11's bot deploy
+
+PR 11 changes the bot: it keeps the record of its posts in MinerBot's database (the root README, "Posts"), with
+switches for each server, posts again where a post failed, samples the open lobbies, tells the owner about new armor
+submissions, and fixes what the live checks found: a restart's minute counted as down, "Back on Discord" a few seconds
+late, the webhook client that could stop a start, and the owner's failed messages recorded without Discord's code. It
+also ships PR #33's website feed, which the bot step starts. It's deployed in two steps: step A, the bot, first, so its
+first runs are watched alone, then step B, the dashboard with `--only dashboard`, once they look right.
+
+Before, read only, each with the owner's yes:
+
+1. `./status.sh --check` is clean, the Bot page shows the live bot's notification runs `ok`, and posts aren't paused:
+   `mariadb <BOT_DB from server.conf> -e "SELECT posts_paused FROM bot_settings WHERE id = 1"` gives 0 or no row. The
+   swap loses what a paused older bot holds.
+2. PR #33's three tables and the bot's website login's rights on them, read as "The website feed's rights" says, from
+   `information_schema` and never `SHOW GRANTS`, and the owner's go-ahead to ship the feed with this step.
+3. M, the five-minute mark of the notification run that step A follows: at a quiet hour, never at the times "A restart
+   from the dashboard" step 2 names. Step A starts between M + 30 s and M + 2 min, once the Bot page shows the run at M
+   ended `ok` and the bot's log has no failure line since M:
+   `docker logs --since <M in UTC, such as 2026-11-26T19:05:00Z> minerbot-bot 2>&1 | grep -c "^Couldn't"` gives 0. The
+   old bot writes its notification job's failures, such as `Couldn't read the armor list for notifications` and
+   `Couldn't send the notifications yet, because Discord hasn't sent the bot's servers`, with no log level, so a count
+   of `warn` and `fail` lines misses them. The old bot posts what a run read only at that run's end, and its stop
+   doesn't wait for a run under way, so an approval the run at M didn't post, because it was cut off, couldn't read the
+   armor, found Discord hadn't sent the bot's servers or could send it to no server, would never be posted: the new
+   bot's baseline takes it as posted. If the run at M hasn't ended `ok` by M + 2 min, or that count isn't 0, start
+   nothing, and pick a later M. The swap comes about a minute after the start, well before M + 5: PR 9's deploy, which
+   also built both images, dumped and migrated, swapped the bot about 40 seconds in.
+4. Approvals held, by everyone who approves armor, from M - 1 min, so the run at M reads every approval made before the
+   hold, until the deploy ends with `RESULT ok` and a notification run of the new bot says it took the first baseline of
+   armor, as `took the first baseline of armor, maps and lobbies ...` does: normally the run at M + 5, about 6 minutes
+   in all, later when Discord hasn't sent the new bot its servers by then. The old bot's stop loses what was approved
+   after its last run read the armor, and that baseline posts nothing and takes what's approved by then as posted. A run
+   before it can be `ok` without one, as one that says Discord hasn't sent the bot's servers yet, so go by the detail.
+   Wait for `RESULT ok` too: the deploy checks that the new bot still runs 20 seconds after it's ready, and puts the bot
+   from before back if it stopped or restarted, so a baseline the new bot takes in those seconds can be followed by a
+   put-back. Once the hold is over, a restart loses no post; only a swap between an older bot and a newer one still can,
+   as "To back out" below says. When step A doesn't start, as item 3 says, or stops before its swap, nothing restarted,
+   and approvals resume at once. When its swap is put back, as `... so it's back on <rev>, which is ready.` says, even
+   after a run of the new bot took its baseline, the bot from before started again, and its first notification run after
+   a start only notes what it finds, so approvals stay held until that run is over, or longer when it logged a failure,
+   as step 9 of "A restart from the dashboard" says and counts for an older bot: its run has a NULL detail.
+
+Then `./deploy.sh <commit> --only bot`. It installs the deploy files, builds both images, the dashboard's because it
+runs the migration, takes the pre-deploy dump, runs migration 0005 with the bot's login (eight tables, and
+`posting_run_id` on `bot_status`), applies no rights, and swaps the bot. The dashboard stays on its image, which is safe
+beside the new bot: it reads none of the new tables, can't write the switches, shows the new event kinds and jobs by
+their stored names, and its Sessions page notes migration 5 as newer than its own.
+
+Watch at least three runs on the Bot page, then the queries under "the record of its posts" above:
+
+| When | Expect |
+|---|---|
+| the first notification run | `took the first baseline of armor, maps and lobbies (N, N and N items) and posted nothing`, its maps read 20 deep; three `posts.baseline` events; no row in `notification_deliveries` |
+| the first run of the new-submission alerts, 2 minutes past | `took N pending submissions as seen, and every armor up to ID N as known, so no message went`, and no direct message |
+| the next notification runs | `nothing new to post`, or what was really new, such as `1 armor: posted in 5 of 5 servers`; with a server that refuses, as below, `1 armor: posted in 4 of 5 servers, 1 failed`, then `nothing new; 1 item still waits for 1 server` in the runs between its tries |
+| every 5 minutes | a new row in `lobby_samples` |
+| the first night, 04:33 Eastern | the post records clean-up's run, `deleted 0 post records, ...; totalled N days` |
+| always | no `posts.unconfirmed` event, and no `sending` or `in_doubt` row older than the waits above allow; the swap's minute up on the Bot page's strip |
+| the logs | no "Webhook Attached", which only the old start printed, no unhandled exception, and the feed's `website` warnings only as "The website feed's rights" says, kept apart with `grep -F 'website'` |
+
+A server whose setting names a channel that isn't one of its text channels gets `no_channel` refusals: each run that
+tries it counts it as failed, the runs between its tries say what still waits for it, for up to 7 days for an armor,
+and once step B is done the Overview's "posts keep failing" banner counts it. One whose lobby setting names a voice
+channel gets `sent` rows if that channel's chat takes posts. Neither is the deploy's fault.
+
+The live check, from Discord and the pages the dashboard has now. Each step acts on the live bot, so each needs the
+owner's yes first: step 1's approval posts that armor in every server with armor posts on, which can't be taken back,
+so the owner picks the armor, and its restart stops the bot; step 2 sends the owner direct messages and leaves two armor
+rows.
+
+| # | Do | Look for |
+|---|---|---|
+| 1 | At least 5 minutes after the swap, at R + 1, where R is the five-minute mark of a run that has just ended, approve one of the armors pending since 4 November on its review page, then before R + 4 press Restart the bot on Controls once, with a sign-in from the last 15 minutes and `restart` typed. The bot refuses it in a start's first 5 minutes and during a run, and step 8 of "A restart from the dashboard" says what to do when a press goes wrong | the bot back within a minute; the first run after the start posts the armor once in every server with an armor channel, its detail such as `1 armor: posted in 5 of 5 servers`, any failed one a server the queries above show refusing; the next run posts nothing more; one message in each of two or three servers' armor channels, and among the watch's latest `notification_deliveries` rows one `sent` armor row for each server it posted in, where two would be a post twice. The old dashboard may say the bot won't post it: that's its old rule, and the post proves the new one |
+| 2 | Optional: submit a test armor on the website's form; once its direct message has come, submit a second | the first one's direct message within 5 minutes; for the second, no message, and the next alert run's detail says `1 new submission waits for the hourly message (the last try was at HH:mm UTC)`. Two sent in before the same run share its one message, which shows nothing of the hour. Reject both test armors afterwards; they stay in the armor table as Not Approved, since nothing deletes armor, so skip this to keep the table clean, and check with the next real submission |
+
+To back out once the bot's swap completed, which the deploy's last `RESULT` line and `./status.sh` tell, as "Undoing a
+deploy" says, `./rollback.sh bot` puts back the bot from before without touching the database. After a step A that
+stopped before its swap, or whose swap was put back, there's nothing to undo: `./rollback.sh bot` would put live the
+image before that one, PR 7's, from before PR 9, which posts while posts are paused and lets the requests expire.
+Approvals then resume as item 4 above says. The bot from before ignores the switches, records no posts, keeps what it
+finds only in memory, needs a valid `WEBHOOKCHANNEL`, and its first run is a baseline. A later deploy forward needs
+nothing by hand: the new bot sees the older bot's runs in `job_runs` and takes a new baseline, keeping what still waits.
+Each of these two swaps loses an armor approved between the last run before it and the first run after it, which that
+run's baseline takes as posted, so hold approvals over each, and time each, as for step A, until it ends with
+`RESULT ok` and the bot it swapped in has taken its baseline: after the rollback, once the older bot's first
+notification run is over, ok with a NULL detail and no failure line (item 3's count from that run's mark,
+`docker logs --since <its mark in UTC> minerbot-bot 2>&1 | grep -c "^Couldn't"`, gives 0), as step 9 of "A restart from
+the dashboard" reads it, or later when that count isn't 0, as that step says; after the deploy forward, once a run of
+the new bot says it took a new baseline of armor, as `took a new baseline of armor, maps and lobbies ...` does. Read the
+new bot's first run's detail all the same: a run of the older bot that was cut off, or whose row never reached the
+database, escapes the new bot's check of `job_runs`, and the new bot may then post again what it posted. So may a map
+that still waited for a server at the rollback, if the older bot then posted an update of it there: the new bot keeps
+what waits, and posts it there once more. Never roll back while posts are paused. Migrations are never undone, and the
+new tables do no harm to the older image.
+
+### PR 11's dashboard deploy
+
+The same day or later, once the bot's first runs look right, with the owner's go-ahead, at a quiet hour:
+`./deploy.sh <commit> --only dashboard`, the same commit, then `./status.sh --check`, which should be clean.
+It applies the dashboard's rights first, which PR 11 widens with `SELECT, INSERT, UPDATE` on `guild_settings` and `SELECT`
+on the four tables of the bot's record ("The database rights"), then swaps the dashboard; the bot isn't touched. The
+Sessions page's rights check should then say the login has exactly the rights this version uses, and its structure check
+"migrations 1 to 5". Its pages now say what the current bot does: what a pause holds and what the bot hasn't posted wait
+across a restart, and Announce now is offered until the bot has found the armor. While an older bot runs, as after
+`./rollback.sh bot`, the Overview says so in a banner, and the review page keeps that bot's Restarted and Stopped lines.
+A server that refuses, as under the bot's deploy, is counted in the Overview's "posts keep failing" banner once 3 tries
+in a row have failed.
+
+The live check, Part B. Steps 2 and 3 change a server's switches, and step 2 approves an armor, which posts it in the
+other servers: each with the owner's yes first, and the owner picks the armor.
+
+| # | Do | Look for |
+|---|---|---|
+| 1 | Servers, the 24kConnect server's page | "Its recent posts" lists Part A's armor post, and its Open it in Discord opens it; the armor's Last post says when it was posted, with the same link. The armor's review page lists it under Where it was posted, with a link for each server, and has no Back to pending: its place says how many servers it was posted in, and Take down is offered |
+| 2 | On the same server's page, untick Armor posts and Save switches | "Saved. MinerBot uses these switches from its next notification run, within 5 minutes."; the audit log's "Changed a server's switches", with Armor posts on before and off after; Switched off on both servers pages. Approve another genuine pending armor: within 5 minutes every other server with armor posts on gets it, this server gets none, and the run's detail counts one server fewer than step 1's, where a server that refuses counts only in a run that tries it. If no pending armor is left, switch lobby posts off instead and wait for a new lobby |
+| 3 | Tick again every switch step 2 turned off, and save | the next runs post nothing old there: what the bot found while it was off isn't posted later |
+| 4 | Optional, only if an admin is listed | an admin sees the switches without the form, and a POST of theirs is refused and recorded; skipped unless the owner says an admin is listed |
+
+To back out once the dashboard's swap completed, as "Undoing a deploy" says, `./rollback.sh dashboard` puts back the
+dashboard from before; after a step B that stopped before its swap, or whose swap was put back, there's nothing to
+undo, and it would put PR 10's dashboard live, without PR 10b's fixes. The switches stay in force, since the bot reads
+them, but that dashboard can't show or change them. The first line below lists the servers with a kind switched off,
+with their names as the bot's copy has them; to turn a kind on again without that dashboard, with the owner's yes, run
+the second for armor, with `maps_on` or `lobbies_on` in place of `armor_on` for maps or lobbies. It leaves the other
+kinds as they are, and the audit log has nothing of it:
+
+```bash
+mariadb --default-character-set=utf8mb4 <BOT_DB from server.conf> -e "SELECT s.guild_id, g.name, s.armor_on, s.maps_on, s.lobbies_on, s.changed_at FROM guild_settings s LEFT JOIN guilds g ON g.guild_id = s.guild_id WHERE s.armor_on = 0 OR s.maps_on = 0 OR s.lobbies_on = 0"
+mariadb <BOT_DB from server.conf> -e "UPDATE guild_settings SET armor_on = 1, version = version + 1, changed_at = UTC_TIMESTAMP(3) WHERE guild_id = <server ID>"
+```
+
+That dashboard's Sessions page notes the rights it doesn't use and the newer migration, which do no harm.
+
 ### What to know
 
 - **One bot per database.** The bot counts a limit from `bot_commands`, then takes the request in a second statement,
   so two bot processes on one database, such as a developer's run against the live one, could each take one request
-  past a limit, and a restart may stop the other process. Each request is still acted on once.
+  past a limit, and a restart may stop the other process. Each request is still acted on once. Since PR 11 the two
+  would share the record of posts too: each message is claimed before it's sent, so none is sent twice, but the two
+  would split the posts between them. Never run a second bot on the live `BotConnection`.
 - **A bot rolled back** to an image from before PR 9 doesn't read `bot_settings`, so it posts while posts are paused,
   and leaves the requests to expire.
 - **A deploy that finds the bot already on its image** only checks that it's ready again, without recreating it. A
@@ -816,17 +991,20 @@ the requests it sends are its cache clears and the usual message about each sign
   a row dated years ahead by a writer without the key, which the bot refuses, still goes. The dumps hold the requests,
   so a restore brings them back as they were dumped, which only each one's expiry keeps from being acted on.
 - **What a restart leaves:** the Stopping and Started events, and the owner's direct message; the channel copy
-  rewritten and the commands registered again, as at every start; on the Bot page's uptime, the restart's minute as a
-  whole minute down on Discord and Steam, since the new run's first sample replaces the old run's for that minute, until
-  a fix to the bot (PR 11); `./status.sh` showing the bot with "1 restarts" until a deploy that swaps the bot,
-  `./rollback.sh bot` or setup's recreate makes a new container, which isn't a fault, as `--check` doesn't read it;
-  possibly a lobby announced again or one missed, which nothing records; and the maps' cooldown forgotten.
+  rewritten and the commands registered again, as at every start; `./status.sh` showing the bot with "1 restarts" until
+  a deploy that swaps the bot, `./rollback.sh bot` or setup's recreate makes a new container, which isn't a fault, as
+  `--check` doesn't read it. Since PR 11 the restart's minute stays up on the Bot page's uptime when the run before
+  sampled it up, or when the new run connects within it, and nothing waiting to be posted is lost, nor the maps'
+  cooldown: a post Discord took just as the bot stopped is looked for in its channel before it's sent again. With an
+  older bot, the restart's minute is a whole minute down on Discord and Steam, a lobby can be announced again or missed,
+  which nothing records, and the maps' cooldown is forgotten.
 - **A pause or a status text outlasts a rollback,** and every restart, since both are kept in `bot_settings`, and a
   dashboard from before PR 10 can neither show nor undo either. After any rollback, read `mariadb <BOT_DB from
   server.conf> -e "SELECT posts_paused, status_text IS NULL FROM bot_settings WHERE id = 1"`: 0 and 1, or no row, mean
   posts aren't paused and Discord shows the default status. Otherwise, unless the owner wants it kept, and with their
-  yes: `./request.sh posts.resume`, or `./request.sh status.set` with no text. Never restart or redeploy the bot while
-  posts are paused: that loses what the pause holds.
+  yes: `./request.sh posts.resume`, or `./request.sh status.set` with no text. Since PR 11 what the pause holds is in
+  MinerBot's database, so a restart or a deploy of the bot keeps it; but never roll the bot back while posts are paused,
+  as the older bot keeps what it finds only in memory, and a restart of it loses that.
 - **A press's answer has an address of its own** since PR 10b. Controls, a server's page and its leave, the armor
   review and the blacklist's add page answer a press with a redirect, but for a form that had expired, was incomplete
   or names something that's gone, which gets the same answer however often it's sent: a press that was sent or done
@@ -1082,7 +1260,8 @@ How the file grows. The approved plan's list is the ceiling:
 | The server channels page | `INSERT, UPDATE (armor_channel_id, map_channel_id, lobby_channel_id, announcements_channel_id)` on `ihvph_discord_servers`, whose `SELECT` PR 8 gave |
 | PR 9, the bot's requests | `SELECT` and an `INSERT` of the eleven request columns on `bot_commands`, so a request's state, run, times, result and direct message start empty and only the bot's own login writes them; `SELECT` on `bot_settings`, which only the bot writes |
 | PR 10, the controls and the Sessions page | `SELECT` on `schema_version`, each migration's number, name, checksum and time, which only the migrations write, for the Sessions page's check of MinerBot's database structure |
-| The dashboard's switch and note tables | `SELECT, INSERT, UPDATE, DELETE` on the dashboard's switches and notes, each in the PR that creates the table |
+| PR 11, switches and delivery health | `SELECT, INSERT, UPDATE` on `guild_settings`, each server's switches, which the owner saves; no `DELETE`, since only the bot deletes a server's row, when the server removes MinerBot. `SELECT` on `notification_deliveries`, `guild_delivery_status`, `notification_queue` and `notification_seen`, the record of the bot's posts, which only the bot writes |
+| The dashboard's note tables | `SELECT, INSERT, UPDATE, DELETE` on the dashboard's notes, in the PR that creates the table |
 
 ## The website feed's rights
 
@@ -1106,9 +1285,20 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON `<sitedb>`.`mmh_feed_state` TO '<botlogi
 - The order doesn't matter to the bot. Until the tables are there, and the rights with them, each feed logs one warning,
   with MariaDB's error 1146 for a missing table or 1142 for a missing right, and the bot runs as ever. It tries again
   at least once every 5 minutes, so it starts writing without a restart, and logs one line for each feed when it does:
-  `docker logs --since 10m minerbot 2>&1 | grep -F 'website'`.
-- To check what the login holds, never `SHOW GRANTS`, which prints the password's hash:
-  `SELECT GRANTEE, TABLE_NAME, PRIVILEGE_TYPE FROM information_schema.TABLE_PRIVILEGES WHERE TABLE_SCHEMA = '<sitedb>' AND TABLE_NAME IN ('mmh_feed_lobbies', 'mmh_feed_maps', 'mmh_feed_state');`
+  `docker logs --since 10m minerbot-bot 2>&1 | grep -F 'website'`.
+- To check, as root, whether the tables are there and what the login holds on them, never with `SHOW GRANTS`, which
+  prints the password's hash: the tables first; then the rights on the whole database, which is how cPanel gives them,
+  where `TABLE_SCHEMA` shows the database as its grant names it, with each `_` as `\_`; then the rights on the tables
+  themselves, as the statements above give them. The login needs `SELECT`, `INSERT`, `UPDATE` and `DELETE` on both its
+  hosts, by the second query or the third, so an empty answer from the third alone says nothing. Once the feed writes,
+  the last query shows each feed's last good write in `ok_at`:
+
+  ```sql
+  SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = '<sitedb>' AND TABLE_NAME IN ('mmh_feed_lobbies', 'mmh_feed_maps', 'mmh_feed_state');
+  SELECT GRANTEE, TABLE_SCHEMA, PRIVILEGE_TYPE FROM information_schema.SCHEMA_PRIVILEGES WHERE '<sitedb>' LIKE TABLE_SCHEMA;
+  SELECT GRANTEE, TABLE_NAME, PRIVILEGE_TYPE FROM information_schema.TABLE_PRIVILEGES WHERE TABLE_SCHEMA = '<sitedb>' AND TABLE_NAME IN ('mmh_feed_lobbies', 'mmh_feed_maps', 'mmh_feed_state');
+  SELECT feed, checked_at, ok_at, item_count FROM `<sitedb>`.mmh_feed_state;
+  ```
 - To stop the feed's writes without a deploy, take the rights away again, with `REVOKE` in place of `GRANT` and `FROM`
   in place of `TO`. The pages then show their feeds as behind, by `ok_at`.
 - The website owns the tables' structure. A change to it is made in the website's migration first, then copied to
@@ -1166,7 +1356,7 @@ can reach the client as several, and anyone who can make one in MinerBot's datab
 
 1. `./backup.sh manual`, a dump of the current state first.
 2. `docker compose stop dashboard bot`: the bot writes its status and history in this database too. Don't run
-   `./setup-dashboard.sh` before step 6: it starts a stopped dashboard.
+   `./setup-dashboard.sh` before step 8: it starts a stopped dashboard.
 3. `gzip -t <file>`; `gzip -dc <file> | tail -n 1` must show `-- Dump completed`; and
    `gzip -dc <file> | grep -c '^DELIMITER'` must print 0. A `DELIMITER` line means the dump holds a trigger, event or
    routine, which no migration makes: never restore that dump, as anyone. Look at it with `gzip -dc <file> | less`,
@@ -1195,12 +1385,34 @@ can reach the client as several, and anyone who can make one in MinerBot's datab
    This replaces each table in the dump, and prints nothing when it works. If MariaDB refuses the login as it connects
    (ERROR 1045, with no "at line"), its password was changed outside `bot.env`: find out why before anything else.
 6. If step 4 showed fewer migrations in the dump than in the live database, the restore took them back. Either migrate
-   again, from the commit the dashboard runs (`./status.sh` shows it), since every migration can run twice:
-   `./deploy.sh <that commit> --only dashboard --no-start`, which builds, dumps and migrates, and swaps nothing; or, to
-   undo the last dashboard deploy's migration, `./rollback.sh dashboard`, which goes back to the image from before that
-   deploy. Then `docker compose up -d --no-build --no-deps dashboard bot`, then `./status.sh`. The dump's status row
-   is the one from when it was made, so the bot's first write may record `bot.unclean_end` for that run, which was no
-   crash.
+   again, from the later of the commits the bot and the dashboard run (`./status.sh` shows both), since every migration
+   can run twice, and since PR 11 a `--only bot` deploy brings migrations too: `./deploy.sh <that commit> --only
+   dashboard --no-start`, which builds, dumps and migrates, and swaps nothing; or go back to the images from before the
+   newest migration it took back, with `./rollback.sh` for each service whose commit has it, as "Undoing a deploy"
+   says: for PR 11's migration 5, the bot once its step A is done, and the dashboard too once its step B is.
+   `./rollback.sh` starts the service it swaps, so when the dump has migration 5, do step 7 before it.
+7. If the dump has migration 5, `0005_posting`, the restore took the bot's record of its posts back to the dump too
+   (the root README, "Posts"), so its first run would post again, in every server, what it posted since the dump: the
+   armor approved and the maps updated since, the lobbies still open, what waited then, and a message the dump caught
+   being sent or in doubt, as its look in the channel reads only the two minutes after that try and misses the post the
+   live bot sent again after the dump. With the owner's yes, take that record's baselines away, give up what waited,
+   and record what was being sent as a post that may not have arrived, as the bot does when it can't find out, before
+   the start:
+
+   ```bash
+   mariadb <BOT_DB from server.conf> -e "DELETE FROM notification_baseline; UPDATE notification_queue SET state = 'dropped', reason = 'too_old', settled_at = UTC_TIMESTAMP(3) WHERE state = 'pending'"
+   mariadb <BOT_DB from server.conf> -e "UPDATE notification_queue SET state = 'sent', reason = 'unconfirmed', settled_at = UTC_TIMESTAMP(3) WHERE state = 'sending'; UPDATE notification_deliveries SET state = 'unconfirmed', reason = 'unconfirmed', settled_at = UTC_TIMESTAMP(3) WHERE state IN ('sending', 'in_doubt')"
+   ```
+
+   The first notification run then says `took the first baseline of armor, maps and lobbies ...` and posts nothing it
+   finds, and the new-submission alerts take a new first look, with no message. What was approved, updated or opened
+   just before the restore and not posted by then is never posted, and what the dump caught being sent isn't sent again.
+   An armor taken down, or a map hidden on Steam, before the dump while its posts waited is still posted where it never
+   went once it's approved or shown again, as without a restore. So one the live bot posted there after the dump, and
+   that was taken down or hidden again by the restore, or, for a map, wasn't among the 20 maps that first run read, is
+   posted there a second time.
+8. `docker compose up -d --no-build --no-deps dashboard bot`, then `./status.sh`. The dump's status row is the one from
+   when it was made, so the bot's first write may record `bot.unclean_end` for that run, which was no crash.
 
 ## Tests
 

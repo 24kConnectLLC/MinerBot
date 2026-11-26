@@ -26,8 +26,9 @@ namespace MinerBot.Tests
         [Theory]
         [InlineData(RequestKinds.JobColors, "The colour job ran in 0 s: added colour codes to 2 armor styles.")]
         [InlineData(RequestKinds.SteamRenew, "Steam kept the token, which ends on 2027-01-01.")]
-        [InlineData(RequestKinds.PostsPause, "Posts are paused. New armor, maps and lobbies wait until they're resumed, and then go out. The reason given: `Maintenance`.")]
-        [InlineData(RequestKinds.PostsResume, "Posts are resumed. The next notification run, within 5 minutes, posts what waited.")]
+        [InlineData(RequestKinds.PostsPause, "Posts are paused. New armor, maps and lobbies wait, and go out at the resume unless they waited too long to be news. "
+            + "The reason given: `Maintenance`.")]
+        [InlineData(RequestKinds.PostsResume, "Posts are resumed. The next notification run, within 5 minutes, posts what waited, unless it waited too long to be news.")]
         [InlineData(RequestKinds.StatusSet, "The status text is set. Discord shows it while the bot is connected. The status text: `Back soon`.")]
         [InlineData(RequestKinds.SteamReconnect, "Steam disconnected and logged on again after 3 s.")]
         [InlineData(RequestKinds.GuildLeave, "Left the server. Discord then tells the bot, which deletes the server's channel settings, as when a server removes the bot. The server: `Guild` (ID 2000).")]
@@ -94,11 +95,12 @@ namespace MinerBot.Tests
 
             Assert.Equal((RequestStates.Done, RequestDmStates.Failed), (bot.Row(id).state, bot.Row(id).dm_state));
             Assert.True(bot.Pause.Read().Paused);
-            Assert.Equal("HttpException: request 1: Pause posts, done", Assert.Single(bot.Events(BotEvents.AlertFailed)).Detail);
+            Assert.Equal("HttpException, HTTP 403, Discord 50013: request 1: Pause posts, done", Assert.Single(bot.Events(BotEvents.AlertFailed)).Detail);
             Assert.Empty(bot.Events(BotEvents.AlertSent));
         }
 
-        // A sign-in alert is a message itself, so one Discord refuses is a request that failed, with the failure's type
+        // A sign-in alert is a message itself, so one Discord refuses is a request that failed, with the failure's type and
+        // Discord's numbers
         [Fact]
         public async Task ASignInAlertThatFailsSaysWhy()
         {
@@ -108,7 +110,7 @@ namespace MinerBot.Tests
 
             await bot.TickAsync();
 
-            Assert.Equal((RequestStates.Failed, "The direct message to the owner failed (HttpException).", RequestDmStates.Failed),
+            Assert.Equal((RequestStates.Failed, "The direct message to the owner failed (HttpException, HTTP 403, Discord 50013).", RequestDmStates.Failed),
                 (bot.Row(id).state, bot.Row(id).result, bot.Row(id).dm_state));
         }
 
@@ -156,7 +158,7 @@ namespace MinerBot.Tests
             await bot.TickAsync();
 
             Assert.Equal("Pause posts, asked for on the MinerBot dashboard by `Jane Doe` (Discord ID 4242424242), request 1: Posts are paused. New armor, maps and lobbies "
-                + "wait until they're resumed, and then go out. The reason given: `Maintenance window`.", Assert.Single(bot.Messages()));
+                + "wait, and go out at the resume unless they waited too long to be news. The reason given: `Maintenance window`.", Assert.Single(bot.Messages()));
             Assert.Equal("request 1: Pause posts, done", Assert.Single(bot.Events(BotEvents.AlertSent)).Detail);
             Assert.All(bot.Recorder.PeekEvents(1000), row => Assert.True(row.detail == null || !(row.detail.Contains("Jane") || row.detail.Contains("4242424242")
                 || row.detail.Contains("Maintenance")), row.detail));

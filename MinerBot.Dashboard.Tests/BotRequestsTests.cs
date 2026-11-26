@@ -325,6 +325,8 @@ namespace MinerBot.Dashboard.Tests
 
             public Task<IReadOnlyList<AuditEntry>> LatestChanges(string targetType, IReadOnlyCollection<string> targetIds) => real.LatestChanges(targetType, targetIds);
             public Task<Page<AuditEntry>> ListAudit(AuditQuery query) => real.ListAudit(query);
+            public Task<IReadOnlyList<DateTime>> ListActionTimes(ulong actorId, string action, IReadOnlyCollection<string> outcomes, DateTime from, int take) =>
+                real.ListActionTimes(actorId, action, outcomes, from, take);
         }
 
         // The real queue, whose transactions commit and then time out, as a commit whose answer never came

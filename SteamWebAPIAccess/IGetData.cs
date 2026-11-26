@@ -30,6 +30,10 @@ namespace SteamWebAPIAccess
         ulong GetSteamID3To64(uint steamID3);
         Task<List<SteamMatchmaking.Lobby.Member>> GetUsersInLobby(ulong lobbyID);
         Task<PublishedFileDetailsModel?> GetWorkshopItem(ulong id);
+
+        // The maps of these IDs that Steam still lists publicly, in one call: a map hidden, removed or banned since isn't
+        // among them. Throws when Steam doesn't answer, which says nothing about the maps.
+        Task<IReadOnlyList<PublishedFileDetailsModel>> GetPublicWorkshopItems(IReadOnlyCollection<ulong> ids);
         void Initilization();
         string InviteUser(ulong lobbyID, ulong userSteamID);
         Task<NetworkSessionProperties> ReadLobbyMetadata(IReadOnlyDictionary<string, string> keyPairs);

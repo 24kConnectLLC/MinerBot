@@ -6,11 +6,11 @@ using System.Globalization;
 namespace MinerBot_2._0.Status
 {
     // Writes what BotRecorder holds to MinerBot's database every 5 seconds: the status row when 30 seconds have passed or a
-    // state changed, then the events, the job runs, the job status and the samples. An item leaves the recorder only once
-    // its write went through. A write that fails keeps everything and waits 30 seconds, then twice as long each time, up to
-    // 5 minutes, with one warning when the failures start and one line when they end. Without BotConnection it writes
-    // nothing at all, and the bot and its health check work as before. Nothing leaves its loop, because an exception there
-    // would stop the whole bot.
+    // state changed, then the events, the job runs, the job status, the samples and the lobby samples. An item leaves the
+    // recorder only once its write went through. A write that fails keeps everything and waits 30 seconds, then twice as
+    // long each time, up to 5 minutes, with one warning when the failures start and one line when they end. Without
+    // BotConnection it writes nothing at all, and the bot and its health check work as before. Nothing leaves its loop,
+    // because an exception there would stop the whole bot.
     public sealed class StatusWriter : BackgroundService
     {
         static readonly TimeSpan StatusEvery = TimeSpan.FromSeconds(30);
@@ -154,6 +154,7 @@ namespace MinerBot_2._0.Status
             }
 
             await WriteBatchesAsync<UptimeSample>(_recorder.PeekSamples, batch => _data.SaveSamples(batch), _recorder.SamplesWritten, BotRecorder.SampleLimit, stop);
+            await WriteBatchesAsync<LobbySample>(_recorder.PeekLobbySamples, batch => _data.SaveLobbySamples(batch), _recorder.LobbySamplesWritten, BotRecorder.LobbySampleLimit, stop);
         }
 
         // The first write of a run reads the row before it writes its own: a row of another run that never stopped cleanly

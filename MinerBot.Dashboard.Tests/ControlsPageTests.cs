@@ -1329,27 +1329,60 @@ namespace MinerBot.Dashboard.Tests
                 + $"again at {TimeWords.Utc(now.AddMinutes(-2))}.", line);
         }
 
-        // What a pause holds lives only in the bot's memory, so a restart loses it, as the README says: the pause's words, the
-        // paused banner and the armor page's line in place of Announce now say so, and the restart's say what to do first while
-        // posts are paused, since the bot refuses the notification job then. The restart's also say it loses what came since
-        // the bot's last notification run, which the first run after a start takes as seen without posting it. Fails if they
-        // promise that what waits goes out whatever happens.
+        // Since PR 11 the bot keeps what a pause holds, and what it hasn't posted, in MinerBot's database, as the README says: the
+        // pause's words, the paused banner and the restart's say what waits goes out, a restart included, and say nothing of a
+        // restart losing it. The armor page's line in place of Announce now says so for that bot, and keeps the words of a bot
+        // that holds them only in memory for an older one, which the Overview's banner names. Fails if the words for the
+        // current bot still say a restart loses what waits.
         [Fact]
-        public void ThePauseAndTheRestartSayARestartLosesWhatWaits()
+        public void ThePauseAndTheRestartSayWhatWaitsOutlastsARestart()
         {
-            Assert.Contains("goes out when posts are resumed, unless the bot restarts first, which loses it.", ControlWords.Of(ControlWords.Pause).Help);
+            Assert.Contains("What it finds meanwhile waits, even across a restart, and goes out when posts are resumed,", ControlWords.Of(ControlWords.Pause).Help);
+            Assert.Contains("What it hasn't posted yet waits and goes out at its first run after the start.", ControlWords.Of(ControlWords.Restart).Help);
+            Assert.DoesNotContain("lose", ControlWords.Of(ControlWords.Pause).Help);
+            Assert.DoesNotContain("lose", ControlWords.Of(ControlWords.Restart).Help);
+            Assert.Contains("the bot posts this armor once they're resumed, even if it restarts first.", ArmorWords.AnnouncePausedKept);
             Assert.Contains("the bot posts this armor once they're resumed, unless the bot restarts first, which loses it.", ArmorWords.AnnouncePaused);
-            Assert.Contains("those a pause holds included, so if any wait, resume posts if they're paused and run the notification job first.",
-                ControlWords.Of(ControlWords.Restart).Help);
-            Assert.Contains("A restart loses the armor, maps and lobbies the bot hasn't posted yet, those that came since its last notification run and",
-                ControlWords.Of(ControlWords.Restart).Help);
 
             var settings = new DataAccessLibrary.Requests.Models.BotSettingsRow { posts_paused = true, updated_at = new DateTime(2026, 11, 21, 10, 0, 0, DateTimeKind.Utc) };
             var facts = new BannerFacts(true, settings, null, null, null, null, null, null);
 
             foreach (var role in new[] { DashboardRole.Owner, DashboardRole.Admin })
-                Assert.Contains("goes out when posts are resumed, unless the bot restarts first, which loses it.",
-                    Assert.Single(RequestBanners.Of(facts, role, settings.updated_at)).Text);
+            {
+                var banner = Assert.Single(RequestBanners.Of(facts, role, settings.updated_at)).Text;
+                Assert.Contains("What the bot finds waits, even across a restart, and goes out when posts are resumed,", banner);
+                Assert.DoesNotContain("lose", banner);
+            }
+        }
+
+        // What a pause holds goes out at the resume only while it's still news, by the bot's own limits, read from its source so
+        // the words can't drift from them: a pause of more than half an hour already loses the lobbies found at its start. Fails
+        // if the pause's or the resume's words, or the paused banner, say that everything found goes out, or name limits other
+        // than the bot's.
+        [Fact]
+        public void ThePauseNamesTheBotsLimitsForWhatWaits()
+        {
+            var source = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "bot-source", "PostingLimits.cs"));
+
+            string Limit(string kind, string unit)
+            {
+                var limit = Regex.Match(source, $@"PostSource\.{kind} => TimeSpan\.From{unit}\(([0-9]+)\),");
+                Assert.True(limit.Success, $"The bot's PostingLimits.cs gives no limit in {unit.ToLowerInvariant()} for {kind}");
+                return limit.Groups[1].Value;
+            }
+
+            Assert.Equal(ControlWords.PauseLimits,
+                $"armor is given up after {Limit("Armor", "Days")} days, a map after {Limit("Maps", "Days")} and a lobby after {Limit("Lobbies", "Minutes")} minutes.");
+
+            var words = $"goes out when posts are resumed, unless it waited too long to be news: {ControlWords.PauseLimits}";
+            Assert.Contains(words, ControlWords.Of(ControlWords.Pause).Help);
+            Assert.EndsWith("posts what waited, unless it waited too long to be news.", ControlWords.Of(ControlWords.Resume).Help);
+
+            var settings = new DataAccessLibrary.Requests.Models.BotSettingsRow { posts_paused = true, updated_at = new DateTime(2026, 11, 21, 10, 0, 0, DateTimeKind.Utc) };
+            var facts = new BannerFacts(true, settings, null, null, null, null, null, null);
+
+            foreach (var role in new[] { DashboardRole.Owner, DashboardRole.Admin })
+                Assert.Contains(words, Assert.Single(RequestBanners.Of(facts, role, settings.updated_at)).Text);
         }
 
         // A reason and a status text someone typed can be one long word or a link, so the banners and the controls page's

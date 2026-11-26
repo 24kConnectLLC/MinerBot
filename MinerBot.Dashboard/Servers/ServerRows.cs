@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.RegularExpressions;
 using DataAccessLibrary.Discord.Models;
 using DataAccessLibrary.Guilds.Models;
+using DataAccessLibrary.Posting.Models;
 using MinerBot.Dashboard.Status;
 
 namespace MinerBot.Dashboard.Servers
@@ -13,18 +14,34 @@ namespace MinerBot.Dashboard.Servers
         public long Change => (long)ToCount - FromCount;
     }
 
-    // One server as the servers list shows it, with its four settings
+    // One server as the servers list shows it, with its four settings, and the bot's record of its posts of each kind it
+    // has tried there
     public sealed record ServerRow(BotGuildRow Guild, IReadOnlyList<SettingStatus> Settings, MemberTrend? Trend)
     {
+        public IReadOnlyList<DeliveryStatusRow> Deliveries { get; init; } = [];
+
         public bool IsIn => Guild.left_at == null;
         public bool Unavailable => IsIn && !Guild.available;
         public bool NotSetUp => IsIn && Settings.All(setting => setting.State == SettingState.NotSetUp);
-        public bool HasProblems => Unavailable || Settings.Any(setting => SettingStatuses.IsProblem(setting.State));
+        public bool HasProblems => Unavailable || Settings.Any(setting => SettingStatuses.IsProblem(setting.State)) || KeepsFailing;
+
+        // The posts of a kind that's on here failed 3 or more tries in a row, and still fail: what the bot really sent, beside
+        // what the copy's permissions say. A kind that's off isn't counted, though the bot clears its failing only at its
+        // next run.
+        public bool KeepsFailing => IsIn && Settings.Any(setting => SettingStatuses.IsOn(setting.State) && Delivery(setting.Kind) is { } status
+            && DeliveryWords.KeepsFailing(status));
+
+        // The record of the kind's posts here, null for a kind the bot hasn't tried here, and always for announcements
+        public DeliveryStatusRow? Delivery(SettingKind kind) =>
+            SettingStatuses.SourceOf(kind) is { } source ? Deliveries.FirstOrDefault(status => status.source == source) : null;
         public bool CantCheck => Settings.Any(setting => setting.State == SettingState.CantCheck);
         public string IdText => Guild.guild_id.ToString(CultureInfo.InvariantCulture);
         public string? Link => ServerRows.Link(Guild.guild_id);
         public string? IconUrl => ServerRows.IconUrl(Guild.guild_id, Guild.icon_hash);
     }
+
+    // One of a server's settings as the servers list marks it, with the bot's record of that kind's posts there
+    public sealed record SettingMark(SettingStatus Setting, DeliveryStatusRow? Delivery, DateTime Now);
 
     // A filter of the servers list: the word its link carries, its label, and which rows it shows
     public sealed record ServerFilter(string Word, string Label, Func<ServerRow, bool> Shows);
@@ -45,11 +62,12 @@ namespace MinerBot.Dashboard.Servers
         public static ServerFilter Default => Filters[0];
 
         // What the Administrator warning asks for instead, the README's recommended permissions: the posts need the first
-        // three, and the pin command reads a channel's pins and pins with the bot's own permission, so a role without the
-        // other two breaks it. /admin announce posts an admin's text with Discord's default mentions, so its @everyone,
-        // @here and pings of a role that isn't mentionable notify no one unless the bot also has Mention Everyone, which
-        // the five leave out and Administrator includes.
-        public const string AdministratorAdvice = "MinerBot works with the five permissions its README recommends: View Channel, Send Messages and Embed Links where it posts, and Read Message History and Pin Messages for its pin command. Its /admin announce also needs Mention Everyone to ping @everyone, @here or a role that isn't mentionable. A role with just those is safer.";
+        // three, the bot reads a channel's recent messages to check whether a post arrived when Discord didn't answer about it,
+        // and the pin command reads a channel's pins and pins with the bot's own permission, so a role without the other two
+        // breaks it. /admin announce posts an admin's text with Discord's default mentions, so its @everyone, @here and pings
+        // of a role that isn't mentionable notify no one unless the bot also has Mention Everyone, which the five leave out
+        // and Administrator includes.
+        public const string AdministratorAdvice = "MinerBot works with the five permissions its README recommends: View Channel, Send Messages and Embed Links where it posts, Read Message History there too, to check whether a post arrived when Discord didn't answer, and Pin Messages for its pin command, which needs Read Message History as well. Its /admin announce also needs Mention Everyone to ping @everyone, @here or a role that isn't mentionable. A role with just those is safer.";
 
         // No word is the default filter. Null for a word that isn't a filter's, which the page answers with a 404.
         public static ServerFilter? FromWord(string? word) =>
@@ -65,18 +83,24 @@ namespace MinerBot.Dashboard.Servers
         public static string? IconUrl(ulong guildId, string? hash) =>
             hash != null && IconHash().IsMatch(hash) ? $"https://cdn.discordapp.com/icons/{guildId.ToString(CultureInfo.InvariantCulture)}/{hash}.png?size=64" : null;
 
-        // Every server the copy has, each with its four settings read against the channels the copy has, and its members'
-        // trend over the last 30 days or since the first count
+        // Every server the copy has, each with its four settings read against the channels the copy has and its switches,
+        // its members' trend over the last 30 days or since the first count, and the record of its posts
         public static IReadOnlyList<ServerRow> Rows(IReadOnlyList<BotGuildRow> guilds, IReadOnlyList<Guild> settings, IReadOnlyList<BotChannelRow> channels,
-            IReadOnlyList<GuildDayRow> trends, DateTime trendFrom)
+            IReadOnlyList<GuildDayRow> trends, DateTime trendFrom, IReadOnlyList<GuildSwitches>? switches = null, IReadOnlyList<DeliveryStatusRow>? deliveries = null)
         {
             var settingsById = settings.GroupBy(row => row.guild_id).ToDictionary(group => group.Key, group => group.First());
             var channelsById = channels.GroupBy(row => row.channel_id).ToDictionary(group => group.Key, group => group.First());
             var trendsById = trends.GroupBy(row => row.guild_id).ToDictionary(group => group.Key, group => Trend(group.ToList(), trendFrom));
+            var switchesById = (switches ?? []).GroupBy(row => row.guild_id).ToDictionary(group => group.Key, group => group.First());
+            var deliveriesById = (deliveries ?? []).GroupBy(row => row.guild_id).ToDictionary(group => group.Key, group => (IReadOnlyList<DeliveryStatusRow>)group.ToList());
 
             return guilds.Select(guild => new ServerRow(guild,
-                SettingStatuses.Of(guild.guild_id, guild.left_at == null, settingsById.GetValueOrDefault(guild.guild_id), channelsById),
-                trendsById.GetValueOrDefault(guild.guild_id))).ToList();
+                SettingStatuses.Of(guild.guild_id, guild.left_at == null, settingsById.GetValueOrDefault(guild.guild_id), channelsById,
+                    switchesById.GetValueOrDefault(guild.guild_id)),
+                trendsById.GetValueOrDefault(guild.guild_id))
+            {
+                Deliveries = deliveriesById.GetValueOrDefault(guild.guild_id) ?? []
+            }).ToList();
         }
 
         // The channel IDs the settings of the servers the bot is in name, for one lookup

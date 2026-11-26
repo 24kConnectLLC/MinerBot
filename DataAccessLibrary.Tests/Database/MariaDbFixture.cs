@@ -8,6 +8,7 @@ using DataAccessLibrary.Discord;
 using DataAccessLibrary.Feed;
 using DataAccessLibrary.Guilds;
 using DataAccessLibrary.Migrations;
+using DataAccessLibrary.Posting;
 using DataAccessLibrary.Requests;
 using DataAccessLibrary.Status;
 using DotNet.Testcontainers.Builders;
@@ -58,6 +59,21 @@ namespace DataAccessLibrary.Tests.Database
         // The dashboard's requests to the bot, and the bot's settings that only they change
         public const string RequestTable = BotDatabase + ".bot_commands";
         public const string SettingsTable = BotDatabase + ".bot_settings";
+
+        // The bot's posts: each server's switches, what the bot found, what each server is owed, the messages it sent or tried,
+        // each server's delivery status, the daily totals, and the lobby samples
+        public const string SwitchTable = BotDatabase + ".guild_settings";
+        public const string BaselineTable = BotDatabase + ".notification_baseline";
+        public const string SeenTable = BotDatabase + ".notification_seen";
+        public const string QueueTable = BotDatabase + ".notification_queue";
+        public const string DeliveryTable = BotDatabase + ".notification_deliveries";
+        public const string DeliveryStatusTable = BotDatabase + ".guild_delivery_status";
+        public const string DeliveryDailyTable = BotDatabase + ".delivery_daily";
+        public const string LobbySampleTable = BotDatabase + ".lobby_samples";
+
+        // Every one of them, for a test that clears what it reads
+        public static readonly string[] PostingTables = [SwitchTable, BaselineTable, SeenTable, QueueTable, DeliveryTable, DeliveryStatusTable, DeliveryDailyTable,
+            LobbySampleTable];
 
         // CI sets this, so there the database tests fail instead of skipping
         internal const string RequiredSetting = "MINERBOT_DB_TESTS";
@@ -143,11 +159,17 @@ namespace DataAccessLibrary.Tests.Database
         public GuildData Guilds() => new(Factory);
         public WebsiteFeedData Feed() => new(Factory);
         public BotRequestData Requests() => new(Factory, Names);
+        public NotificationData Notifications() => new(Factory, Names);
+        public PostingRetentionData PostingRetention() => new(Factory, Names);
 
         // The dashboard's reads of what the bot writes, and of the website's settings
         public BotStatusReads StatusReads() => new(Factory, Names);
         public BotGuildReads GuildReads() => new(Factory, Names);
         public GuildSettingsReads GuildSettings() => new(Factory);
+        public DeliveryReads Deliveries() => new(Factory, Names);
+
+        // The dashboard's reads and saves of each server's switches
+        public GuildSwitchData Switches() => new(Factory, Names);
 
         // The dashboard's side of its requests to the bot
         public BotRequestQueue RequestQueue() => new(Factory, Names);

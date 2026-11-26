@@ -1,4 +1,5 @@
 using DataAccessLibrary.Discord.Models;
+using DataAccessLibrary.Posting;
 
 namespace MinerBot.Tests
 {
@@ -151,6 +152,67 @@ namespace MinerBot.Tests
             Assert.StartsWith(
                 "This is where I post in this server:\n- Armor styles: off\n- Workshop maps: off\n- Lobbies: off\n- Announcements: off\n",
                 discord.Single("followup").Content);
+        }
+
+        // The Owner can switch a kind off on MinerBot's dashboard, which /admin set_channels never changes: the server's admins
+        // see it beside its channel, since nothing is posted there. A kind with no channel is off whatever its switch, and
+        // announcements have no switch.
+        [Fact]
+        public async Task ShowChannelsNamesASwitchedOffKind()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+            discord.Guilds.Guild = new Guild { guild_id = FakeDiscord.GuildId, armor_channel_id = FakeDiscord.ChannelId, lobby_channel_id = FakeDiscord.AnnouncementChannelId };
+            discord.Store.SetSwitches(Posts.Switches(FakeDiscord.GuildId, armor: false, maps: false));
+
+            await discord.SendSlashCommandAsync("admin", "show_channels");
+
+            Assert.Equal(["defer", "GetGuild", "followup"], discord.StepNames);
+            Assert.Equal(
+                "This is where I post in this server:\n" +
+                $"- Armor styles: <#{FakeDiscord.ChannelId}>, switched off on MinerBot's dashboard, so nothing is posted there\n" +
+                "- Workshop maps: off\n" +
+                $"- Lobbies: <#{FakeDiscord.AnnouncementChannelId}>\n" +
+                "- Announcements: off\n" +
+                "Change these with /admin set_channels. Any kind you leave out there is turned off.",
+                discord.Single("followup").Content);
+        }
+
+        // When MinerBot's database doesn't give the switches, the reply says a kind may be switched off, rather than show it on
+        [Fact]
+        public async Task ShowChannelsSaysWhenTheSwitchesCantBeRead()
+        {
+            var store = new FailingNotificationData(new MemoryNotificationData());
+            store.FailAlways(nameof(INotificationData.GetSwitchesAsync), new TimeoutException("The database didn't answer within 15 seconds"));
+            await using var discord = await FakeDiscord.StartAsync(store: store);
+            discord.Guilds.Guild = new Guild { guild_id = FakeDiscord.GuildId, armor_channel_id = FakeDiscord.ChannelId };
+
+            await discord.SendSlashCommandAsync("admin", "show_channels");
+
+            Assert.Equal(
+                "This is where I post in this server:\n" +
+                $"- Armor styles: <#{FakeDiscord.ChannelId}>\n" +
+                "- Workshop maps: off\n- Lobbies: off\n- Announcements: off\n" +
+                "I couldn't check the dashboard's switches just now, so a kind may be switched off there.\n" +
+                "Change these with /admin set_channels. Any kind you leave out there is turned off.",
+                discord.Single("followup").Content);
+            Assert.Contains($"Couldn't read the switches of guild {FakeDiscord.GuildId} (TimeoutException)", discord.ConsoleText);
+        }
+
+        // set_channels saves the channels and never the switches, and its reply names a kind that stays switched off
+        [Fact]
+        public async Task SetChannelsNamesASwitchedOffKind()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+            discord.Store.SetSwitches(Posts.Switches(FakeDiscord.GuildId, lobbies: false));
+
+            await discord.SendSetChannelsAsync((ArmorOption, FakeDiscord.ChannelId), (LobbyOption, FakeDiscord.ChannelId));
+
+            Assert.StartsWith(
+                "Saved. This is where I'll post in this server:\n" +
+                $"- Armor styles: <#{FakeDiscord.ChannelId}>\n- Workshop maps: off\n" +
+                $"- Lobbies: <#{FakeDiscord.ChannelId}>, switched off on MinerBot's dashboard, so nothing is posted there\n- Announcements: off\n",
+                discord.Single("followup").Content);
+            Assert.Equal(Posts.Switches(FakeDiscord.GuildId, lobbies: false), Assert.Single(discord.Store.Switches));
         }
 
         [Fact]

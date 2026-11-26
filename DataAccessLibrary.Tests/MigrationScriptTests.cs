@@ -82,7 +82,8 @@ namespace DataAccessLibrary.Tests
             ["0001_core"] = "71cf66af93eaa830b8ceebda61d5341971cbc4c82fbf37107149334574454aed",
             ["0002_bot_status"] = "57cde1d9086d53d5d69c3009c3741e8ef126b3842ce57057b4830b54b199e597",
             ["0003_guilds"] = "25b0b8bd493209061734510450bd598124afd5dedc21571e0a58df0c97b6a285",
-            ["0004_bot_requests"] = "ac9003787d6b2ffded792ad9832af4c90ae0494ccd922e25c32e5a945f674a62"
+            ["0004_bot_requests"] = "ac9003787d6b2ffded792ad9832af4c90ae0494ccd922e25c32e5a945f674a62",
+            ["0005_posting"] = "e66550e18d60662b969a3875b883aae88a604215ac45deac023e0f962045d22a"
         };
 
         [Fact]
@@ -245,6 +246,41 @@ namespace DataAccessLibrary.Tests
 
             foreach (var column in new[] { "state", "run_id", "claimed_at", "ended_at", "result", "result_number", "dm_state" })
                 Assert.Matches($@"\n  {column} [A-Z]+(\(\d+\))?( UNSIGNED)? NULL,", requests);
+        }
+
+        // The switches, what the bot found and what each server is owed, its posts' log and status, the daily totals and the
+        // lobby samples, by the same rules, then the one column the status row gains. No column has a default, so a write
+        // that leaves one out fails rather than storing a value nobody chose.
+        [Fact]
+        public void FifthMigrationCreatesThePostingTables()
+        {
+            var fifth = MigrationScript.Embedded()[4];
+
+            Assert.Equal("0005_posting", fifth.Name);
+            Assert.Equal(["guild_settings", "notification_baseline", "notification_seen", "notification_queue", "notification_deliveries", "guild_delivery_status",
+                "delivery_daily", "lobby_samples"], fifth.Statements.SkipLast(1).Select(TableName));
+            Assert.All(fifth.Statements.SkipLast(1), statement =>
+            {
+                Assert.EndsWith("ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_520_ci", statement);
+                Assert.DoesNotContain("TIMESTAMP", statement);
+                Assert.DoesNotContain("CHAR(36)", statement);
+                Assert.DoesNotContain("NOW(", statement);
+                Assert.DoesNotContain("CURDATE", statement);
+                Assert.DoesNotContain("CURRENT_", statement);
+                Assert.DoesNotContain("DEFAULT", statement.Replace("DEFAULT CHARSET", ""));
+                Assert.DoesNotContain("FOREIGN KEY", statement);
+            });
+
+            Assert.Equal("ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS posting_run_id BIGINT UNSIGNED NULL", fifth.Statements[^1]);
+
+            // The submissions' floor and last try are kept with their source, and a lobby sample's counts are NULL when Steam
+            // gave no answer
+            Assert.Contains("\n  high_id BIGINT UNSIGNED NULL,", fifth.Statements[1]);
+            Assert.Contains("\n  alerted_at DATETIME(3) NULL,", fifth.Statements[1]);
+            Assert.DoesNotContain("reached_time", fifth.Sql);
+
+            foreach (var count in new[] { "lobbies", "players", "slots", "current_lobbies", "current_players", "full_lobbies", "gamenight_lobbies", "official_lobbies" })
+                Assert.Contains($"\n  {count} SMALLINT UNSIGNED NULL,", fifth.Statements[7]);
         }
 
         static string TableName(string statement) => Regex.Match(statement, @"^CREATE TABLE IF NOT EXISTS (\w+)").Groups[1].Value;

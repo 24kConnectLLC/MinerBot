@@ -9,6 +9,7 @@ namespace DataAccessLibrary.Status
         Task<BotStatus?> GetStatus();
         Task SaveJobRuns(IReadOnlyList<JobRun> runs);
         Task SaveJobStatus(IReadOnlyList<JobStatus> jobs);
+        Task SaveLobbySamples(IReadOnlyList<LobbySample> samples);
         Task SaveSamples(IReadOnlyList<UptimeSample> samples);
         Task SaveStatus(BotStatus status);
     }

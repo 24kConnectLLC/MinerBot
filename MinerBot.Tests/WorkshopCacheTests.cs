@@ -102,16 +102,19 @@ namespace MinerBot.Tests
             Assert.Equal(["Map 3"], discord.Steps[^1].EmbedTitles);
         }
 
+        // The job's read of the latest five, which every run makes once the first has taken its baseline, twenty deep
         [Fact]
         public async Task LatestMapsReusesTheQueryOfTheNotificationJob()
         {
             await using var discord = await FakeDiscord.StartAsync();
             discord.Steam.LatestItems.Add(FakeGetData.CreateItem(6));
+            await discord.RunNotificationJobAsync();
+            var baseline = discord.StepNames.Count;
 
             await discord.RunNotificationJobAsync();
             await discord.SendSlashCommandAsync("maps", "latest");
 
-            Assert.Single(discord.StepNames, step => step == QueryStep);
+            Assert.Single(discord.StepNames.Skip(baseline), step => step == QueryStep);
         }
     }
 }

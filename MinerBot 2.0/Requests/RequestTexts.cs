@@ -120,9 +120,9 @@ namespace MinerBot_2._0.Requests
 
         public const string NotPaused = "Posts aren't paused.";
 
-        public const string Paused = "Posts are paused. New armor, maps and lobbies wait until they're resumed, and then go out.";
+        public const string Paused = "Posts are paused. New armor, maps and lobbies wait, and go out at the resume unless they waited too long to be news.";
 
-        public const string Resumed = "Posts are resumed. The next notification run, within 5 minutes, posts what waited.";
+        public const string Resumed = "Posts are resumed. The next notification run, within 5 minutes, posts what waited, unless it waited too long to be news.";
 
         public static string PauseNotSaved(bool pausing) => $"MinerBot's database didn't take the change, so posts weren't {(pausing ? "paused" : "resumed")}.";
 
@@ -225,7 +225,8 @@ namespace MinerBot_2._0.Requests
 
         public const string SigninSent = "The owner was sent a direct message about this sign-in.";
 
-        public static string SigninFailed(string type) => $"The direct message to the owner failed ({type}).";
+        // The failure's type with Discord's numbers, such as "HttpException, HTTP 403, Discord 50007", never its words
+        public static string SigninFailed(string problem) => $"The direct message to the owner failed ({problem}).";
 
         public static string SigninUnanswered(RequestKind kind) =>
             Text($"The direct message to the owner didn't go within {kind.ActionLimit.TotalSeconds:0} seconds. It may still arrive.");

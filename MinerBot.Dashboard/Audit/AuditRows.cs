@@ -4,6 +4,7 @@ using DataAccessLibrary.Audit;
 using DataAccessLibrary.Audit.Models;
 using MinerBot.Dashboard.Armor;
 using MinerBot.Dashboard.Blacklist;
+using MinerBot.Dashboard.Servers;
 using MinerBot.Shared.Armor;
 
 namespace MinerBot.Dashboard.Audit
@@ -109,7 +110,7 @@ namespace MinerBot.Dashboard.Audit
             }
         }
 
-        // The keys the dashboard writes: armor's status and ticked warnings, and a blacklist entry's fields
+        // The keys the dashboard writes: armor's status and ticked warnings, a blacklist entry's fields, and a server's switches
         static string Label(string key) => key switch
         {
             "Status" => "Status",
@@ -118,11 +119,17 @@ namespace MinerBot.Dashboard.Audit
             BlacklistJson.Reason => "Reason",
             BlacklistJson.Expires => "End date",
             BlacklistJson.Notes => "Notes",
+            SwitchWords.ArmorKey => SwitchWords.ArmorLabel,
+            SwitchWords.MapsKey => SwitchWords.MapsLabel,
+            SwitchWords.LobbiesKey => SwitchWords.LobbiesLabel,
             _ => key
         };
 
+        // A switch is on or off, as the server's page says it
         static string? Value(string key, JsonElement value) => value.ValueKind switch
         {
+            JsonValueKind.True or JsonValueKind.False when key is SwitchWords.ArmorKey or SwitchWords.MapsKey or SwitchWords.LobbiesKey =>
+                SwitchWords.OnOff(value.ValueKind == JsonValueKind.True),
             JsonValueKind.Null => null,
             JsonValueKind.String => Cut(value.GetString() ?? ""),
             JsonValueKind.Array => Cut(string.Join(", ", value.EnumerateArray().Select(item => item.ValueKind == JsonValueKind.String ? Item(key, item.GetString() ?? "") : item.GetRawText()))),

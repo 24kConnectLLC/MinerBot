@@ -97,3 +97,18 @@ GRANT SELECT ON `{{BOT_DB}}`.`bot_settings` TO {{GRANTEES}};
 -- dashboard, so it reads the table the migrations keep: each one's number, name, checksum and time, nothing private.
 -- Nothing here changes it.
 GRANT SELECT ON `{{BOT_DB}}`.`schema_version` TO {{GRANTEES}};
+
+-- Each server's switches for its armor, map and lobby posts. The servers pages read every server's for their marks, and
+-- the Owner changes one server's on its page, in one transaction with the audit row, whose locked read needs no more
+-- than SELECT. No DELETE: the bot deletes a server's row when the server removes MinerBot, and a kind switched on again
+-- keeps its row.
+GRANT SELECT, INSERT, UPDATE ON `{{BOT_DB}}`.`guild_settings` TO {{GRANTEES}};
+
+-- The record of the bot's posts, which only the bot writes: each message it sent or tried, each server's last post and
+-- failure of each kind, each item a server is owed, and each item the bot has found. The servers pages, the Overview's
+-- banner and the armor review page read them, and the review reads them again in its own transaction before it moves
+-- approved armor back to pending. Nothing here changes them.
+GRANT SELECT ON `{{BOT_DB}}`.`notification_deliveries` TO {{GRANTEES}};
+GRANT SELECT ON `{{BOT_DB}}`.`guild_delivery_status` TO {{GRANTEES}};
+GRANT SELECT ON `{{BOT_DB}}`.`notification_queue` TO {{GRANTEES}};
+GRANT SELECT ON `{{BOT_DB}}`.`notification_seen` TO {{GRANTEES}};

@@ -30,6 +30,9 @@ namespace MinerBot.Dashboard.Audit
         public const string BlacklistEdit = "blacklist.edit";
         public const string BlacklistRemove = "blacklist.remove";
 
+        // The Owner's save of a server's switches, with the server's ID in guild_id, so it shows under the server's changes
+        public const string SwitchesChange = "switches.change";
+
         // What a row is about, its target_type
         public const string SessionTarget = "session";
         public const string ArmorTarget = "armor";
@@ -53,6 +56,7 @@ namespace MinerBot.Dashboard.Audit
             new(BlacklistAdd, "Added to the blacklist"),
             new(BlacklistEdit, "Changed a blacklist entry"),
             new(BlacklistRemove, "Removed from the blacklist"),
+            new(SwitchesChange, "Changed a server's switches"),
             .. RequestKinds.All.Select(kind => new AuditWord(kind.Word, RequestLabel(kind)))
         ];
 

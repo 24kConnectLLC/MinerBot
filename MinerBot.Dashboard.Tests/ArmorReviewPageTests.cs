@@ -19,10 +19,27 @@ namespace MinerBot.Dashboard.Tests
         // Markup with each run of spaces and line ends made one space, for what spans the page's own indented lines
         static string Squeezed(string html) => Regex.Replace(html, @"\s+", " ");
 
+        // Each test's database, with none of the bot's rows either: the page picks its words by the bot's status row, and
+        // reads MinerBot's record of the armor's posts and the notification job, which another test class may have left
+        Task<MariaDbFixture> ReadyAsync() => fixture.ReadyBotAsync();
+
+        // A status row another class left, as a bot that keeps its posts writes it, would give these tests that bot's words
+        [Fact]
+        public async Task EachTestStartsWithoutTheBotsRowsAnotherClassLeft()
+        {
+            await StatusSteps.StatusAsync(await fixture.ReadyBotAsync(), DateTime.UtcNow);
+            var db = await ReadyAsync();
+            await db.AddAsync(Submission(62, ArmorStatus.Approved, "Test Armor 62"));
+            await using var factory = new DashboardFactory(db);
+            var admin = await ReviewerAsync(factory, "203.0.113.138");
+
+            Assert.Contains(ArmorWords.Approved, WebUtility.HtmlDecode(await admin.Client.GetStringAsync("/admin/armor/62?done=approved", Token)));
+        }
+
         [Fact]
         public async Task PageShowsTheSubmissionItsArmorAndItsHistory()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(11, ArmorStatus.Pending, "Ninja"));
             await using var factory = new DashboardFactory(db);
             var admin = await ReviewerAsync(factory, "203.0.113.120");
@@ -58,7 +75,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task HiddenTricksAreShownAndNothingIsRawMarkup()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             var armor = Submission(12, ArmorStatus.Pending, "<b>Bold</b>‮txt.exe");
             armor.ArmorDescription = "Ping @everyone at https://example.com​";
             armor.Author = "<i>Test</i> <@1000000000000000001>";
@@ -93,7 +110,7 @@ namespace MinerBot.Dashboard.Tests
         [InlineData("https://murderminershub.com/wp-content/uploads/%2e%2e/%2e%2e/wp-admin/")]
         public async Task ScreenshotThatIsntAnUploadIsShownAsText(string address)
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             var armor = Submission(13);
             armor.ArmorScreenshot = address;
             await db.AddAsync(armor);
@@ -121,7 +138,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task ApprovedArmorThatTheRulesWouldStopSaysTakeItDown()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             var armor = Submission(27, ArmorStatus.Approved);
             armor.ArmorScreenshot = "https://murderminershub.com/x.png";
             var rejected = Submission(34, ArmorStatus.NotApproved, "Test Armor 34");
@@ -150,7 +167,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task UploadIsShownAndAMissingOneSaysSo()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             var none = Submission(15);
             none.ArmorScreenshot = null;
             var huge = Submission(16);
@@ -181,7 +198,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task PreviewsAreTheBotsMessages()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(17, ArmorStatus.Pending, "Ninja"));
             await using var factory = new DashboardFactory(db);
             var admin = await ReviewerAsync(factory, "203.0.113.124");
@@ -202,7 +219,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task BacktickInTheDescriptionIsShownAsTheBotSendsIt()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             var armor = Submission(18);
             armor.ArmorDescription = "Ends here```[click](https://example.com)";
             await db.AddAsync(armor);
@@ -221,7 +238,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task SingleBacktickInTheDescriptionIsDrawnInItsBlock()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             var armor = Submission(28);
             armor.ArmorDescription = "Ninja`s night set";
             var author = Submission(29);
@@ -243,7 +260,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task StoredSaveStringIsShownAndFlaggedWhenItDiffers()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             var same = Submission(19, ArmorStatus.Approved);
             same.ColorArray = "AQIDBAUGBwgJCgsMDQ==";
             var other = Submission(20, ArmorStatus.Approved);
@@ -276,7 +293,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task NameTakenSaysWhatToDoAndWhereTheOtherIs()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(30, ArmorStatus.Approved, "Frost Knight"), Submission(31, ArmorStatus.Pending, "frost knight "));
             await using var factory = new DashboardFactory(db);
             var admin = await ReviewerAsync(factory, "203.0.113.133");
@@ -330,7 +347,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task StatusTheWebsiteDoesntUseCantBeChanged()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(25, "Pending"));
             await using var factory = new DashboardFactory(db);
             var admin = await ReviewerAsync(factory, "203.0.113.128");
@@ -359,7 +376,7 @@ namespace MinerBot.Dashboard.Tests
         [InlineData("APPROVED")]
         public async Task StatusSpeltDifferentlyIsTheWebsitesWord(string stored)
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(26, stored, "Test Armor 26"));
             await using var factory = new DashboardFactory(db);
             var admin = await ReviewerAsync(factory, "203.0.113.134");
@@ -386,7 +403,7 @@ namespace MinerBot.Dashboard.Tests
         [InlineData("/admin/armor/1.5")]
         public async Task ArmorThatIsntThereIsNotFound(string path)
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(1));
             await using var factory = new DashboardFactory(db);
             var admin = await ReviewerAsync(factory, "203.0.113.129");
@@ -403,7 +420,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task MessageAfterAnActionIsFixedTextForTheStatusItGave()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(26), Submission(32, ArmorStatus.Approved, "Test Armor 32"));
             await using var factory = new DashboardFactory(db);
             var admin = await ReviewerAsync(factory, "203.0.113.130");
@@ -427,7 +444,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task DecideComesAfterThePreviewsAndTheHistory()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(33, ArmorStatus.NotApproved, "Test Armor 33"));
             await db.RootExecuteAsync($"INSERT INTO {MariaDbFixture.ReviewTable} (armor_id, from_status, to_status, reason, reviewed_by, reviewer_name, reviewed_at) " +
                 "VALUES (33, 'Pending Approval', 'Not Approved', 'Copied from another author', 1000000000000000002, 'Test Admin', UTC_TIMESTAMP(3))");
@@ -454,7 +471,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task EmbedBarIsTheBotsColour()
         {
-            await using var factory = new DashboardFactory(await fixture.ReadyAsync());
+            await using var factory = new DashboardFactory(await ReadyAsync());
 
             var css = await factory.Visitor().Client.GetStringAsync("/css/site.css", Token);
 

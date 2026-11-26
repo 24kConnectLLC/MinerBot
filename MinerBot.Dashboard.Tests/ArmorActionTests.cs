@@ -62,10 +62,30 @@ namespace MinerBot.Dashboard.Tests
         static async Task<List<AuditEntry>> ArmorAuditAsync(MariaDbFixture db) =>
             (await db.AuditAsync()).Where(row => row.action.StartsWith("armor.", StringComparison.Ordinal)).ToList();
 
+        // Each test's database, with none of the bot's rows either: the review page picks its words by the bot's status row,
+        // and reads MinerBot's record of the armor's posts and the notification job, which another test class may have left
+        Task<MariaDbFixture> ReadyAsync() => fixture.ReadyBotAsync();
+
+        // A status row another class left, as a bot that keeps its posts writes it, would give these tests that bot's words
+        [Fact]
+        public async Task EachTestStartsWithoutTheBotsRowsAnotherClassLeft()
+        {
+            await StatusSteps.StatusAsync(await fixture.ReadyBotAsync(), DateTime.UtcNow);
+            var db = await ReadyAsync();
+            await db.AddAsync(Submission(61));
+            await using var factory = new DashboardFactory(db);
+            var admin = await ReviewerAsync(factory, "203.0.113.137");
+
+            var page = await OpenAsync(admin, 61);
+
+            Assert.Contains(ArmorWords.ApproveHelp, page.Text);
+            Assert.Contains(ArmorWords.PostNote, page.Text);
+        }
+
         [Fact]
         public async Task ApproveChangesTheStatusAndWritesItsReviewAndAuditRows()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(31));
             await using var factory = new DashboardFactory(db);
             var owner = await ReviewerAsync(factory, "203.0.113.140", TestUsers.Owner);
@@ -112,7 +132,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task RejectKeepsItsReasonForTheHistory()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(32));
             await using var factory = new DashboardFactory(db);
             var admin = await ReviewerAsync(factory, "203.0.113.141");
@@ -142,7 +162,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task NoticeSaysWhatTheActionDid()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(54), Submission(55, ArmorStatus.Approved, "Test Armor 55"), Submission(56, ArmorStatus.Pending, "Test Armor 56"));
             await using var factory = new DashboardFactory(db);
             var admin = await ReviewerAsync(factory, "203.0.113.158");
@@ -178,7 +198,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task EveryActionMovesTheArmorAndIsRecorded()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(33, ArmorStatus.Approved));
             await using var factory = new DashboardFactory(db);
             var admin = await ReviewerAsync(factory, "203.0.113.142");
@@ -215,7 +235,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task ArmorWithNoStatusGoesBackToPending()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(34, null));
             await using var factory = new DashboardFactory(db);
             var admin = await ReviewerAsync(factory, "203.0.113.143");
@@ -231,7 +251,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task ApproveNeedsEveryWarningTicked()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             var armor = Submission(35, ArmorStatus.Pending, "Night​Raid");
             armor.ArmorDescription = "Visit https://example.com";
             await db.AddAsync(armor);
@@ -275,7 +295,7 @@ namespace MinerBot.Dashboard.Tests
         [InlineData("Test Armor 36", "https://murderminershub.com/wp-content/uploads/%2e%2e/%2e%2e/wp-login.php", "ScreenshotNotAllowed")]
         public async Task BlockingRuleStopsEvenAMadeUpApproval(string name, string? screenshot, string kind)
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             var armor = Submission(36, ArmorStatus.Pending, name);
             armor.ArmorScreenshot = screenshot ?? armor.ArmorScreenshot;
             await db.AddAsync(armor);
@@ -302,7 +322,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task CraftedHelmetBlocksApproval()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             var armor = Submission(50);
             armor.ArmorChoice = "Bug```[Free Nitro](https://phish.example)```";
             await db.AddAsync(armor);
@@ -328,7 +348,7 @@ namespace MinerBot.Dashboard.Tests
         [InlineData("BackToPending")]
         public async Task OnlyApproveRunsTheRules(string handler)
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
 
             // Approved armor whose screenshot isn't an upload and whose name another approved armor has; pending armor with
             // a backtick in its name and a link left unticked; and rejected armor with warnings left unticked
@@ -373,7 +393,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task ArmorStoredAsApprovedSpeltDifferentlyCanBeTakenDown()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(51, "approved"));
             await using var factory = new DashboardFactory(db);
             var admin = await ReviewerAsync(factory, "203.0.113.161");
@@ -395,7 +415,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task StatusTheWebsiteDoesntUseRefusesAMadeUpForm()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(52, "Pending"));
             await using var factory = new DashboardFactory(db);
             var admin = await ReviewerAsync(factory, "203.0.113.162");
@@ -425,7 +445,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task BackToTheListReturnsToTheTabTheReviewerCameFrom()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(53, ArmorStatus.Pending, "Frost Knight"));
             await using var factory = new DashboardFactory(db);
             var admin = await ReviewerAsync(factory, "203.0.113.163");
@@ -475,7 +495,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task NameApprovedSinceThePageOpenedBlocks()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(37, ArmorStatus.Pending, "Frost"), Submission(38, ArmorStatus.Pending, "frost "));
             await using var factory = new DashboardFactory(db);
             var admin = await ReviewerAsync(factory, "203.0.113.146");
@@ -500,7 +520,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task TheArmorBlockedRefusalCannotApproveLater()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(59, ArmorStatus.Pending, "Frost"), Submission(60, ArmorStatus.Pending, "frost"));
             await using var factory = new DashboardFactory(db);
             var admin = await ReviewerAsync(factory, "203.0.113.166");
@@ -545,7 +565,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task StaleStatusIsAConflictAndWritesNoReview()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(39));
             await using var factory = new DashboardFactory(db);
             var first = await ReviewerAsync(factory, "203.0.113.147", TestUsers.Admin);
@@ -583,7 +603,7 @@ namespace MinerBot.Dashboard.Tests
         [InlineData("ColorArray = 'AAAAAAAAAAAAAAAAAA=='")]
         public async Task ArmorChangedSinceThePageOpenedIsAConflict(string change)
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(40));
             await using var factory = new DashboardFactory(db);
             var admin = await ReviewerAsync(factory, "203.0.113.149");
@@ -606,7 +626,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task SaveStringTheBotStoresIsNoConflict()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(41, ArmorStatus.Approved));
             await using var factory = new DashboardFactory(db);
             var admin = await ReviewerAsync(factory, "203.0.113.150");
@@ -623,7 +643,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task MadeUpFormsAreRefusedBeforeTheDatabase()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(42), Submission(43, ArmorStatus.Approved, "Test Armor 43"));
             await using var factory = new DashboardFactory(db);
             var admin = await ReviewerAsync(factory, "203.0.113.151");
@@ -674,7 +694,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task ActionsNeedTheTokenAndTheDashboardsOrigin()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(44));
             await using var factory = new DashboardFactory(db);
             var admin = await ReviewerAsync(factory, "203.0.113.152");
@@ -710,7 +730,7 @@ namespace MinerBot.Dashboard.Tests
         [InlineData("audit")]
         public async Task FailedWriteUndoesTheWholeAction(string failing)
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(45));
             await using var factory = new DashboardFactory(db, new DashboardFactoryOptions
             {
@@ -741,7 +761,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task TimeoutAfterTheCommitSaysItMightHaveSaved()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(46));
             var faults = new Faults { TimeOutAfterCommit = true };
             await using var factory = Faulty(db, faults);
@@ -782,7 +802,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task TimeoutAfterARefusalStillShowsTheRefusal()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(58));
             var faults = new Faults();
             await using var factory = Faulty(db, faults);
@@ -806,7 +826,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task UnsureRowThatCantBeWrittenStillShowsUnsure()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(57));
             var faults = new Faults { TimeOutAfterCommit = true };
             await using var factory = new DashboardFactory(db, new DashboardFactoryOptions
@@ -830,7 +850,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task DeadlockedActionRunsAgainAndWritesOnce()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             await db.AddAsync(Submission(47));
             var faults = new Faults { DeadlockFirstRun = true };
             await using var factory = Faulty(db, faults);
@@ -848,7 +868,7 @@ namespace MinerBot.Dashboard.Tests
         [Fact]
         public async Task WebsiteDatabaseDownIsUnavailable()
         {
-            var db = await fixture.ReadyAsync();
+            var db = await ReadyAsync();
             var dead = new DeadDatabase();
             await using var factory = new DashboardFactory(db, new DashboardFactoryOptions { SiteConnection = dead.SiteConnection });
             var admin = await ReviewerAsync(factory, "203.0.113.157");
@@ -899,6 +919,8 @@ namespace MinerBot.Dashboard.Tests
 
             public Task<IReadOnlyList<AuditEntry>> LatestChanges(string targetType, IReadOnlyCollection<string> targetIds) => real.LatestChanges(targetType, targetIds);
             public Task<Page<AuditEntry>> ListAudit(AuditQuery query) => real.ListAudit(query);
+            public Task<IReadOnlyList<DateTime>> ListActionTimes(ulong actorId, string action, IReadOnlyCollection<string> outcomes, DateTime from, int take) =>
+                real.ListActionTimes(actorId, action, outcomes, from, take);
         }
 
         // What the armor repository's transactions should do wrong. One for the whole app, since each request gets a

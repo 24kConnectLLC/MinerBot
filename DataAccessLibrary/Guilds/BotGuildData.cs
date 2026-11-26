@@ -1,4 +1,6 @@
 using DataAccessLibrary.Guilds.Models;
+using DataAccessLibrary.Posting;
+using MinerBot.Shared.Delivery;
 using System.Globalization;
 
 namespace DataAccessLibrary.Guilds
@@ -164,9 +166,11 @@ namespace DataAccessLibrary.Guilds
             });
         }
 
-        // A server the bot left, in one transaction: its row marked left and its channels deleted. Recorded as left only
-        // when its row says the bot is in it, so a leave that's written again, or one of a server the bot never wrote,
-        // records nothing. True when it was recorded.
+        // A server the bot left, in one transaction: its row marked left and its channels deleted, and with them its switches
+        // and its delivery statuses, and what still waited to be posted there dropped, as left. Recorded as left only when its
+        // row says the bot is in it, so a leave that's written again, or one of a server the bot never wrote, records and
+        // deletes nothing more. Messages being sent there are left to the next run's look in the channel's history. True when it
+        // was recorded.
         public Task<bool> LeaveGuild(ulong guildId, DateTime at, ulong runId, uint seq, string? detail)
         {
             RequireUtc(at, nameof(at));
@@ -183,6 +187,16 @@ namespace DataAccessLibrary.Guilds
             string deleteChannels = $@"DELETE FROM {bot}.guild_channels
                                        WHERE guild_id = @guild_id";
 
+            string deleteSwitches = $@"DELETE FROM {bot}.guild_settings
+                                       WHERE guild_id = @guild_id";
+
+            string deleteStatuses = $@"DELETE FROM {bot}.guild_delivery_status
+                                       WHERE guild_id = @guild_id";
+
+            string dropPending = $@"UPDATE {bot}.notification_queue
+                                    SET state = @dropped, reason = @left, settled_at = @at
+                                    WHERE guild_id = @guild_id AND state = @pending";
+
             string addEvent = AddEvent(bot);
             var leftDetail = Clip(detail, DetailLimit);
 
@@ -195,6 +209,13 @@ namespace DataAccessLibrary.Guilds
                 {
                     await transaction.Execute(leave, new { guild_id = guildId, at }).ConfigureAwait(false);
                     await transaction.Execute(addEvent, new { run_id = runId, seq, guild_id = guildId, at, kind = GuildEventKind.Left, detail = leftDetail }).ConfigureAwait(false);
+                    await transaction.Execute(deleteSwitches, new { guild_id = guildId }).ConfigureAwait(false);
+
+                    // The queue before the statuses, as a settle takes them, so a leave that meets a settle there waits for it
+                    // rather than deadlocking with it, and then deletes the status that settle wrote
+                    await transaction.Execute(dropPending, new { guild_id = guildId, at, dropped = QueueState.Dropped, left = DeliveryReasons.Left, pending = QueueState.Pending })
+                        .ConfigureAwait(false);
+                    await transaction.Execute(deleteStatuses, new { guild_id = guildId }).ConfigureAwait(false);
                 }
 
                 await transaction.Execute(deleteChannels, new { guild_id = guildId }).ConfigureAwait(false);

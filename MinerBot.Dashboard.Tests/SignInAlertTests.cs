@@ -314,6 +314,8 @@ namespace MinerBot.Dashboard.Tests
 
             public Task<IReadOnlyList<AuditEntry>> LatestChanges(string targetType, IReadOnlyCollection<string> targetIds) => real.LatestChanges(targetType, targetIds);
             public Task<Page<AuditEntry>> ListAudit(AuditQuery query) => real.ListAudit(query);
+            public Task<IReadOnlyList<DateTime>> ListActionTimes(ulong actorId, string action, IReadOnlyCollection<string> outcomes, DateTime from, int take) =>
+                real.ListActionTimes(actorId, action, outcomes, from, take);
         }
 
         // What the driver throws for a connection that dropped

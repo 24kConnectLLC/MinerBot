@@ -27,6 +27,8 @@ namespace MinerBot.Dashboard.Status
         public const string RequestInterrupted = "request.interrupted";
         public const string PostsPaused = "posts.paused";
         public const string PostsResumed = "posts.resumed";
+        public const string PostsBaseline = "posts.baseline";
+        public const string PostsUnconfirmed = "posts.unconfirmed";
         public const string SteamLoggedOn = "steam.logged_on";
         public const string SteamOffline = "steam.offline";
         public const string SteamLoggedOff = "steam.logged_off";
@@ -53,6 +55,8 @@ namespace MinerBot.Dashboard.Status
             new(RequestInterrupted, "A request was cut short"),
             new(PostsPaused, "Posts paused"),
             new(PostsResumed, "Posts resumed"),
+            new(PostsBaseline, "Took a baseline of what's posted"),
+            new(PostsUnconfirmed, "A post may not have arrived"),
             new(SteamLoggedOn, "Logged on to Steam"),
             new(SteamOffline, "Steam went offline"),
             new(SteamLoggedOff, "Steam logged the bot off"),

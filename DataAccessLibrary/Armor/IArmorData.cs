@@ -10,6 +10,8 @@ namespace DataAccessLibrary.Armor
         Task<IEnumerable<string>> GetAllArmorNamesCache(TimeSpan timeSpan);
         Task<IEnumerable<string>> GetArmorNamesByHelmet(string helmetChoice);
         Task<ArmorStyle> GetArmorStyle(string name);
+        Task<long> GetHighestArmorId();
+        Task<IReadOnlyList<PendingSubmission>> GetPendingSubmissions();
         Task InsertArmor(ArmorStyle armor);
         Task UpdateArmor(ArmorStyle armor);
         Task UpdateColorArray(int ID, string colorArray);

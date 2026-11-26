@@ -31,7 +31,7 @@ namespace MinerBot.Dashboard.Tests
             Assert.Equal(["armor.approve", "armor.pending", "armor.reject", "armor.takedown", "auth.ended", "auth.ended_others", "auth.refused", "auth.signin", "auth.signout",
                 "blacklist.add", "blacklist.edit", "blacklist.remove", "bot.restart", "caches.clear", "guild.leave", "guild.refresh", "guild.test_message",
                 "job.colors", "job.notifications", "owner.signin_alert", "posts.pause", "posts.resume", "status.set", "steam.lookup", "steam.reconnect",
-                "steam.renew"], Listed.Order(StringComparer.Ordinal));
+                "steam.renew", "switches.change"], Listed.Order(StringComparer.Ordinal));
 
             // The Sessions page's endings, beside the sign-ins and sign-outs
             Assert.Equal(("Ended a session", "Ended every other session"), (AuditWords.ActionLabel("auth.ended"), AuditWords.ActionLabel("auth.ended_others")));

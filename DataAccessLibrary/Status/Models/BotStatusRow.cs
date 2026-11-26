@@ -27,5 +27,10 @@ namespace DataAccessLibrary.Status.Models
         // Steam's last answer to a logon, an EResult name, while the bot isn't logged on, and the UTC day the token ends
         public string? steam_last_result { get; set; }
         public DateTime? steam_token_expires { get; set => field = UtcTimes.Mark(value); }
+
+        // The run of a bot that keeps its posts in MinerBot's database, as it last wrote the row: run_id while such a bot
+        // runs. An older bot's write doesn't name the column and leaves it as it was, so it differs from run_id then, and it's
+        // null before any such bot wrote the row.
+        public ulong? posting_run_id { get; set; }
     }
 }

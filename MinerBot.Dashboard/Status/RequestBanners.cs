@@ -51,8 +51,8 @@ namespace MinerBot.Dashboard.Status
                     _ => ""
                 };
                 var because = settings.pause_reason is { } reason ? $", because: {TextInspector.Reveal(reason)}" : "";
-                var text = $"MinerBot's armor, map and lobby posts are paused{since}{by}{because}. What the bot finds waits and goes out when posts are resumed, unless "
-                    + "the bot restarts first, which loses it.";
+                var text = $"MinerBot's armor, map and lobby posts are paused{since}{by}{because}. What the bot finds waits, even across a restart, and goes out when "
+                    + $"posts are resumed, unless it waited too long to be news: {ControlWords.PauseLimits}";
 
                 banners.Add(owner
                     ? new Banner(text, "Resume them on the controls page", ControlsLink + "#posts")

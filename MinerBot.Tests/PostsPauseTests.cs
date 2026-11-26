@@ -1,36 +1,32 @@
+using DataAccessLibrary.Posting;
 using DataAccessLibrary.Requests.Models;
 using Microsoft.Extensions.DependencyInjection;
+using MinerBot.Shared.Delivery;
 using MinerBot.Shared.Requests;
 using MinerBot_2._0.Jobs;
+using MinerBot_2._0.Posting;
 using MinerBot_2._0.Requests;
 using MinerBot_2._0.Status;
+using Steam.Models;
 using SteamWebAPIAccess.Models;
 
 namespace MinerBot.Tests
 {
-    // Pausing the notification job's armor, map and lobby posts from the dashboard: what's found while paused waits, uncounted,
-    // and goes out at the first run after the resume. Until the bot has read whether posts are paused, they wait too, unless
-    // the bot has no BotConnection, when they never do. Each run here is a new job on the real Discord.Net pipeline.
+    // Pausing the notification job's armor, map and lobby posts from the dashboard: what's found while paused is queued, not
+    // posted, and goes out at the first run after the resume, a restart between them too. Until the bot has read whether
+    // posts are paused, they wait too, unless the bot has no BotConnection, when they never do. Each run here is a new job on
+    // the real Discord.Net pipeline.
     [Collection("Discord")]
     public class PostsPauseTests
     {
         const string ArmorTitle = "New Armor Styles:";
         const string SendStep = "send message";
         const int NewId = 100;
+        const string PauseUnknown = "posts wait until the bot has read whether they're paused; what this run found is queued";
 
         static List<string> SentTitles(FakeDiscord discord) => discord.Steps.Where(step => step.Name == SendStep).SelectMany(step => step.EmbedTitles).ToList();
 
-        static LobbyInfo Lobby(ulong id) => new()
-        {
-            LobbyId = id,
-            VersionNumber = 105,
-            HostName = $"Host {id}",
-            MapName = "Map",
-            Modes = "Mode",
-            CurrentPlayers = 1,
-            MaxPlayers = 8,
-            JoinURL = "https://example.com/join"
-        };
+        static LobbyInfo Lobby(ulong id) => Posts.Lobby(id);
 
         static void AddNewItems(FakeDiscord discord)
         {
@@ -50,28 +46,29 @@ namespace MinerBot.Tests
 
         static void Paused(FakeDiscord discord, bool paused) => Pause(discord).Load(paused, paused ? "Maintenance" : null, discord.Clock.UtcNow.UtcDateTime);
 
+        // How many of Steam's latest maps the last run read: five again once nothing comes after a gap
+        static int LastRead(FakeDiscord discord) => discord.Steam.LatestAsked!.Value.Maps;
+
+        // What a paused run found is queued for its servers, and nothing is sent, however many runs the pause lasts
         [Fact]
-        public async Task PausedRunPostsNothingAndCommitsNothing()
+        public async Task PausedRunPostsNothingAndQueuesWhatItFound()
         {
             await using var discord = await FakeDiscord.StartAsync();
             await RunAsync(discord);
-            var seen = (discord.Notifications.Armor.Count, discord.Notifications.Maps.Count, discord.Notifications.Lobbies.Count);
-            var channelReads = discord.StepNames.Count(step => step == nameof(FakeGuildData.GetAllGuilds));
 
             Paused(discord, true);
             AddNewItems(discord);
 
-            for (var run = 0; run < NotificationState.MaxFailedRuns + 1; run++)
+            for (var run = 0; run < 3; run++)
                 await RunAsync(discord);
 
             Assert.Empty(SentTitles(discord));
-            Assert.Equal(seen, (discord.Notifications.Armor.Count, discord.Notifications.Maps.Count, discord.Notifications.Lobbies.Count));
-
-            // Held before the website's channel rows are read, so before anything is committed
-            Assert.Equal(channelReads, discord.StepNames.Count(step => step == nameof(FakeGuildData.GetAllGuilds)));
+            Assert.Equal([(PostSource.Armor, QueueState.Pending), (PostSource.Maps, QueueState.Pending), (PostSource.Lobbies, QueueState.Pending)],
+                discord.Store.Queue.Select(row => (row.source, row.state)));
+            Assert.Empty(discord.Store.Deliveries);
         }
 
-        // An armor approved while paused goes out at the first run after the resume, however long the pause was
+        // An armor approved while paused goes out at the first run after the resume, days later too, within its 7 days
         [Fact]
         public async Task ResumePostsWhatWaited()
         {
@@ -81,9 +78,10 @@ namespace MinerBot.Tests
 
             discord.Armor.AllArmor.Add(FakeArmorData.CreateArmor(NewId));
 
-            for (var run = 0; run < NotificationState.MaxFailedRuns + 1; run++)
+            for (var run = 0; run < 3; run++)
                 await RunAsync(discord);
 
+            discord.MoveClock(TimeSpan.FromDays(3));
             Paused(discord, false);
             await RunAsync(discord);
 
@@ -91,8 +89,8 @@ namespace MinerBot.Tests
             Assert.Contains("Armor 100", discord.Steps.Single(step => step.Name == SendStep).EmbedDescriptions.Single());
         }
 
-        // A map found while paused still goes out at the resume after five later maps have pushed it out of the latest five,
-        // because the runs read one map deeper for each map that waits, and back to five once they're posted
+        // A map found while paused still goes out at the resume after five later maps have pushed it out of the latest five:
+        // it was queued, and its details are looked up by its ID, while the read stays at five
         [Fact]
         public async Task MapPushedOutOfTheLatestFiveWhilePausedIsPostedAtTheResume()
         {
@@ -100,11 +98,11 @@ namespace MinerBot.Tests
             await RunAsync(discord);
             Paused(discord, true);
 
-            discord.Steam.LatestItems.Insert(0, FakeGetData.CreateItem(NewId));
+            discord.Steam.LatestItems.Insert(0, Posts.NewMap(NewId));
             await RunAsync(discord);
 
-            for (var id = NewId + 1; id <= NewId + SeenMaps.LatestCount; id++)
-                discord.Steam.LatestItems.Insert(0, FakeGetData.CreateItem(id));
+            for (var id = NewId + 1; id <= NewId + PostingLimits.LatestMaps; id++)
+                discord.Steam.LatestItems.Insert(0, Posts.NewMap(id));
 
             await RunAsync(discord);
 
@@ -112,59 +110,235 @@ namespace MinerBot.Tests
             await RunAsync(discord);
 
             Assert.Equal(["Map 105", "Map 104", "Map 103", "Map 102", "Map 101", "Map 100"], SentTitles(discord));
-            Assert.Equal(SeenMaps.LatestCount, discord.Notifications.Maps.ReadCount);
+            Assert.Equal(PostingLimits.LatestMaps, LastRead(discord));
         }
 
-        // A map that waited and that the first run after the resume doesn't find again, as when it was hidden meanwhile or more
-        // maps were updated during the pause than the three pages of Steam's list a read takes hold, is never posted, so that
-        // run's detail says so, for the Bot page, and the next run's has nothing to say
+        // A map that waited and was hidden meanwhile is dropped as hidden, and the rest of what waited goes out
         [Fact]
-        public async Task AMapThatWaitedAndIsntFoundAgainIsCountedInTheRunsDetail()
+        public async Task AMapThatWaitedAndWasHiddenIsDroppedAndTheRestPosted()
         {
             await using var discord = await FakeDiscord.StartAsync();
             await RunAsync(discord);
             Paused(discord, true);
 
-            discord.Steam.LatestItems.Insert(0, FakeGetData.CreateItem(NewId));
-            discord.Steam.LatestItems.Insert(0, FakeGetData.CreateItem(NewId + 1));
+            discord.Steam.LatestItems.Insert(0, Posts.NewMap(NewId));
+            discord.Steam.LatestItems.Insert(0, Posts.NewMap(NewId + 1));
             await RunAsync(discord);
 
             discord.Steam.LatestItems.RemoveAll(map => map.PublishedFileId == NewId);
             Paused(discord, false);
 
-            Assert.Equal("1 map that waited wasn't in Steam's latest list any more, so it wasn't posted: it was hidden meanwhile, or more maps were updated while posts waited than the read reaches",
-                await RunAsync(discord));
+            Assert.Equal("1 map: posted in 1 of 1 server", await RunAsync(discord));
             Assert.Equal(["Map 101"], SentTitles(discord));
-            Assert.Null(await RunAsync(discord));
+            Assert.Equal((QueueState.Dropped, DeliveryReasons.Hidden), discord.Store.Queue.Where(row => row.item_id == NewId).Select(row => (row.state, row.reason)).Single());
+            Assert.Equal("nothing new to post", await RunAsync(discord));
+        }
+
+        // Shown again unchanged, as when its author hid it for a moment: what was dropped as hidden goes out then, once
+        [Fact]
+        public async Task AMapThatWaitedAndWasHiddenIsPostedWhenItIsShownAgain()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+            await RunAsync(discord);
+            Paused(discord, true);
+
+            var map = Posts.NewMap(NewId);
+            discord.Steam.LatestItems.Insert(0, map);
+            await RunAsync(discord);
+
+            discord.Steam.LatestItems.Remove(map);
+            Paused(discord, false);
+
+            Assert.Equal("nothing new to post", await RunAsync(discord));
+            Assert.Equal((QueueState.Dropped, DeliveryReasons.Hidden), discord.Store.Queue.Select(row => (row.state, row.reason)).Single());
+
+            discord.Steam.LatestItems.Insert(0, map);
+
+            Assert.Equal("1 map: posted in 1 of 1 server", await RunAsync(discord));
+            Assert.Equal("nothing new to post", await RunAsync(discord));
+            Assert.Equal([Posts.NewMapTitle], SentTitles(discord));
+            Assert.Equal([Posts.NewMapHeading], Posts.MapHeadings(discord));
+            Assert.Equal(QueueState.Sent, discord.Store.Queue.Single().state);
+        }
+
+        // Shown again while it can't go yet, while posts are paused or while its server is in an outage: what the run reopened
+        // counts as what waits, and as news, and the map goes out once it can, once
+        [Fact]
+        public async Task AMapShownAgainWhileItCantGoYetCountsAsWaiting()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+            await RunAsync(discord);
+            Paused(discord, true);
+
+            var map = Posts.NewMap(NewId);
+            discord.Steam.LatestItems.Insert(0, map);
+            await RunAsync(discord);
+
+            discord.Steam.LatestItems.Remove(map);
+            Paused(discord, false);
+            Assert.Equal("nothing new to post", await RunAsync(discord));
+
+            Paused(discord, true);
+            discord.Steam.LatestItems.Insert(0, map);
+
+            Assert.Equal("posts are paused: 1 map waits for 1 server", await RunAsync(discord));
+
+            discord.Steam.LatestItems.Remove(map);
+            Paused(discord, false);
+            Assert.Equal("nothing new to post", await RunAsync(discord));
+            Assert.Equal((QueueState.Dropped, DeliveryReasons.Hidden), discord.Store.Queue.Select(row => (row.state, row.reason)).Single());
+
+            await discord.MakeGuildUnavailableAsync();
+            discord.Steam.LatestItems.Insert(0, map);
+
+            Assert.Equal("1 item waits for 1 server", await RunAsync(discord));
+
+            await discord.MakeGuildAvailableAsync();
+
+            Assert.Equal("1 map: posted in 1 of 1 server", await RunAsync(discord));
+            Assert.Equal([Posts.NewMapTitle], SentTitles(discord));
+            Assert.Equal(QueueState.Sent, discord.Store.Queue.Single().state);
+        }
+
+        // Shown again with its author's fix, made while Steam didn't show it: it goes out at once, as it is then, as a new map,
+        // though the fix is in its cooldown, and the read after that cooldown doesn't post the fix again. Maps updated after it
+        // meanwhile, which push it out of the read, don't matter.
+        [Fact]
+        public async Task AMapThatWaitedAndWasHiddenIsPostedAtOnceWhenItIsShownAgainWithAnUpdate()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+            await RunAsync(discord);
+            Paused(discord, true);
+
+            var map = Posts.NewMap(NewId);
+            discord.Steam.LatestItems.Insert(0, map);
+            await RunAsync(discord);
+
+            discord.Steam.LatestItems.Remove(map);
+            map.TimeUpdated = map.TimeUpdated.AddMinutes(30);
+            Paused(discord, false);
+
+            Assert.Equal("nothing new to post", await RunAsync(discord));
+
+            discord.Steam.LatestItems.Insert(0, map);
+
+            Assert.Equal("1 map: posted in 1 of 1 server", await RunAsync(discord));
+
+            for (var id = NewId + 1; id <= NewId + PostingLimits.LatestMaps; id++)
+            {
+                var other = Posts.NewMap(id);
+                other.TimeCreated = other.TimeUpdated = map.TimeUpdated.AddHours(id - NewId);
+                discord.Steam.LatestItems.Insert(0, other);
+                await RunAsync(discord);
+            }
+
+            discord.MoveClock(PostingLimits.Cooldown);
+            await RunAsync(discord);
+            await RunAsync(discord);
+
+            var posts = discord.Steps.Where(step => step.Name == SendStep && step.EmbedTitles.Contains(Posts.NewMapTitle)).ToList();
+
+            Assert.Equal([Posts.NewMapHeading], posts.Select(step => step.Content));
+            Assert.Equal($"<t:{Detector.Revision(map)}:f>", Posts.UpdateShown(posts[0]));
+            Assert.Equal([(Detector.Revision(map) - 1800, QueueState.Sent), (Detector.Revision(map), QueueState.Sent)],
+                discord.Store.Queue.Where(row => row.source == PostSource.Maps && row.item_id == NewId).Select(row => (row.revision, row.state)));
+        }
+
+        // A refused post of a map that showed its author's fix gives back the fix's row with the map's, and the map hidden then
+        // drops both. Shown again with that fix, it goes out once, holding both rows, so neither the read after the fix's
+        // cooldown nor any read after it posts it there again.
+        [Fact]
+        public async Task AMapWhosePostShowedAnUpdateAndWasRefusedIsPostedOnceWhenItIsShownAgain()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+            await RunAsync(discord);
+            Paused(discord, true);
+
+            var map = Posts.NewMap(NewId);
+            discord.Steam.LatestItems.Insert(0, map);
+            await RunAsync(discord);
+
+            map.TimeUpdated = map.TimeUpdated.AddMinutes(30);
+            discord.ChannelFailures[FakeDiscord.ChannelId] = (403, 50013);
+            Paused(discord, false);
+            await RunAsync(discord);
+
+            discord.ChannelFailures.Clear();
+            discord.Steam.LatestItems.Remove(map);
+            await RunAsync(discord);
+
+            Assert.Equal([(QueueState.Dropped, DeliveryReasons.Hidden), (QueueState.Dropped, DeliveryReasons.Hidden)],
+                discord.Store.Queue.Where(row => row.item_id == NewId).Select(row => (row.state, row.reason)));
+
+            discord.Steam.LatestItems.Insert(0, map);
+
+            Assert.Equal("1 map: posted in 1 of 1 server", await RunAsync(discord));
+
+            discord.MoveClock(PostingLimits.Cooldown);
+            await RunAsync(discord);
+            await RunAsync(discord);
+            await RunAsync(discord);
+
+            Assert.Single(discord.MessagesIn(FakeDiscord.ChannelId));
+            Assert.Equal([QueueState.Sent, QueueState.Sent], discord.Store.Queue.Where(row => row.item_id == NewId).Select(row => row.state));
+        }
+
+        // A map updated while its post waits goes out at the resume as it is then, with that update, which the read after its
+        // cooldown doesn't post again
+        [Fact]
+        public async Task AMapUpdatedWhileItsPostWaitsIsPostedOnce()
+        {
+            await using var discord = await FakeDiscord.StartAsync();
+            await RunAsync(discord);
+            Paused(discord, true);
+
+            var map = Posts.NewMap(NewId);
+            discord.Steam.LatestItems.Insert(0, map);
+            await RunAsync(discord);
+
+            // Its author's fix, half an hour after the upload and so in its cooldown
+            map.TimeUpdated = map.TimeUpdated.AddMinutes(30);
+            await RunAsync(discord);
+
+            Paused(discord, false);
+            Assert.Equal("1 map: posted in 1 of 1 server", await RunAsync(discord));
+
+            discord.MoveClock(PostingLimits.Cooldown);
+
+            Assert.Equal("nothing new to post", await RunAsync(discord));
+            Assert.Equal("nothing new to post", await RunAsync(discord));
+            Assert.Equal([Posts.NewMapHeading], Posts.MapHeadings(discord));
+            Assert.Equal([(Detector.Revision(map) - 1800, QueueState.Sent), (Detector.Revision(map), QueueState.Sent)],
+                discord.Store.Queue.Select(row => (row.revision, row.state)));
         }
 
         // Maps posted shortly before the pause and updated again during it are in their cooldown, so they're neither posted
-        // nor kept waiting, but they take places in Steam's list above a map that waits: each one a paused run passed over
-        // makes the read deeper too, so the map that waits is still posted at the resume, and the read is five again after it
+        // nor queued, but they take places in Steam's list above a map that waits, and push it out of the read: it's still
+        // posted at the resume, from its details, and the read is five
         [Fact]
         public async Task AMapThatWaitsIsPostedAfterMapsInTheirCooldownAreUpdatedAboveIt()
         {
             await using var discord = await FakeDiscord.StartAsync();
             await RunAsync(discord);
 
-            for (var id = NewId; id < NewId + SeenMaps.LatestCount; id++)
-                discord.Steam.LatestItems.Insert(0, FakeGetData.CreateItem(id));
+            for (var id = NewId; id < NewId + PostingLimits.LatestMaps; id++)
+                discord.Steam.LatestItems.Insert(0, Posts.NewMap(id));
 
             await RunAsync(discord);
-            discord.Steam.LatestItems.Insert(0, FakeGetData.CreateItem(NewId + SeenMaps.LatestCount));
+            discord.Steam.LatestItems.Insert(0, Posts.NewMap(NewId + PostingLimits.LatestMaps));
             await RunAsync(discord);
 
             const int Waits = NewId + 100;
             Paused(discord, true);
-            discord.Steam.LatestItems.Insert(0, FakeGetData.CreateItem(Waits));
+            discord.Steam.LatestItems.Insert(0, Posts.NewMap(Waits));
             await RunAsync(discord);
 
             // The six maps posted before the pause are updated again, after the one that waits
-            foreach (var id in Enumerable.Range(NewId, SeenMaps.LatestCount + 1))
+            foreach (var id in Enumerable.Range(NewId, PostingLimits.LatestMaps + 1))
             {
                 var map = discord.Steam.LatestItems.Single(item => item.PublishedFileId == (ulong)id);
                 discord.Steam.LatestItems.Remove(map);
-                map.TimeUpdated = DateTime.UnixEpoch.AddDays(1000 + id);
+                map.TimeUpdated = DateTime.UnixEpoch.AddDays(NewId).AddHours(1).AddMinutes(id);
                 discord.Steam.LatestItems.Insert(0, map);
             }
 
@@ -173,9 +347,9 @@ namespace MinerBot.Tests
             var before = SentTitles(discord).Count;
             Paused(discord, false);
 
-            Assert.Null(await RunAsync(discord));
+            Assert.Equal("1 map: posted in 1 of 1 server", await RunAsync(discord));
             Assert.Equal([$"Map {Waits}"], SentTitles(discord).Skip(before));
-            Assert.Equal(SeenMaps.LatestCount, discord.Notifications.Maps.ReadCount);
+            Assert.Equal(PostingLimits.LatestMaps, LastRead(discord));
         }
 
         // Discord takes ten embeds in a message at most, so a resume that posts more maps sends them in several messages
@@ -188,7 +362,7 @@ namespace MinerBot.Tests
 
             for (var id = NewId; id < NewId + 12; id++)
             {
-                discord.Steam.LatestItems.Insert(0, FakeGetData.CreateItem(id));
+                discord.Steam.LatestItems.Insert(0, Posts.NewMap(id));
                 await RunAsync(discord);
             }
 
@@ -200,8 +374,7 @@ namespace MinerBot.Tests
         }
 
         // When a later message of those fails, as when Discord stops taking posts partway through the run, the maps it held
-        // still wait, below the ten newer ones that went out. Those count above them, so the next run reads deep enough to post
-        // them, though nothing changed on Steam, and the read is five again after that.
+        // still wait, below the ten newer ones that went out, and the next run posts them though nothing changed on Steam
         [Fact]
         public async Task MapsThatWaitedAndDidntGoOutWithTheNewerOnesArePostedAtTheNextRun()
         {
@@ -211,7 +384,7 @@ namespace MinerBot.Tests
 
             for (var id = NewId; id < NewId + 12; id++)
             {
-                discord.Steam.LatestItems.Insert(0, FakeGetData.CreateItem(id));
+                discord.Steam.LatestItems.Insert(0, Posts.NewMap(id));
                 await RunAsync(discord);
             }
 
@@ -219,78 +392,80 @@ namespace MinerBot.Tests
             discord.FailStep = SendStep;
             discord.FailStepAfter = 1;
 
-            Assert.Null(await RunAsync(discord));
-            Assert.Equal(SeenMaps.LatestCount + 12, discord.Notifications.Maps.ReadCount);
+            Assert.Equal("12 maps: posted in 0 of 1 server, 1 failed; 2 items wait for 1 server", await RunAsync(discord));
 
             discord.FailStep = null;
             var tried = SentTitles(discord).Count;
 
-            Assert.Null(await RunAsync(discord));
+            Assert.Equal("2 maps: posted in 1 of 1 server", await RunAsync(discord));
             Assert.Equal(["Map 101", "Map 100"], SentTitles(discord).Skip(tried));
-            Assert.Equal(SeenMaps.LatestCount, discord.Notifications.Maps.ReadCount);
+            Assert.Equal(PostingLimits.LatestMaps, LastRead(discord));
         }
 
         // A map posted shortly before the pause and updated again during it, in its cooldown, before the maps that wait, is
-        // below all of them, and the resume after its cooldown posts its update last. When only the message with the update
-        // fails, every map that waited went out, so the update waits in their place: the next run still reads deep enough to
-        // post it, and the read is five again after that.
+        // below all of them. The first run a day later reads deep, after the gap, so it finds the update, and posts it last.
+        // When only the message with the update fails, the update waits, and the next run posts it from its details.
         [Fact]
         public async Task AnUpdateBelowTheMapsThatWaitedIsPostedAtTheNextRunWhenOnlyItsMessageFails()
         {
             await using var discord = await FakeDiscord.StartAsync();
             await RunAsync(discord);
-            discord.Steam.LatestItems.Insert(0, FakeGetData.CreateItem(NewId));
+            discord.Steam.LatestItems.Insert(0, Posts.NewMap(NewId));
             await RunAsync(discord);
             Paused(discord, true);
 
             discord.MoveClock(TimeSpan.FromHours(1));
             var map = discord.Steam.LatestItems.Single(item => item.PublishedFileId == NewId);
             discord.Steam.LatestItems.Remove(map);
-            map.TimeUpdated = map.TimeUpdated.AddHours(1);
+            map.TimeUpdated = map.TimeUpdated.AddMinutes(1);
             discord.Steam.LatestItems.Insert(0, map);
 
             for (var id = NewId + 1; id <= NewId + 10; id++)
             {
-                discord.Steam.LatestItems.Insert(0, FakeGetData.CreateItem(id));
+                var newer = Posts.NewMap(id);
+                newer.TimeCreated = newer.TimeUpdated = newer.TimeUpdated.AddMinutes(1);
+                discord.Steam.LatestItems.Insert(0, newer);
                 await RunAsync(discord);
             }
 
-            discord.MoveClock(SeenMaps.Cooldown);
+            discord.MoveClock(PostingLimits.Cooldown);
             Paused(discord, false);
             discord.FailStep = SendStep;
             discord.FailStepAfter = 1;
             var before = SentTitles(discord).Count;
 
-            Assert.Null(await RunAsync(discord));
+            await RunAsync(discord);
             Assert.Equal(Enumerable.Range(NewId, 11).Reverse().Select(id => $"Map {id}"), SentTitles(discord).Skip(before));
 
             discord.FailStep = null;
             var tried = SentTitles(discord).Count;
 
-            Assert.Null(await RunAsync(discord));
+            await RunAsync(discord);
             Assert.Equal([$"Map {NewId}"], SentTitles(discord).Skip(tried));
-            Assert.Equal(SeenMaps.LatestCount, discord.Notifications.Maps.ReadCount);
+            Assert.Equal(PostingLimits.LatestMaps, LastRead(discord));
         }
 
-        // Started with MinerBot's database, before the request worker read the row: the pause isn't known, so posts wait
+        // Started with MinerBot's database, before the request worker read the row: the pause isn't known, so posts wait,
+        // and what the runs found is queued
         [Fact]
         public async Task PauseUnknownAtStartHolds()
         {
             await using var discord = await FakeDiscord.StartAsync();
             discord.Settings["ConnectionStrings:BotConnection"] = RequestBot.Connection;
 
-            Assert.Equal("posts wait until the bot has read whether they're paused", await RunAsync(discord));
+            Assert.Equal(PauseUnknown, await RunAsync(discord));
 
             AddNewItems(discord);
 
-            Assert.Equal("posts wait until the bot has read whether they're paused", await RunAsync(discord));
+            Assert.Equal(PauseUnknown, await RunAsync(discord));
             Assert.Empty(SentTitles(discord));
+            Assert.Equal(3, discord.Store.Queue.Count(row => row.state == QueueState.Pending));
             Assert.Null(Pause(discord).Read().Paused);
         }
 
         // Maps found before the bot has read whether posts are paused, as while MinerBot's database refuses it at a start,
-        // wait as they do while paused: a map that five later ones push out of the latest five meanwhile is still posted by
-        // the first run after the read, and the read is back to five once it is
+        // are queued as they are while paused: a map that five later ones push out of the latest five meanwhile is still
+        // posted by the first run after the read, and the read stays at five
         [Fact]
         public async Task MapPushedOutOfTheLatestFiveBeforeThePauseIsReadIsPostedAfterTheRead()
         {
@@ -298,19 +473,19 @@ namespace MinerBot.Tests
             discord.Settings["ConnectionStrings:BotConnection"] = RequestBot.Connection;
             await RunAsync(discord);
 
-            discord.Steam.LatestItems.Insert(0, FakeGetData.CreateItem(NewId));
+            discord.Steam.LatestItems.Insert(0, Posts.NewMap(NewId));
             await RunAsync(discord);
 
-            for (var id = NewId + 1; id <= NewId + SeenMaps.LatestCount; id++)
-                discord.Steam.LatestItems.Insert(0, FakeGetData.CreateItem(id));
+            for (var id = NewId + 1; id <= NewId + PostingLimits.LatestMaps; id++)
+                discord.Steam.LatestItems.Insert(0, Posts.NewMap(id));
 
-            Assert.Equal("posts wait until the bot has read whether they're paused", await RunAsync(discord));
+            Assert.Equal(PauseUnknown, await RunAsync(discord));
 
             Paused(discord, false);
 
-            Assert.Null(await RunAsync(discord));
+            Assert.Equal("6 maps: posted in 1 of 1 server", await RunAsync(discord));
             Assert.Equal(["Map 105", "Map 104", "Map 103", "Map 102", "Map 101", "Map 100"], SentTitles(discord));
-            Assert.Equal(SeenMaps.LatestCount, discord.Notifications.Maps.ReadCount);
+            Assert.Equal(PostingLimits.LatestMaps, LastRead(discord));
         }
 
         // README lets the bot run without MinerBot's database, and then nothing can pause its posts
@@ -321,7 +496,7 @@ namespace MinerBot.Tests
             await RunAsync(discord);
             AddNewItems(discord);
 
-            Assert.Null(await RunAsync(discord));
+            Assert.Equal("1 armor: posted in 1 of 1 server; 1 map: posted in 1 of 1 server; 1 lobby: posted in 1 of 1 server", await RunAsync(discord));
             Assert.Equal([ArmorTitle, "Map 100", "__NEW__ Murder Miners Public Lobbies"], SentTitles(discord));
             Assert.False(Pause(discord).Read().Paused);
         }
@@ -349,7 +524,7 @@ namespace MinerBot.Tests
             await second.TickAsync();
             AddNewItems(second.Discord);
 
-            Assert.StartsWith("posts are paused, so this run posted nothing", await RunAsync(second.Discord));
+            Assert.Equal("posts are paused: 1 armor, 1 map and 1 lobby wait for 1 server", await RunAsync(second.Discord));
             Assert.Empty(SentTitles(second.Discord));
             Assert.True(second.Pause.Read().Paused);
             Assert.Equal([(BotEvents.PostsPaused, (string?)"still paused since 2026-11-20 12:06:00 UTC, by request 1")], second.Events(BotEvents.PostsPaused));
@@ -362,15 +537,20 @@ namespace MinerBot.Tests
             await RunAsync(discord);
             Paused(discord, true);
 
-            Assert.Equal("posts are paused, so this run posted nothing (found 0 new armor styles, 0 new or updated maps and 0 new lobbies)", await RunAsync(discord));
+            Assert.Equal("posts are paused, and nothing waits", await RunAsync(discord));
 
             AddNewItems(discord);
             discord.Steam.Lobbies.Add(Lobby(NewId + 1));
 
-            Assert.Equal("posts are paused, so this run posted nothing (found 1 new armor style, 1 new or updated map and 2 new lobbies)", await RunAsync(discord));
+            Assert.Equal("posts are paused: 1 armor, 1 map and 2 lobbies wait for 1 server", await RunAsync(discord));
+
+            discord.Steam.Lobbies.Clear();
+            discord.Armor.AllArmor.Add(FakeArmorData.CreateArmor(NewId + 1));
+
+            Assert.Equal("posts are paused: 2 armor, 1 map and 2 lobbies wait for 1 server", await RunAsync(discord));
         }
 
-        // Taken down during the pause, it's no longer in the Approved read
+        // Taken down during the pause, it's no longer in the Approved read, so what waited for it is dropped as not approved
         [Fact]
         public async Task TakenDownWhilePausedIsNeverPosted()
         {
@@ -387,6 +567,7 @@ namespace MinerBot.Tests
             await RunAsync(discord);
 
             Assert.Empty(SentTitles(discord));
+            Assert.Equal((QueueState.Dropped, DeliveryReasons.NotApproved), discord.Store.Queue.Select(row => (row.state, row.reason)).Single());
         }
 
         [Fact]
@@ -501,7 +682,8 @@ namespace MinerBot.Tests
 
             await bot.TickAsync();
 
-            Assert.Equal((RequestStates.Done, "Posts are resumed. The next notification run, within 5 minutes, posts what waited."), (bot.Row(resume).state, bot.Row(resume).result));
+            Assert.Equal((RequestStates.Done, "Posts are resumed. The next notification run, within 5 minutes, posts what waited, unless it waited too long to be news."),
+                (bot.Row(resume).state, bot.Row(resume).result));
             Assert.False(bot.Pause.Read().Paused);
             Assert.False(bot.Data.Settings!.posts_paused);
         }
@@ -542,7 +724,8 @@ namespace MinerBot.Tests
             var resume = bot.Add(RequestKinds.PostsResume);
             await bot.TickAsync();
 
-            Assert.Equal((RequestStates.Done, "Posts are resumed. The next notification run, within 5 minutes, posts what waited."), (bot.Row(resume).state, bot.Row(resume).result));
+            Assert.Equal((RequestStates.Done, "Posts are resumed. The next notification run, within 5 minutes, posts what waited, unless it waited too long to be news."),
+                (bot.Row(resume).state, bot.Row(resume).result));
             Assert.False(bot.Pause.Read().Paused);
 
             bot.Move(TimeSpan.FromMinutes(10));
@@ -569,7 +752,8 @@ namespace MinerBot.Tests
 
             await bot.TickAsync();
 
-            Assert.Equal((RequestStates.Done, "Posts are resumed. The next notification run, within 5 minutes, posts what waited."), (bot.Row(resume).state, bot.Row(resume).result));
+            Assert.Equal((RequestStates.Done, "Posts are resumed. The next notification run, within 5 minutes, posts what waited, unless it waited too long to be news."),
+                (bot.Row(resume).state, bot.Row(resume).result));
             Assert.False(bot.Pause.Read().Paused);
             Assert.False(bot.Data.Settings!.posts_paused);
         }

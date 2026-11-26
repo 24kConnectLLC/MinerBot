@@ -58,7 +58,7 @@ namespace MinerBot_2._0.Jobs
                 }
                 catch (Exception e)
                 {
-                    // The type only, as Discord's message is Discord's
+                    // The type and Discord's numbers, never its message, which is Discord's
                     problems.Add(FailureLog.Describe(e));
                     continue;
                 }
@@ -101,7 +101,8 @@ namespace MinerBot_2._0.Jobs
                 return detail;
             }
 
-            string Problems() => string.Join(", ", problems.Distinct());
+            // Apart by semicolons, as a problem's own description has commas: "HttpException, HTTP 403, Discord 50013"
+            string Problems() => string.Join("; ", problems.Distinct());
         }
 
         // Discord's approximate count, or null when it gave none, as for a server the bot is no longer in

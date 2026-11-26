@@ -7,6 +7,7 @@ using DataAccessLibrary.Discord;
 using DataAccessLibrary.Feed;
 using DataAccessLibrary.Guilds;
 using DataAccessLibrary.Health;
+using DataAccessLibrary.Posting;
 using DataAccessLibrary.Requests;
 using DataAccessLibrary.Status;
 using Microsoft.Extensions.Configuration;
@@ -159,6 +160,35 @@ namespace DataAccessLibrary
         public static IServiceCollection AddDashboardChecks(this IServiceCollection services)
         {
             services.AddTransient<IDashboardChecks, DashboardChecks>();
+            return services;
+        }
+
+        // The notification run's record of what it found and what each server is owed, in MinerBot's database. A bot without
+        // BotConnection registers a MemoryNotificationData instead, one for the whole run of the bot.
+        public static IServiceCollection AddNotificationAccess(this IServiceCollection services)
+        {
+            services.AddTransient<INotificationData, NotificationData>();
+            return services;
+        }
+
+        // The bot's nightly clean-up of its posts' records
+        public static IServiceCollection AddPostingRetentionAccess(this IServiceCollection services)
+        {
+            services.AddTransient<IPostingRetentionData, PostingRetentionData>();
+            return services;
+        }
+
+        // The dashboard's reads and saves of each server's switches
+        public static IServiceCollection AddGuildSwitchAccess(this IServiceCollection services)
+        {
+            services.AddTransient<IGuildSwitchData, GuildSwitchData>();
+            return services;
+        }
+
+        // The dashboard's reads of the bot's posts, without the bot's writes
+        public static IServiceCollection AddDeliveryReads(this IServiceCollection services)
+        {
+            services.AddTransient<IDeliveryReads, DeliveryReads>();
             return services;
         }
     }

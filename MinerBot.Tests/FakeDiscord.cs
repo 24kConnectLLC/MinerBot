@@ -6,6 +6,7 @@ using System.Text.RegularExpressions;
 using DataAccessLibrary;
 using DataAccessLibrary.Armor;
 using DataAccessLibrary.Discord;
+using DataAccessLibrary.Posting;
 using Discord;
 using Discord.Interactions;
 using Discord.Net;
@@ -16,6 +17,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using MinerBot_2._0.Handlers;
 using MinerBot_2._0.Jobs;
+using MinerBot_2._0.Posting;
 using MinerBot_2._0.Requests;
 using MinerBot_2._0.Services;
 using MinerBot_2._0.Status;
@@ -107,7 +109,8 @@ namespace MinerBot.Tests
         public const ulong PinnerRoleId = 2001, ChannelManagerRoleId = 2002, DeniedPinnerRoleId = 2003;
 
         // The bot's role in the first guild gives it View Channel, Send Messages and Embed Links, and these channels there take one away.
-        // HiddenChannelId is hidden from @everyone, the way Discord sends a channel the bot can't view.
+        // HiddenChannelId is hidden from @everyone, the way Discord sends a channel the bot can't view. Only the general channel,
+        // ChannelId, gives it Read Message History, through an overwrite, which the look in a channel's messages needs.
         public const ulong PosterRoleId = 2004, NoSendChannelId = 3003, HiddenChannelId = 3004, NoEmbedChannelId = 3005, AnnouncementChannelId = 3006;
 
         // A role of the joined guild without Administrator, with only View Channel and Send Messages
@@ -140,7 +143,16 @@ namespace MinerBot.Tests
         public FakeGetData Steam { get; }
         public FakeArmorData Armor { get; }
         public FakeGuildData Guilds { get; }
-        public NotificationState Notifications => services.GetRequiredService<NotificationState>();
+
+        // MinerBot's database for the notification run, in memory: a store a test hands to a second FakeDiscord is a restart
+        // that keeps the database. Posting is the store the bot calls, which a test may have wrapped to fail.
+        public INotificationData Posting { get; }
+        public MemoryNotificationData Store { get; }
+
+        // What the notification run keeps in memory for the bot's process: what MinerBot's database didn't take, and the gate
+        // a stop closes
+        public PendingSettlements Pending => services.GetRequiredService<PendingSettlements>();
+        public PostingGate Gate => services.GetRequiredService<PostingGate>();
         public ArmorService ArmorService => services.GetRequiredService<ArmorService>();
 
         // What the bot recorded for its status and history, and what its status sampler would read of Discord
@@ -163,6 +175,57 @@ namespace MinerBot.Tests
         // Holds Discord's answer to each message the bot sends until it completes, as for a slow request
         public Task? SendHold { get; set; }
 
+        // What Discord holds in each channel: every message the bot made there, each with its own ID, a snowflake of the bot's
+        // clock when it was made, as Discord's IDs are, and any a test adds. A message the bot sends is made when Discord takes
+        // the request, before the answer that SendHold holds. A restart keeps it, as Discord's channels outlast the bot.
+        ChannelHistory history = new();
+
+        // Discord's answer to a message sent to one of these channels: an HTTP status and Discord's own code, with
+        // DiscordText as Discord's words, which nothing the bot records may hold. A 429 here is one that reaches the bot as a
+        // RateLimitedException, which Discord.Net throws only without RetryRatelimit: a post waits out a 429 within the
+        // request's own limit, which RateLimits answers with, and LateRateLimits and LongRateLimits answer with the ones that
+        // limit ends.
+        public ConcurrentDictionary<ulong, (int Status, int Code)> ChannelFailures { get; } = new();
+        public const string DiscordText = "zz-discords-own-words";
+
+        // How many more messages sent to a channel Discord answers with a 429 and a short retry_after, which Discord.Net waits
+        // out before it sends the message again
+        public ConcurrentDictionary<ulong, int> RateLimits { get; } = new();
+
+        // Channels whose next message Discord answers with a 429 only after this long, whatever the request's token says, as a
+        // 429 that comes back just as the request's own limit runs out: Discord.Net then finds the request's time up before it
+        // tries again, and throws a TimeoutException, with nothing made. HttpClient gives no answer once a request's token is
+        // cancelled, so this is only an answer that came just before; a 429 whose wait outlasts the limit is LongRateLimits'.
+        public ConcurrentDictionary<ulong, TimeSpan> LateRateLimits { get; } = new();
+
+        // Channels whose next message Discord answers at once with a 429 whose retry_after is this long, longer than the
+        // request's own limit: Discord.Net waits for it until that limit ends the wait, with a TaskCanceledException, as it
+        // ends a request Discord never answered, though nothing was made
+        public ConcurrentDictionary<ulong, TimeSpan> LongRateLimits { get; } = new();
+
+        // Channels where Discord makes the message but its answer never comes, which the request's own limit ends, as HttpClient
+        // ends a request whose token is cancelled, with a TaskCanceledException: at once here. Channels where the send hangs,
+        // nothing made, until its token is cancelled. And channels whose requests Discord takes and never answers, with the
+        // real wait: a message sent there is made, and neither its answer nor a read of the channel's messages comes until the
+        // request's token is cancelled.
+        public ConcurrentDictionary<ulong, bool> Unanswered { get; } = new();
+        public ConcurrentDictionary<ulong, bool> Hangs { get; } = new();
+        public ConcurrentDictionary<ulong, bool> Silent { get; } = new();
+
+        // How many more messages sent to a channel Discord makes, then answers with a 502 from the gateway in front of it,
+        // which Discord.Net sends again unless its retry mode leaves out Retry502
+        public ConcurrentDictionary<ulong, int> BadGateways { get; } = new();
+
+        // Channels whose send can't open its connection to Discord, as HttpClient says when the network or Discord's name is
+        // down: the request never leaves the bot, and nothing is made
+        public ConcurrentDictionary<ulong, bool> NoConnection { get; } = new();
+
+        // Discord's answer to a read of one of these channels' messages: an HTTP status and Discord's own code, or with a
+        // status of 0 no answer at all, which the read's own limit ends with a TaskCanceledException, at once here; and
+        // channels where the read hangs until its token is cancelled
+        public ConcurrentDictionary<ulong, (int Status, int Code)> HistoryFailures { get; } = new();
+        public ConcurrentDictionary<ulong, bool> HistoryHangs { get; } = new();
+
         // Holds Discord's answer to the bot leaving a server until it completes, as for a slow request, and the gateway then
         // isn't told: the bot is still in the server
         public Task? LeaveHold { get; set; }
@@ -172,6 +235,9 @@ namespace MinerBot.Tests
 
         // Name of the Discord request that gets refused, to test what happens when a reply can't be sent
         public string? FailStep { get; set; }
+
+        // Discord's answer to FailStep's requests in place of Missing Permissions: an HTTP status and Discord's own code
+        public (int Status, int Code)? FailStepAnswer { get; set; }
 
         // How many requests of FailStep get through before the refusals start
         public int FailStepAfter;
@@ -229,7 +295,7 @@ namespace MinerBot.Tests
         public int Connections => Volatile.Read(ref connections);
         int connections;
 
-        FakeDiscord(bool holdReady, ulong[] unavailableGuilds)
+        FakeDiscord(bool holdReady, ulong[] unavailableGuilds, INotificationData? store)
         {
             readyGate = holdReady ? NewSignal() : null;
             unavailableAtStart = unavailableGuilds;
@@ -241,6 +307,8 @@ namespace MinerBot.Tests
             Steam = new FakeGetData(AddStep);
             Armor = new FakeArmorData(AddStep);
             Guilds = new FakeGuildData(AddStep);
+            Posting = store ?? new MemoryNotificationData();
+            Store = Posting as MemoryNotificationData ?? ((FailingNotificationData)Posting).Inner;
             gateway = new FakeGateway(this);
 
             client = new DiscordSocketClient(new DiscordSocketConfig
@@ -269,12 +337,14 @@ namespace MinerBot.Tests
                 .AddSingleton<InteractionHandler>()
                 .AddSingleton<GuildEventHandler>()
                 .AddWebClient()
-                .AddSingleton<AnnounceService>()
                 .AddSingleton<OwnerAlertService>()
                 .AddSingleton<ArmorService>()
                 .AddSingleton<SteamAPIService>()
                 .AddSingleton<DiscordService>()
-                .AddSingleton<NotificationState>()
+                .AddSingleton(Posting)
+                .AddSingleton<PostingProcess>()
+                .AddSingleton<PendingSettlements>()
+                .AddSingleton<PostingGate>()
                 .AddSingleton<BotRecorder>()
                 .AddSingleton<DiscordStatusHandler>()
                 .AddSingleton<IDiscordStatus>(provider => provider.GetRequiredService<DiscordStatusHandler>())
@@ -292,11 +362,30 @@ namespace MinerBot.Tests
                 .BuildServiceProvider();
         }
 
-        public static async Task<FakeDiscord> StartAsync(bool holdReady = false, ulong[]? unavailableGuilds = null)
+        public static async Task<FakeDiscord> StartAsync(bool holdReady = false, ulong[]? unavailableGuilds = null, INotificationData? store = null)
         {
-            var discord = new FakeDiscord(holdReady, unavailableGuilds ?? []);
+            var discord = new FakeDiscord(holdReady, unavailableGuilds ?? [], store);
             await discord.ConnectAsync();
             return discord;
+        }
+
+        // The bot started again after it was down for the time given: a new process, with what it keeps in memory gone, over
+        // the same MinerBot's database, by default the one this FakeDiscord's bot used, and the same world, the website's rows,
+        // the armor and Steam, on a clock that goes on from this one's. This one's bot runs no more.
+        public async Task<FakeDiscord> RestartAsync(TimeSpan down, INotificationData? store = null, bool holdReady = false, ulong[]? unavailableGuilds = null)
+        {
+            var next = await StartAsync(holdReady, unavailableGuilds, store ?? Posting);
+
+            next.Clock.UtcNow = Clock.UtcNow + down;
+            next.Guilds.AllGuilds = Guilds.AllGuilds;
+            next.Armor.AllArmor = Armor.AllArmor;
+            next.Armor.Pending = Armor.Pending;
+            next.Armor.HighestId = Armor.HighestId;
+            next.Steam.LatestItems = Steam.LatestItems;
+            next.Steam.Lobbies = Steam.Lobbies;
+            next.history = history;
+
+            return next;
         }
 
         public async Task ReleaseReadyAsync()
@@ -581,26 +670,73 @@ namespace MinerBot.Tests
             await WaitAsync(executed.Task);
         }
 
-        // One run the way JobHandler does it, with a new job object, 5 minutes after the last run
-        public async Task RunNotificationJobAsync()
+        // One run the way JobHandler does it, with a new job object, 5 minutes after the last run, or as long after as a test
+        // says, as for a run asked for from the dashboard, with its detail
+        public Task<string> RunNotificationJobAsync() => RunNotificationJobAsync(TimeSpan.FromMinutes(5));
+
+        public async Task<string> RunNotificationJobAsync(TimeSpan after)
         {
-            clock.UtcNow += TimeSpan.FromMinutes(5);
+            clock.UtcNow += after;
 
             var run = ActivatorUtilities.CreateInstance<GuildNotificationJob>(services).NotifyAllGuilds();
 
-            // Some tests expect the job's own TimeoutException, so a job that never finishes fails with something else
+            // Some tests expect the job's own exceptions, so a job that never finishes fails with something else
             try
             {
-                await run.WaitAsync(WaitLimit);
+                return await run.WaitAsync(WaitLimit);
             }
             catch (TimeoutException) when (!run.IsCompleted)
             {
                 Assert.Fail($"The notification job didn't finish. Console output: {ConsoleText}");
+                throw;
             }
         }
 
         // For the map cooldown, which is in hours, without running the job every 5 minutes of them
         public void MoveClock(TimeSpan time) => clock.UtcNow += time;
+
+        // The IDs of the messages a channel holds, oldest first: the bot's and those a test added
+        public IReadOnlyList<ulong> MessagesIn(ulong channelId) => history.Ids(channelId);
+
+        // Messages of another user in a channel, made at the times given, as in a busy channel
+        public void AddOthersMessages(ulong channelId, IEnumerable<DateTimeOffset> times)
+        {
+            foreach (var at in times)
+                AddMessage(channelId, at, OtherUserId);
+        }
+
+        // A message in a channel made at the time given, with Discord's type for it and its embeds' JSON: another user's, or
+        // the bot's own of another sort than its posts, such as its answer to a slash command (type 20) or a test message
+        public ulong AddMessage(ulong channelId, DateTimeOffset at, ulong authorId, int type = 0, string embeds = "[]")
+        {
+            var id = history.NewId(at);
+            history.Add(channelId, id, MadeMessageJson(channelId, id, at, authorId, "\"\"", embeds, type));
+            return id;
+        }
+
+        // An embed with a title and a link, as a message's embeds carry it
+        public static string EmbedJson(string title, string? url = null) =>
+            $$"""{"type":"rich","title":{{JsonSerializer.Serialize(title)}}{{(url == null ? "" : $",\"url\":{JsonSerializer.Serialize(url)}")}}}""";
+
+        // A message Discord made of what the bot sent, as a read of the channel gives it back and as a send's answer
+        string MakeMessage(ulong channelId, string body)
+        {
+            var at = clock.UtcNow;
+            var id = history.NewId(at);
+            var sent = JsonDocument.Parse(body).RootElement;
+            var content = sent.TryGetProperty("content", out var text) && text.ValueKind == JsonValueKind.String ? text.GetRawText() : "\"\"";
+            var embeds = sent.TryGetProperty("embeds", out var list) && list.ValueKind == JsonValueKind.Array ? list.GetRawText() : "[]";
+            var json = MadeMessageJson(channelId, id, at, BotId, content, embeds, type: 0);
+
+            history.Add(channelId, id, json);
+            return json;
+        }
+
+        static string MadeMessageJson(ulong channelId, ulong id, DateTimeOffset at, ulong authorId, string content, string embeds, int type) => $$"""
+            {"id":"{{id}}","channel_id":"{{channelId}}","author":{{UserJson(authorId, bot: authorId == BotId)}},"content":{{content}},
+             "timestamp":{{JsonSerializer.Serialize(at.UtcDateTime)}},"tts":false,"mention_everyone":false,"mentions":[],"mention_roles":[],
+             "attachments":[],"embeds":{{embeds}},"pinned":false,"type":{{type}}}
+            """;
 
         public Task LeaveGuildAsync() => gateway.DeliverAsync("GUILD_DELETE", $$"""{"id":"{{GuildId}}"}""");
 
@@ -704,8 +840,8 @@ namespace MinerBot.Tests
         static string RoleJson(ulong id, string name, GuildPermission permissions) =>
             $$"""{"id":"{{id}}","name":"{{name}}","permissions":"{{(ulong)permissions}}","position":1,"color":0,"hoist":false,"managed":false,"mentionable":false}""";
 
-        static string MessageJson(int type = 0, ulong channelId = ChannelId) => $$"""
-            {"id":"{{MessageId}}","channel_id":"{{channelId}}","author":{{UserJson(BotId, bot: true)}},"content":"",
+        static string MessageJson(int type = 0, ulong channelId = ChannelId, ulong id = MessageId) => $$"""
+            {"id":"{{id}}","channel_id":"{{channelId}}","author":{{UserJson(BotId, bot: true)}},"content":"",
              "timestamp":"2026-01-01T00:00:00+00:00","tts":false,"mention_everyone":false,"mentions":[],"mention_roles":[],
              "attachments":[],"embeds":[],"pinned":false,"type":{{type}}}
             """;
@@ -733,7 +869,8 @@ namespace MinerBot.Tests
                       {{RoleJson(DeniedPinnerRoleId, "Pinner denied in general", GuildPermission.ViewChannel | GuildPermission.PinMessages)}},
                       {{RoleJson(PosterRoleId, "MinerBot", GuildPermission.ViewChannel | GuildPermission.SendMessages | GuildPermission.EmbedLinks)}}],
              "channels":[{"id":"{{ChannelId}}","type":0,"name":"general","position":0,
-                          "permission_overwrites":[{"id":"{{DeniedPinnerRoleId}}","type":0,"allow":"0","deny":"{{(ulong)ChannelPermission.PinMessages}}"}]},
+                          "permission_overwrites":[{"id":"{{DeniedPinnerRoleId}}","type":0,"allow":"0","deny":"{{(ulong)ChannelPermission.PinMessages}}"},
+                                                   {"id":"{{PosterRoleId}}","type":0,"allow":"{{(ulong)ChannelPermission.ReadMessageHistory}}","deny":"0"}]},
                          {{ChannelJson(NoSendChannelId, 1, DenyJson(PosterRoleId, ChannelPermission.SendMessages))}},
                          {{ChannelJson(HiddenChannelId, 2, DenyJson(GuildId, ChannelPermission.ViewChannel), name: "___hidden___")}},
                          {{ChannelJson(NoEmbedChannelId, 3, DenyJson(PosterRoleId, ChannelPermission.EmbedLinks))}},
@@ -741,6 +878,43 @@ namespace MinerBot.Tests
              "unavailable":false,"member_count":2,"large":false,"members":[{{BotMemberJson(PosterRoleId)}}],"presences":[],"threads":[],
              "voice_states":[],"guild_scheduled_events":[],"joined_at":"2020-01-01T00:00:00+00:00"}
             """;
+
+        // What Discord holds in the channels: each message by its ID, which is a snowflake of when it was made, as Discord's
+        // are, with a count after it that keeps two of one millisecond apart
+        sealed class ChannelHistory
+        {
+            readonly object gate = new();
+            readonly List<(ulong ChannelId, ulong Id, string Json)> messages = new();
+            ulong count;
+
+            public ulong NewId(DateTimeOffset at)
+            {
+                lock (gate)
+                    return SnowflakeUtils.ToSnowflake(at) + (++count & 0x3FFFFF);
+            }
+
+            public void Add(ulong channelId, ulong id, string json)
+            {
+                lock (gate)
+                    messages.Add((channelId, id, json));
+            }
+
+            // Discord's answer to a read: the messages after the ID given, the oldest of them up to the limit, newest first
+            public string Read(ulong channelId, ulong after, int limit)
+            {
+                lock (gate)
+                {
+                    return "[" + string.Join(",", messages.Where(message => message.ChannelId == channelId && message.Id > after).OrderBy(message => message.Id).Take(limit)
+                        .OrderByDescending(message => message.Id).Select(message => message.Json)) + "]";
+                }
+            }
+
+            public IReadOnlyList<ulong> Ids(ulong channelId)
+            {
+                lock (gate)
+                    return messages.Where(message => message.ChannelId == channelId).Select(message => message.Id).Order().ToList();
+            }
+        }
 
         // The bot logs from many threads while tests read the text
         sealed class ConsoleCapture : TextWriter
@@ -844,10 +1018,10 @@ namespace MinerBot.Tests
             public void Dispose() { }
 
             public Task<RestResponse> SendAsync(string method, string endpoint, CancellationToken cancelToken, bool headerOnly = false, string? reason = null,
-                IEnumerable<KeyValuePair<string, IEnumerable<string>>>? requestHeaders = null) => Answer(method, endpoint, "");
+                IEnumerable<KeyValuePair<string, IEnumerable<string>>>? requestHeaders = null) => Answer(method, endpoint, "", cancelToken);
 
             public Task<RestResponse> SendAsync(string method, string endpoint, string json, CancellationToken cancelToken, bool headerOnly = false, string? reason = null,
-                IEnumerable<KeyValuePair<string, IEnumerable<string>>>? requestHeaders = null) => Answer(method, endpoint, json);
+                IEnumerable<KeyValuePair<string, IEnumerable<string>>>? requestHeaders = null) => Answer(method, endpoint, json, cancelToken);
 
             public Task<RestResponse> SendAsync(string method, string endpoint, IReadOnlyDictionary<string, object> multipartParams, CancellationToken cancelToken, bool headerOnly = false, string? reason = null,
                 IEnumerable<KeyValuePair<string, IEnumerable<string>>>? requestHeaders = null)
@@ -856,10 +1030,10 @@ namespace MinerBot.Tests
                 var upload = multipartParams["files[0]"];
                 using var file = new StreamReader((Stream)upload.GetType().GetProperty("Stream")!.GetValue(upload)!);
 
-                return Answer(method, endpoint, multipartParams["payload_json"].ToString()!, file.ReadToEnd());
+                return Answer(method, endpoint, multipartParams["payload_json"].ToString()!, cancelToken, file.ReadToEnd());
             }
 
-            Task<RestResponse> Answer(string method, string endpoint, string body, string? file = null)
+            Task<RestResponse> Answer(string method, string endpoint, string body, CancellationToken cancelToken, string? file = null)
             {
                 var name = StepName(method, endpoint, body);
 
@@ -867,7 +1041,9 @@ namespace MinerBot.Tests
                     discord.AddStep(new Step(name, body, file, endpoint));
 
                 if (name != null && name == discord.FailStep && Interlocked.Decrement(ref discord.FailStepAfter) < 0)
-                    return Response(HttpStatusCode.Forbidden, """{"code":50013,"message":"Missing Permissions"}""");
+                    return discord.FailStepAnswer is { } answer
+                        ? Response((HttpStatusCode)answer.Status, $$"""{"code":{{answer.Code}},"message":"{{DiscordText}}"}""")
+                        : Response(HttpStatusCode.Forbidden, """{"code":50013,"message":"Missing Permissions"}""");
 
                 if (method == "PUT" && endpoint.EndsWith("/commands"))
                     discord.RegisteredCommands = body;
@@ -912,16 +1088,101 @@ namespace MinerBot.Tests
                 if (endpoint.Contains("/commands") || endpoint.EndsWith("/pins"))
                     return Response(HttpStatusCode.OK, "[]");
 
-                if (name == "send message" && discord.SendHold is { } hold)
-                    return HeldAsync(hold);
+                // A read of a channel's messages, by Discord.Net's endpoint for it: those after the ID given, from the history
+                if (name == "get messages" && Regex.Match(endpoint, @"^channels/(\d+)/messages\?limit=(\d+)&after=(\d+)$") is { Success: true } read)
+                {
+                    var channelId = ulong.Parse(read.Groups[1].Value);
+
+                    if (discord.Silent.ContainsKey(channelId))
+                        return HangAsync(cancelToken);
+
+                    if (discord.HistoryFailures.TryGetValue(channelId, out var failure))
+                        return failure.Status == 0
+                            ? Task.FromException<RestResponse>(NoAnswer())
+                            : Response((HttpStatusCode)failure.Status, $$"""{"code":{{failure.Code}},"message":"{{DiscordText}}"}""");
+
+                    if (discord.HistoryHangs.ContainsKey(channelId))
+                        return HangAsync(cancelToken);
+
+                    return Response(HttpStatusCode.OK, discord.history.Read(channelId, ulong.Parse(read.Groups[3].Value), int.Parse(read.Groups[2].Value)));
+                }
+
+                if (name == "send message" && Regex.Match(endpoint, @"^channels/(\d+)/messages$") is { Success: true } sent)
+                {
+                    var channelId = ulong.Parse(sent.Groups[1].Value);
+
+                    if (discord.ChannelFailures.TryGetValue(channelId, out var failure))
+                        return failure.Status == 429
+                            ? Task.FromException<RestResponse>(new RateLimitedException(null!))
+                            : Response((HttpStatusCode)failure.Status, $$"""{"code":{{failure.Code}},"message":"{{DiscordText}}"}""");
+
+                    if (discord.RateLimits.TryGetValue(channelId, out var limited) && limited > 0 && discord.RateLimits.TryUpdate(channelId, limited - 1, limited))
+                        return Response((HttpStatusCode)429, """{"message":"You are being rate limited.","retry_after":0.05,"global":false}""");
+
+                    if (discord.LateRateLimits.TryRemove(channelId, out var late))
+                        return LateRateLimitAsync(late);
+
+                    if (discord.LongRateLimits.TryRemove(channelId, out var retryAfter))
+                        return LongRateLimit(retryAfter);
+
+                    if (discord.Hangs.ContainsKey(channelId))
+                        return HangAsync(cancelToken);
+
+                    if (discord.NoConnection.ContainsKey(channelId))
+                        return Task.FromException<RestResponse>(new HttpRequestException(HttpRequestError.ConnectionError, "No connection could be made"));
+
+                    var message = discord.MakeMessage(channelId, body);
+
+                    if (discord.BadGateways.TryGetValue(channelId, out var gateways) && gateways > 0 && discord.BadGateways.TryUpdate(channelId, gateways - 1, gateways))
+                        return Response(HttpStatusCode.BadGateway, "");
+
+                    if (discord.Unanswered.ContainsKey(channelId))
+                        return Task.FromException<RestResponse>(NoAnswer());
+
+                    if (discord.Silent.ContainsKey(channelId))
+                        return HangAsync(cancelToken);
+
+                    if (discord.SendHold is { } hold)
+                        return HeldAsync(hold, message);
+
+                    return Response(HttpStatusCode.OK, message);
+                }
 
                 return Response(HttpStatusCode.OK, MessageJson());
             }
 
-            static async Task<RestResponse> HeldAsync(Task hold)
+            static async Task<RestResponse> HeldAsync(Task hold, string message)
             {
                 await hold;
-                return await Response(HttpStatusCode.OK, MessageJson());
+                return await Response(HttpStatusCode.OK, message);
+            }
+
+            static async Task<RestResponse> HangAsync(CancellationToken cancelToken)
+            {
+                await Task.Delay(Timeout.Infinite, cancelToken);
+                throw new InvalidOperationException("A hang ends only when its token is cancelled");
+            }
+
+            // What HttpClient throws for a request its token ended before Discord answered: never a TimeoutException, which
+            // Discord.Net throws only before a try
+            static TaskCanceledException NoAnswer() => new("Discord didn't answer");
+
+            // A 429 that comes back late, its wait taking no token, as the request's own limit runs out meanwhile
+            static async Task<RestResponse> LateRateLimitAsync(TimeSpan delay)
+            {
+                await Task.Delay(delay);
+                return await Response((HttpStatusCode)429, """{"message":"You are being rate limited.","retry_after":0.05,"global":false}""");
+            }
+
+            // A 429 answered at once, its retry_after in seconds, with the headers of the channel's bucket that Discord sends
+            // with it, so Discord.Net waits for it whatever it knew of that bucket
+            static Task<RestResponse> LongRateLimit(TimeSpan retryAfter)
+            {
+                var seconds = retryAfter.TotalSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                var headers = new Dictionary<string, string> { ["X-RateLimit-Limit"] = "5", ["X-RateLimit-Remaining"] = "0" };
+
+                return Task.FromResult(new RestResponse((HttpStatusCode)429, headers,
+                    new MemoryStream(Encoding.UTF8.GetBytes($$"""{"message":"You are being rate limited.","retry_after":{{seconds}},"global":false}"""))));
             }
 
             static async Task<RestResponse> HeldLeaveAsync(Task hold)
@@ -967,6 +1228,9 @@ namespace MinerBot.Tests
 
                 if (method == "GET" && Regex.IsMatch(endpoint, @"^guilds/\d+\?with_counts=true$"))
                     return "get guild";
+
+                if (method == "GET" && Regex.IsMatch(endpoint, @"^channels/\d+/messages(\?|$)"))
+                    return "get messages";
 
                 if (endpoint.EndsWith("/messages"))
                     return "send message";

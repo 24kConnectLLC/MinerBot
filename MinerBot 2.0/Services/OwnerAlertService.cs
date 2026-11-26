@@ -33,7 +33,11 @@ namespace MinerBot_2._0.Services
 
         // For a message that holds someone's name or words, such as one about a dashboard request: the bot's history keeps
         // recordAs in its place, because Admins read it, and an event holds no name and no one's text
-        public async Task SendAsync(string message, string recordAs)
+        public Task SendAsync(string message, string recordAs) => SendAsync(message, recordAs, () => { });
+
+        // For a caller that must know whether the message's own request was made: beforeMessage runs just before it, once the
+        // recipient is known and the direct channel open, so a failure before then sent nothing
+        public async Task SendAsync(string message, string recordAs, Action beforeMessage)
         {
             try
             {
@@ -42,12 +46,14 @@ namespace MinerBot_2._0.Services
                 var recipient = await _client.GetUserAsync(await GetRecipientId());
                 var channel = await recipient.CreateDMChannelAsync();
 
+                beforeMessage();
                 await channel.SendMessageAsync(message, allowedMentions: AllowedMentions.None);
             }
             catch (Exception e)
             {
-                // The caller reports it as well
-                _recorder.Record(BotEvents.AlertFailed, $"{e.GetType().Name}: {Start(recordAs)}");
+                // The caller reports it as well. Discord's numbers, such as 50007 for a user who takes no direct messages
+                // from the bot, never its words.
+                _recorder.Record(BotEvents.AlertFailed, $"{FailureLog.Describe(e)}: {Start(recordAs)}");
                 throw;
             }
 
